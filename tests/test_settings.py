@@ -130,13 +130,13 @@ class PersistenceTests(unittest.TestCase):
                 self.app.client_and_courses(Mock(return_value=client))
         self.assertIsNone(self.store.session("mooc"))
 
-    def test_settings_can_forget_credentials_independently(self):
+    def test_settings_logout_keeps_model_and_other_platform_credentials(self):
         self.store.save_ai(self.config)
         self.store.save_session("mooc", Mock(access_token="m"))
         self.store.save_session("zyk", Mock(access_token="z"))
-        with patch.object(self.ui, "settings_menu", side_effect=[2, 3, 0]):
+        with patch.object(self.ui, "settings_menu", side_effect=[3, 0]):
             self.app.manage_settings()
-        self.assertIsNone(self.store.ai_config())
+        self.assertEqual(self.store.ai_config(), self.config)
         self.assertIsNone(self.store.session("mooc"))
         self.assertIsNotNone(self.store.session("zyk"))
 

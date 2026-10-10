@@ -49,7 +49,7 @@ class CourseSelectionTests(unittest.TestCase):
              patch('app.AIMoocApi', api_class), patch('app.AIMoocHandler', handler):
             app.study(0)
         handler.assert_called_once_with(client=client, course_rows=[self.courses[1]], on_progress=view.on_progress,
-                                        max_workers=1)
+                                        max_workers=2)
 
     def test_cancel_never_starts_processing(self):
         client, handler = Mock(), Mock()

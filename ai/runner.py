@@ -11,9 +11,9 @@ from AIMoocMain.exam_api import ExamError, ExamServiceError, TaskUnavailableErro
 from AIMoocMain.export_questions import get_questions_from_paper, paper_display_name, paper_exam_id, safe_filename
 from reporting import Reporter, log_callback
 from ai.client import AIError, AIServiceError
-from ai.concurrency import ParallelAnswers, prepared_questions
+from ai.concurrency import ParallelAnswers, prepared_items
 from base.concurrency import validate_workers
-from ai.questions import answer_record, model_question, prepare_question
+from ai.questions import answer_record, model_question
 from task_capabilities import task_availability
 
 
@@ -80,7 +80,7 @@ def write_report(path, report):
     if report.get("message"):
         lines += [report["message"], ""]
     for index, item in enumerate(report["answers"], 1):
-        lines += ["## %d. %s" % (index, item.get("title", "无法解析的题目")), ""]
+        lines += ["## %d. %s" % (item.get("question_number", index), item.get("title", "无法解析的题目")), ""]
         for opt in item.get("options", []):
             lines.append("%s. %s" % (opt["label"], opt["text"]))
         lines += ["", ("人工答案：" if item.get("source") == "manual" else "AI 答案：") + json.dumps(item.get("answer"), ensure_ascii=False),
@@ -117,9 +117,23 @@ class AnswerRunner:
         self.progress = Reporter(on_progress)
         self.reused = False
         self.manual_answer = manual_answer
+        self.service_cooldown_until = 0.0
+
+    def wait_for_ai(self, clock, delay):
+        """Keep deadlines responsive during provider cooldowns and retries."""
+        while delay > 0:
+            clock.check()
+            interval = min(delay, 0.25)
+            time.sleep(interval)
+            delay -= interval
+        clock.check()
 
     def answer_question(self, question, clock, on_retry=None):
         """Retry only AI generation, preserving the paper and completed answers."""
+        clock.check()
+        cooldown = self.service_cooldown_until - time.monotonic()
+        if cooldown > 0:
+            self.wait_for_ai(clock, cooldown)
         for attempt in range(3):
             clock.check()
             try:
@@ -127,12 +141,18 @@ class AnswerRunner:
             except AIError as exc:
                 if not exc.retryable:
                     raise
+                delay = max(attempt + 1, getattr(exc, 'retry_after', 0))
+                if isinstance(exc, AIServiceError):
+                    self.service_cooldown_until = max(self.service_cooldown_until, time.monotonic() + delay)
                 if attempt == 2:
-                    raise type(exc)("单题重试 2 次后仍失败：" + str(exc)) from None
+                    failure = type(exc)("单题重试 2 次后仍失败：" + str(exc))
+                    if hasattr(exc, 'retry_after'):
+                        failure.retry_after = exc.retry_after
+                    raise failure from None
                 self.output("本题重试 %s/2：%s" % (attempt + 1, exc))
                 if on_retry:
                     on_retry(attempt + 1)
-                time.sleep(attempt + 1)
+                self.wait_for_ai(clock, delay)
 
     def run_paper(self, course, item, category):
         availability = task_availability(item, category)
@@ -226,95 +246,103 @@ class AnswerRunner:
             report["status"] = "answering"
             write_report(path, report)
             clock = self.clock_factory(self.api, course, exam_id, task_id, remaining, self.auto_submit).start()
-            entries, identities = [], set()
+            items = prepared_items(raw_questions)
+            entries, saved_answers = {}, {}
             failures = 0
-            question_total = sum(len(raw["questionSubList"]) if isinstance(raw, dict) and
-                                 isinstance(raw.get("questionSubList"), list) and raw["questionSubList"]
-                                 else 1 for raw in raw_questions)
-            if self.max_workers > 1:
-                parallel = ParallelAnswers(self.ai, prepared_questions(raw_questions), self.max_workers, clock,
+            question_total = len(items)
+            if self.max_workers > 1 and question_total > 1:
+                parallel = ParallelAnswers(self.ai, [q for _, q, _ in items], self.max_workers, clock,
                                            allow_manual=self.manual_answer is not None)
-            for number, raw in enumerate(raw_questions):
-                children = raw.get("questionSubList") if isinstance(raw, dict) else None
-                if children is not None and not isinstance(children, list):
-                    raise ExamError("子题结构未知")
-                work = [(child, raw, i) for i, child in enumerate(children)] if children else [(raw, None, None)]
-                for value, parent, child_number in work:
-                    clock.check()
-                    stage = "第 %s 题" % (completed + 1)
-                    self.progress.questions(stage + " · 解析题目", completed, question_total)
-                    item_report = {"title": str(value.get("title", "")) if isinstance(value, dict) else "无法解析的题目"}
-                    q = None
-                    try:
-                        prepared = prepare_question(value, number, parent, child_number)
-                        identity = (prepared["paper_id"], prepared["paper_sub_id"])
-                        if identity in identities:
-                            raise ValueError("试卷包含重复试题 ID")
-                        identities.add(identity)
-                        q = prepared
-                        item_report.update(title=q["title"], options=model_question(q)["options"])
-                        self.progress.detail(report["paper"])
-                        self.progress.questions(stage + " · AI 生成", completed, question_total)
-                        self.output("AI 作答 %s / %s：%s" % (completed + 1, question_total, q["title"][:70]))
-                        if parallel is not None:
-                            answer = parallel.answer(completed)
-                        else:
-                            answer = self.answer_question(model_question(q), clock,
-                                on_retry=lambda retry: self.progress.questions(
-                                    stage + " · 重试 %s/2" % retry, completed, question_total))
-                        self.progress.questions(stage + " · 校验答案", completed, question_total)
-                        item_report.update(answer)
-                        if (answer.get("source") != "manual" and
-                                (not isinstance(answer.get("confidence"), (int, float)) or
-                                 isinstance(answer["confidence"], bool) or not math.isfinite(answer["confidence"]) or
-                                 not self.min_confidence <= answer["confidence"] <= 1)):
-                            raise ValueError("置信度低于设置阈值，需要人工检查")
-                        entry = answer_record(q, answer["answer"])
-                        entries.append(entry)
-                        item_report["record"] = entry
-                    except (ValueError, TypeError, AIError) as exc:
-                        item_report["error"] = str(exc)
-                        if isinstance(exc, AIServiceError) and not (exc.retryable and self.manual_answer is not None):
-                            report["answers"].append(item_report)
-                            report.update(status="ai_error", message=str(exc))
+                parallel.cooldown_until = self.service_cooldown_until
+            self.progress.questions("AI 生成 · 等待答案", 0, question_total)
+            results = parallel.answers() if parallel is not None else ((i, None) for i in range(len(items)))
+
+            def save_answer(position, item_report):
+                saved_answers[position] = item_report
+                report["answers"] = [saved_answers[i] for i in sorted(saved_answers)]
+
+            for position, generated in results:
+                value, prepared, preparation_error = items[position]
+                clock.check()
+                stage = "第 %s 题" % (position + 1)
+                self.progress.questions(stage + " · 解析题目", completed, question_total)
+                item_report = {"title": str(value.get("title", "")) if isinstance(value, dict) else "无法解析的题目"}
+                item_report["question_number"] = position + 1
+                q = None
+                try:
+                    if preparation_error is not None:
+                        raise preparation_error
+                    q = prepared
+                    item_report.update(title=q["title"], options=model_question(q)["options"])
+                    self.progress.detail(report["paper"])
+                    self.progress.questions(stage + " · AI 生成", completed, question_total)
+                    self.output("AI 作答 %s / %s：%s" % (position + 1, question_total, q["title"][:70]))
+                    if parallel is not None:
+                        if isinstance(generated, BaseException):
+                            raise generated
+                        answer = generated
+                    else:
+                        answer = self.answer_question(model_question(q), clock,
+                            on_retry=lambda retry: self.progress.questions(
+                                stage + " · 重试 %s/2" % retry, completed, question_total))
+                    self.progress.questions(stage + " · 校验答案", completed, question_total)
+                    item_report.update(answer)
+                    if (answer.get("source") != "manual" and
+                            (not isinstance(answer.get("confidence"), (int, float)) or
+                             isinstance(answer["confidence"], bool) or not math.isfinite(answer["confidence"]) or
+                             not self.min_confidence <= answer["confidence"] <= 1)):
+                        raise ValueError("置信度低于设置阈值，需要人工检查")
+                    entry = answer_record(q, answer["answer"])
+                    entries[position] = entry
+                    item_report["record"] = entry
+                except (ValueError, TypeError, AIError) as exc:
+                    item_report["error"] = str(exc)
+                    if parallel is not None and q is not None and self.manual_answer is not None:
+                        save_answer(position, item_report)
+                        write_report(path, report)
+                        self.progress.questions(stage + " · 等待在途请求结束后补答", completed, question_total)
+                        parallel.drain()
+                    if isinstance(exc, AIServiceError) and not (exc.retryable and self.manual_answer is not None):
+                        save_answer(position, item_report)
+                        report.update(status="ai_error", message=str(exc))
+                        return report
+                    if parallel is not None and parallel.fatal_error is not None:
+                        save_answer(position, item_report)
+                        report.update(status="ai_error", message=str(parallel.fatal_error))
+                        return report
+                    if q is not None and self.manual_answer is not None:
+                        # Persist before waiting for input, including EOF or Ctrl+C.
+                        item_report["pending_manual"] = True
+                        save_answer(position, item_report)
+                        report.update(status="paused", message="报告已保存；重新开始时全部由 AI 作答")
+                        write_report(path, report)
+                        clock.check()
+                        self.progress.questions(stage + " · 人工补答", completed, question_total)
+                        manual = self.manual_answer(q, str(exc))
+                        if manual is None:
                             return report
-                        if parallel is not None and parallel.fatal_error is not None:
-                            report["answers"].append(item_report)
-                            report.update(status="ai_error", message=str(parallel.fatal_error))
+                        try:
+                            entry = answer_record(q, manual)
+                        except (ValueError, TypeError) as invalid:
+                            item_report["error"] = str(invalid)
                             return report
-                        if q is not None and self.manual_answer is not None:
-                            # Persist before waiting for input, including EOF or Ctrl+C.
-                            item_report["pending_manual"] = True
-                            report["answers"].append(item_report)
-                            report.update(status="paused", message="报告已保存；重新开始时全部由 AI 作答")
-                            write_report(path, report)
-                            clock.check()
-                            self.progress.questions(stage + " · 人工补答", completed, question_total)
-                            manual = self.manual_answer(q, str(exc))
-                            if manual is None:
-                                return report
-                            try:
-                                entry = answer_record(q, manual)
-                            except (ValueError, TypeError) as invalid:
-                                item_report["error"] = str(invalid)
-                                return report
-                            item_report.update(answer=manual, confidence=None, explanation="人工补答",
-                                               source="manual", record=entry)
-                            item_report.pop("error", None)
-                            item_report.pop("pending_manual", None)
-                            entries.append(entry)
-                            report.update(status="answering", message="")
-                            write_report(path, report)
-                            completed += 1
-                            self.progress.questions("已处理题目", completed, question_total)
-                            clock.check()
-                            continue
-                        failures += 1
-                    report["answers"].append(item_report)
-                    write_report(path, report)
-                    completed += 1
-                    self.progress.questions("已处理题目", completed, question_total)
-                    clock.check()
+                        item_report.update(answer=manual, confidence=None, explanation="人工补答",
+                                           source="manual", record=entry)
+                        item_report.pop("error", None)
+                        item_report.pop("pending_manual", None)
+                        entries[position] = entry
+                        report.update(status="answering", message="")
+                        write_report(path, report)
+                        completed += 1
+                        self.progress.questions("已处理题目", completed, question_total)
+                        clock.check()
+                        continue
+                    failures += 1
+                save_answer(position, item_report)
+                write_report(path, report)
+                completed += 1
+                self.progress.questions("已处理题目", completed, question_total)
+                clock.check()
             clock.stop()
             clock.check()
             if failures or not entries:
@@ -335,7 +363,7 @@ class AnswerRunner:
                     "courseId": course["courseId"], "courseInfoId": course.get("id") or course.get("courseInfoId"),
                     "examId": exam_id, "examName": paper.get("name") or report["paper"],
                     "device": 1, "categoryId": category, "examTime": clock.elapsed,
-                    "groupId": 0, "isLast": True, "id": task_id, "taskExamProblemRecordList": entries,
+                    "groupId": 0, "isLast": True, "id": task_id, "taskExamProblemRecordList": [entries[i] for i in sorted(entries)],
                 }
                 # Persist before the irreversible request, including on Ctrl-C or process exit.
                 report["status"] = "submitting"
@@ -359,6 +387,7 @@ class AnswerRunner:
         finally:
             if parallel is not None:
                 parallel.close()
+                self.service_cooldown_until = max(self.service_cooldown_until, parallel.cooldown_until)
             if clock:
                 clock.stop()
             # A deadline crossed during history lookup must not erase an old

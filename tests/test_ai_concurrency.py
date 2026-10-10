@@ -118,7 +118,7 @@ class AIConcurrencyTests(unittest.TestCase):
         self.assertEqual([(e['paperId'], e.get('paperSubId'), e['questionNo'], e['answer']) for e in entries],
                          [('parent', '0', '[0, 0]', '0'), ('parent', '1', '[0, 1]', '3'), ('2', None, 1, '3')])
 
-    def test_manual_abort_stops_window_and_late_results_cannot_submit(self):
+    def test_manual_abort_stops_dispatch_and_late_results_cannot_submit(self):
         second = threading.Event()
         def handle(q):
             if q['title'] == '题0':
@@ -127,13 +127,16 @@ class AIConcurrencyTests(unittest.TestCase):
             second.set()
             return response()
         transport = Transport(handle)
+        calls_at_manual = []
         def manual(q, error):
             self.assertEqual(threading.get_ident(), self.owner)
-            self.assertEqual(len(transport.calls), 2)
+            self.assertEqual(transport.active, 0)
+            calls_at_manual.extend(transport.calls)
             return None
         report = self.run_paper(transport, manual=manual)
         self.assertEqual(report['status'], 'paused')
-        self.assertEqual(Counter(transport.calls), Counter(['题0', '题1']))
+        self.assertEqual(transport.calls, calls_at_manual)
+        self.assertTrue({'题0', '题1'}.issubset(transport.calls))
         self.assertFalse(self.api.submit.called)
         saved = json.loads(next(Path(self.temp.name).rglob('*.json')).read_text())
         self.assertEqual(saved['status'], 'paused')
@@ -152,7 +155,8 @@ class AIConcurrencyTests(unittest.TestCase):
         self.assertEqual(report['status'], 'ai_error')
         self.assertEqual(Counter(transport.calls), Counter(['题0', '题1']))
         self.assertFalse(self.api.submit.called)
-        self.assertIn('401', report['answers'][1]['error'])
+        failed_answer = next(row for row in report['answers'] if row['title'] == '题1')
+        self.assertIn('401', failed_answer['error'])
 
     def test_expired_attempt_stops_dispatch_and_submission(self):
         expired = threading.Event()
@@ -306,3 +310,24 @@ class AIConcurrencyTests(unittest.TestCase):
             with self.subTest(workers=workers), self.assertRaises(ValueError):
                 AnswerRunner(self.api, self.ai, max_workers=workers)
         self.assertFalse(self.api.paper.called)
+
+    def test_fast_answer_is_saved_and_replacement_starts_while_first_is_slow(self):
+        self.api.paper.return_value['questions'] = [self.q(i) for i in range(3)]
+        replacement_started = threading.Event()
+        saved_before_replacement = []
+        def handle(q):
+            if q['title'] == '题0':
+                self.assertTrue(replacement_started.wait(2), 'slow first question blocked the queue')
+            if q['title'] == '题2':
+                reports = list(Path(self.temp.name).rglob('*.json'))
+                saved_before_replacement.extend(json.loads(reports[0].read_text())['answers'])
+                replacement_started.set()
+            return response()
+        transport = Transport(handle)
+        report = self.run_paper(transport)
+        self.assertEqual(report['status'], 'submitted')
+        self.assertEqual([a['title'] for a in saved_before_replacement], ['题1'])
+        self.assertEqual(saved_before_replacement[0]['question_number'], 2)
+        self.assertEqual([a['title'] for a in report['answers']], ['题0', '题1', '题2'])
+        self.assertEqual(transport.peak, 2)
+        self.assertIn(1, [event.completed for _, event in self.events if event.kind == 'questions'])

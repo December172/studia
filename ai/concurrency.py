@@ -1,4 +1,4 @@
-"""Bounded, ordered AI generation; only the caller touches paper state."""
+"""Bounded AI generation delivered as completed; the caller owns paper state."""
 from concurrent.futures import CancelledError, FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import replace
 import threading
@@ -8,9 +8,9 @@ from ai.client import AIClient, AIError, AIServiceError
 from ai.questions import model_question, prepare_question
 
 
-def prepared_questions(raw_questions):
+def prepared_items(raw_questions):
     """Prepare identities before dispatch, retaining invalid rows in paper order."""
-    questions, identities = [], set()
+    items, identities = [], set()
     for number, raw in enumerate(raw_questions):
         children = raw.get('questionSubList') if isinstance(raw, dict) else None
         if children is not None and not isinstance(children, list):
@@ -23,18 +23,21 @@ def prepared_questions(raw_questions):
                 if identity in identities:
                     raise ValueError('试卷包含重复试题 ID')
                 identities.add(identity)
-                questions.append(q)
-            except (ValueError, TypeError):
-                questions.append(None)
-    return questions
+                items.append((value, q, None))
+            except (ValueError, TypeError) as error:
+                items.append((value, None, error))
+    return items
+
+
+def prepared_questions(raw_questions):
+    return [q for _, q, _ in prepared_items(raw_questions)]
 
 
 class ParallelAnswers:
-    """Keep at most one window outstanding, including unconsumed results.
+    """Bound pending requests and buffered answers together.
 
-    A new window starts only after the coordinator has validated and handled the
-    previous one. This also prevents background dispatch during manual input.
-    Each generation owns its session; retries share a cancellable service cooldown.
+    Refill only when the caller resumes iteration after handling an answer.
+    Manual input drains in-flight requests without dispatching replacements.
     """
     def __init__(self, ai, questions, max_workers, clock, allow_manual=False):
         self.config = replace(ai.config)
@@ -86,39 +89,57 @@ class ParallelAnswers:
         finally:
             client.session.close()
 
-    def answer(self, index):
-        if index >= self.next_index:
+    def _collect(self, done):
+        for future in done:
+            position = self.futures.pop(future)
+            try:
+                self.results[position] = future.result()
+            except AIError as exc:
+                self.results[position] = exc
+                if isinstance(exc, AIServiceError) and not (exc.retryable and self.allow_manual):
+                    self.fatal_error = exc
+                    self.stopped.set()
+                    for pending in self.futures:
+                        pending.cancel()
+            except CancelledError:
+                self.results[position] = AIServiceError('AI 服务失败，本题已停止：' + str(self.fatal_error))
+
+    def drain(self):
+        """Finish existing requests before manual input, without filling slots."""
+        while self.futures:
             self.clock.check()
-            stop = min(index + self.max_workers, len(self.questions))
-            for position in range(index, stop):
-                self.clock.check()
-                if self.questions[position] is not None:
-                    future = self.executor.submit(self._generate, self.questions[position])
-                    self.futures[future] = position
-            self.next_index = stop
-            # Collect this window before returning ordered answers. Workers never
-            # call progress, manual input, report writers or the platform API.
-            while self.futures:
-                self.clock.check()
+            done, _ = wait(self.futures, timeout=0.05, return_when=FIRST_COMPLETED)
+            self._collect(done)
+
+    def answers(self):
+        """Yield (original position, answer or error) as results become ready."""
+        while self.next_index < len(self.questions) or self.futures or self.results:
+            self.clock.check()
+            self._collect([future for future in self.futures if future.done()])
+            # Handle buffered results before starting anything else: a result
+            # may need manual input or stop this paper entirely.
+            if not self.results and not self.stopped.is_set():
+                while (self.next_index < len(self.questions) and
+                       len(self.futures) + len(self.results) < self.max_workers):
+                    self.clock.check()
+                    position = self.next_index
+                    self.next_index += 1
+                    q = self.questions[position]
+                    if q is None:
+                        self.results[position] = None
+                        break
+                    self.futures[self.executor.submit(self._generate, q)] = position
+            if not self.results and self.futures:
                 done, _ = wait(self.futures, timeout=0.05, return_when=FIRST_COMPLETED)
-                for future in done:
-                    position = self.futures.pop(future)
-                    try:
-                        self.results[position] = future.result()
-                    except AIError as exc:
-                        self.results[position] = exc
-                        if isinstance(exc, AIServiceError) and not (exc.retryable and self.allow_manual):
-                            self.fatal_error = exc
-                            self.stopped.set()
-                            for pending in self.futures:
-                                pending.cancel()
-                    except CancelledError:
-                        self.results[position] = AIServiceError(
-                            'AI 服务失败，本题已停止：' + str(self.fatal_error))
-        result = self.results.pop(index)
-        if isinstance(result, BaseException):
-            raise result
-        return result
+                self._collect(done)
+            if self.results:
+                # A service failure must stop dispatch even if another answer
+                # happened to complete at the same time.
+                position = min(self.results, key=lambda i: (
+                    not isinstance(self.results[i], AIServiceError), i))
+                yield position, self.results.pop(position)
+            elif self.stopped.is_set():
+                return
 
     def close(self):
         self.stopped.set()

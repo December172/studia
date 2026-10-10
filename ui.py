@@ -1000,28 +1000,11 @@ class TerminalUI:
     def settings_menu(self, path, ai_status="已配置 · 未测试", *, message=""):
         return self.choice("本机设置", [
             (1, "模型配置", "添加、编辑、切换 · " + ai_status),
-            (5, "测试 AI 连接", "发送一条短测试消息，验证 Key、模型和接口"),
-            (6, "并发设置", "AI 答题 / 自动学习 · 默认 1，上限 8"),
+            (2, "测试 AI 连接", "发送一条短测试消息，验证 Key、模型和接口"),
             (3, "退出 MOOC 登录", "当前平台退出后立即重新登录，可切换账号"),
             (4, "退出资源库登录", "不影响 MOOC 登录"),
             (0, "返回", "回到功能选择"),
         ], default=0, help_text=f"配置含凭证，请勿分享：{path}", message=message)
-
-    def concurrency_settings(self, current):
-        from base.concurrency import DEFAULT_WORKERS, MAX_WORKERS, validate_workers
-        self.table("并发设置", ["功能", "当前并发"], [
-            ("AI 答题", str(current["ai"])), ("自动学习", str(current["study"]))],
-            f"{DEFAULT_WORKERS} 为顺序执行，最多 {MAX_WORKERS} · 两项填写完成后保存 · Esc 取消")
-        values = {}
-        for key, label in (("ai", "AI 答题"), ("study", "自动学习")):
-            while True:
-                raw = self.ask(f"{label}并发数（{DEFAULT_WORKERS}–{MAX_WORKERS}）", str(current[key]))
-                try:
-                    values[key] = validate_workers(int(raw))
-                    break
-                except (ValueError, TypeError):
-                    self.note(f"请输入 {DEFAULT_WORKERS}–{MAX_WORKERS} 的整数。", "warning")
-        return values
 
     def plan(self, name, courses, options=None):
         self.note(f"准备开始：{name} · {len(courses)} 门课程", "accent")

@@ -75,7 +75,7 @@ class QuestionRetryTests(unittest.TestCase):
         report = self.run_paper()
         self.assertEqual(report["status"], "ai_error")
         self.assertEqual(self.session.post.call_count, 3)
-        self.assertEqual([call.args[0] for call in self.sleep.call_args_list], [1, 2])
+        self.assertEqual(sum(call.args[0] for call in self.sleep.call_args_list), 3)
         self.assertEqual(len(report["answers"]), 1)
         self.api.submit.assert_not_called()
 
@@ -118,6 +118,58 @@ class QuestionRetryTests(unittest.TestCase):
         self.assertEqual(self.run_paper(lambda *args: clock)["status"], "error")
         self.assertEqual(self.session.post.call_count, 1)
         self.api.submit.assert_not_called()
+
+    def test_serial_retry_respects_provider_retry_after(self):
+        self.api.paper.return_value['questions'] = [question()]
+        limited = response(429)
+        limited.headers = {'Retry-After': '5'}
+        self.session.post.side_effect = [limited, response()]
+        self.assertEqual(self.run_paper()['status'], 'submitted')
+        self.assertEqual(sum(call.args[0] for call in self.sleep.call_args_list), 5)
+
+    def test_manual_recovery_does_not_bypass_final_service_cooldown(self):
+        self.api.paper.return_value['questions'] = [question(qid='first'), question(qid='next')]
+        now, started = [100.0], []
+        replies = []
+        for delay in ('1', '2', '300'):
+            limited = response(429)
+            limited.headers = {'Retry-After': delay}
+            replies.append(limited)
+        replies.append(response())
+        def request(*args, **kwargs):
+            started.append(now[0])
+            return replies.pop(0)
+        self.session.post.side_effect = request
+        self.sleep.side_effect = lambda delay: now.__setitem__(0, now[0] + delay)
+        with patch('ai.runner.time.monotonic', side_effect=lambda: now[0]):
+            runner = AnswerRunner(self.api, self.ai, self.temp.name, clock_factory=FakeClock,
+                                  manual_answer=lambda *_: 'B')
+            report = runner.run_paper({'id': 'ci', 'courseId': 'c'}, {'id': 'exam'}, 3)
+        self.assertEqual(report['status'], 'preview')
+        self.assertEqual(started, [100, 101, 103, 403])
+
+    def test_long_retry_and_carried_cooldown_notice_deadline_promptly(self):
+        for carried in (False, True):
+            with self.subTest(carried=carried):
+                now = [0.0]
+                class Clock(FakeClock):
+                    def check(self):
+                        if now[0] >= 10:
+                            raise ExamError('时间已用尽')
+                limited = response(429)
+                limited.headers = {'Retry-After': '300'}
+                self.session.post.reset_mock(side_effect=True)
+                self.session.post.return_value = limited
+                self.sleep.side_effect = lambda delay: now.__setitem__(0, now[0] + delay)
+                runner = AnswerRunner(self.api, self.ai, self.temp.name)
+                if carried:
+                    runner.service_cooldown_until = 300
+                with patch('ai.runner.time.monotonic', side_effect=lambda: now[0]):
+                    with self.assertRaises(ExamError):
+                        runner.answer_question({'title': 'test'}, Clock())
+                self.assertLessEqual(now[0], 10.25)
+                self.assertEqual(runner.service_cooldown_until, 300)
+                self.assertEqual(self.session.post.call_count, 0 if carried else 1)
 
 
 if __name__ == "__main__":

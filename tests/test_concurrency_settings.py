@@ -66,32 +66,17 @@ class ConcurrencySettingsTests(unittest.TestCase):
             self.assertEqual(self.store.concurrency(), expected)
             self.assertEqual(self.store.path.read_bytes(), before)
 
-    def test_settings_menu_saves_and_invalid_input_is_reprompted(self):
-        # 6 opens concurrency; invalid AI values must not save or leave the editor.
-        view, output = self.view(['6', '0', '9', '1.5', '8', '2', '0'])
-        Application(view, self.store).manage_settings()
-        self.assertEqual(SettingsStore(self.temp.name).concurrency(), {'ai': 8, 'study': 2})
-        self.assertIn('并发', output.getvalue())
-
-    def test_escape_at_second_field_cancels_entire_edit(self):
-        self.store.save_concurrency(3, 4)
+    def test_settings_menu_omits_read_only_execution_rhythm(self):
+        self.store.save_concurrency(8, 8)
         before = self.store.path.read_bytes()
-        view, _ = self.view(['6', '8', '\x1b', '0'])
+        view, output = self.view(['0'])
         Application(view, self.store).manage_settings()
+        self.assertNotIn('执行节奏', output.getvalue())
+        self.assertIn('测试 AI 连接', output.getvalue())
+        self.assertNotIn('并发数（', output.getvalue())
         self.assertEqual(self.store.path.read_bytes(), before)
 
-    def test_enter_preserves_current_values_and_save_failure_keeps_previous(self):
-        self.store.save_concurrency(3, 4)
-        view, _ = self.view(['6', '', '', '0'])
-        Application(view, self.store).manage_settings()
-        self.assertEqual(self.store.concurrency(), {'ai': 3, 'study': 4})
-        view, output = self.view(['6', '8', '8', '0'])
-        with patch('settings.os.replace', side_effect=OSError('disk full')):
-            Application(view, self.store).manage_settings()
-        self.assertEqual(self.store.concurrency(), {'ai': 3, 'study': 4})
-        self.assertIn('无法保存', output.getvalue())
-
-    def test_execution_reads_settings_for_each_operation(self):
+    def test_execution_uses_two_workers_even_with_legacy_settings(self):
         self.store.save_concurrency(8, 2)
         view, _ = self.view([])
         app = Application(view, self.store)
@@ -105,7 +90,7 @@ class ConcurrencySettingsTests(unittest.TestCase):
         with patch.object(app, 'verify_ai', return_value=Mock()), patch('app.AnswerRunner') as runner:
             runner.return_value.run_paper.return_value = {'status': 'preview'}
             app.execute_ai(client, [(course, {'id': 'exam'}, 3)], Mock(), False, .8, api=Mock())
-            self.assertEqual(runner.call_args.kwargs['max_workers'], 8)
+            self.assertEqual(runner.call_args.kwargs['max_workers'], 2)
             self.store.save_concurrency(1, 1)
             app.execute_ai(client, [(course, {'id': 'exam'}, 3)], Mock(), False, .8, api=Mock())
-            self.assertEqual(runner.call_args.kwargs['max_workers'], 1)
+            self.assertEqual(runner.call_args.kwargs['max_workers'], 2)

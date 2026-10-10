@@ -1,6 +1,6 @@
 [project]
 name = "icve-ai-assistant"
-version = "4.1.1"
+version = "4.1.2"
 description = "智慧职教课程管理、题目导出与可配置 AI 答题工具"
 readme = "README.md"
 requires-python = ">=3.9"
