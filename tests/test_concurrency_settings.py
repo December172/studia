@@ -33,8 +33,8 @@ class ConcurrencySettingsTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 validate_workers(value)
 
-    def test_absent_old_settings_default_to_one_without_creating_file(self):
-        self.assertEqual(self.store.concurrency(), {'ai': 1, 'study': 1})
+    def test_absent_settings_default_to_eight_without_creating_file(self):
+        self.assertEqual(self.store.concurrency(), {'ai': 8, 'study': 8})
         self.assertFalse(self.store.path.exists())
 
     def test_restart_preserves_separate_values_and_other_settings(self):
@@ -56,11 +56,11 @@ class ConcurrencySettingsTests(unittest.TestCase):
                 self.assertEqual(self.store.path.read_bytes(), before)
 
     def test_malformed_saved_value_falls_back_per_field_without_rewrite(self):
-        for saved, expected in ((None, {'ai': 1, 'study': 1}),
-                                ([], {'ai': 1, 'study': 1}),
-                                ({'ai': 8}, {'ai': 8, 'study': 1}),
-                                ({'ai': 99, 'study': 4}, {'ai': 1, 'study': 4}),
-                                ({'ai': True, 'study': '8'}, {'ai': 1, 'study': 1})):
+        for saved, expected in ((None, {'ai': 8, 'study': 8}),
+                                ([], {'ai': 8, 'study': 8}),
+                                ({'ai': 8}, {'ai': 8, 'study': 8}),
+                                ({'ai': 99, 'study': 4}, {'ai': 8, 'study': 4}),
+                                ({'ai': True, 'study': '8'}, {'ai': 8, 'study': 8})):
             self.store.set('concurrency', saved)
             before = self.store.path.read_bytes()
             self.assertEqual(self.store.concurrency(), expected)
@@ -72,11 +72,12 @@ class ConcurrencySettingsTests(unittest.TestCase):
         view, output = self.view(['0'])
         Application(view, self.store).manage_settings()
         self.assertNotIn('执行节奏', output.getvalue())
-        self.assertIn('测试 AI 连接', output.getvalue())
+        self.assertNotIn('测试 AI 连接', output.getvalue())
+        self.assertIn('并发设置', output.getvalue())
         self.assertNotIn('并发数（', output.getvalue())
         self.assertEqual(self.store.path.read_bytes(), before)
 
-    def test_execution_uses_eight_workers_even_with_legacy_settings(self):
+    def test_execution_uses_separate_saved_worker_counts(self):
         self.store.save_concurrency(8, 2)
         view, output = self.view([])
         app = Application(view, self.store)
@@ -85,14 +86,44 @@ class ConcurrencySettingsTests(unittest.TestCase):
         with patch('app.AIMoocHandler') as mooc, patch('app.ZYKMoocHandler') as zyk:
             app.study(0, client, [course])
             app.study(1, client, [course])
-        self.assertEqual(mooc.call_args.kwargs['max_workers'], 8)
-        self.assertEqual(zyk.call_args.kwargs['max_workers'], 8)
-        self.assertIn('最多 8 项同时处理', output.getvalue())
+        self.assertEqual(mooc.call_args.kwargs['max_workers'], 2)
+        self.assertEqual(zyk.call_args.kwargs['max_workers'], 2)
+        self.assertIn('最多 2 项同时处理', output.getvalue())
         with patch.object(app, 'verify_ai', return_value=Mock()), patch('app.AnswerRunner') as runner:
             runner.return_value.run_paper.return_value = {'status': 'preview'}
             app.execute_ai(client, [(course, {'id': 'exam'}, 3)], Mock(), False, .8, api=Mock())
             self.assertEqual(runner.call_args.kwargs['max_workers'], 8)
             self.store.save_concurrency(1, 1)
             app.execute_ai(client, [(course, {'id': 'exam'}, 3)], Mock(), False, .8, api=Mock())
-            self.assertEqual(runner.call_args.kwargs['max_workers'], 8)
+            self.assertEqual(runner.call_args.kwargs['max_workers'], 1)
         self.assertIn('最多 8 题同时处理', output.getvalue())
+
+    def test_cancel_does_not_save_and_failed_save_preserves_draft(self):
+        view, _ = self.view([])
+        app = Application(view, self.store)
+        self.store.save_concurrency(8, 8)
+        with patch.object(view, 'concurrency_editor', return_value=None):
+            self.assertFalse(app.manage_concurrency())
+        self.assertEqual(self.store.concurrency(), {'ai': 8, 'study': 8})
+        draft = {'ai': 3, 'study': 5}
+        original_save = self.store.save_concurrency
+        calls = []
+        def save(ai, study):
+            calls.append((ai, study))
+            if len(calls) == 1:
+                raise SettingsError('保存失败')
+            original_save(ai, study)
+        with patch.object(view, 'concurrency_editor', side_effect=[draft, draft]) as editor, \
+             patch.object(self.store, 'save_concurrency', side_effect=save):
+            self.assertTrue(app.manage_concurrency())
+        self.assertEqual(editor.call_args.args[0], draft)
+        self.assertIn('保存失败', editor.call_args.kwargs['message'])
+        self.assertEqual(self.store.concurrency(), draft)
+
+    def test_confirmation_pages_show_their_effective_limits(self):
+        view, output = self.view(['', ''])
+        view.review_study([{'courseName': '课程'}], max_workers=3)
+        from ai.client import AIConfig
+        view.review_ai([], AIConfig('https://example.org/v1', 'model', 'key'), {}, max_workers=5)
+        self.assertIn('最多 3 项', output.getvalue())
+        self.assertIn('最多 5 题', output.getvalue())

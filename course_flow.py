@@ -75,7 +75,7 @@ class CourseWorkspace:
                 return
             try:
                 if mode == 1:
-                    self.view.review_study(courses)
+                    self.view.review_study(courses, max_workers=self.store.concurrency()['study'])
                     result = self.execute(lambda: self.app.study(self.platform, self.client, courses))
                 else:
                     result = self.tasks(courses, mode, task_state.setdefault(mode, {}))
@@ -145,7 +145,8 @@ class CourseWorkspace:
                         selected, config, answer_options,
                         check_connection=lambda: self.app.test_ai_connection(answer_options.get("config")),
                         manage_models=self.app.manage_models,
-                        connection_status=self.app.ai_status_text)
+                        connection_status=self.app.ai_status_text,
+                        max_workers=self.store.concurrency()['ai'])
                     config = answer_options["config"]
                     self.app.remember(lambda: self.store.set("confidence", threshold))
                     def answer():

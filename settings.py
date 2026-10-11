@@ -6,12 +6,26 @@ from datetime import datetime
 from dataclasses import dataclass
 import os
 import tempfile
+import threading
+from functools import wraps
 from uuid import uuid4
 from pathlib import Path
 
 from ai.client import AIConfig
 from ai.defaults import DEFAULT_PROFILE_ID, DEFAULT_PROVIDER_NAME
-from base.concurrency import DEFAULT_WORKERS, validate_workers
+from base.concurrency import INTERACTIVE_WORKERS, validate_workers
+
+
+_mutation_lock = threading.RLock()
+
+
+def _transaction(method):
+    """Serialize complete read/modify/write operations, including background tests."""
+    @wraps(method)
+    def locked(*args, **kwargs):
+        with _mutation_lock:
+            return method(*args, **kwargs)
+    return locked
 
 
 class SettingsError(RuntimeError):
@@ -57,6 +71,7 @@ class SettingsStore:
     def get(self, key, default=None):
         return self._read().get(key, default)
 
+    @_transaction
     def set(self, key, value):
         data = self._read()
         if value is None:
@@ -71,9 +86,9 @@ class SettingsStore:
         result = {}
         for key in ("ai", "study"):
             try:
-                result[key] = validate_workers(saved.get(key, DEFAULT_WORKERS))
+                result[key] = validate_workers(saved.get(key, INTERACTIVE_WORKERS))
             except ValueError:
-                result[key] = DEFAULT_WORKERS
+                result[key] = INTERACTIVE_WORKERS
         return result
 
     def save_concurrency(self, ai, study):
@@ -151,6 +166,7 @@ class SettingsStore:
     def ai_config(self):
         return next((profile.config for profile in self.ai_profiles() if profile.active), None)
 
+    @_transaction
     def ensure_default_model(self):
         """Keep one locked built-in provider, migrating the earlier editable entry."""
         from ai.defaults import default_config
@@ -181,6 +197,7 @@ class SettingsStore:
         data["default_model_added"] = True
         self._save_profiles(data, profiles)
 
+    @_transaction
     def save_ai_profile(self, config, profile_id=None):
         data = self._read()
         profiles = self._profiles(data)
@@ -202,6 +219,7 @@ class SettingsStore:
         self._save_profiles(data, profiles)
         return profile_id
 
+    @_transaction
     def activate_ai_profile(self, profile_id):
         data = self._read()
         profiles = self._profiles(data)
@@ -209,6 +227,7 @@ class SettingsStore:
         profiles["active_id"] = profile_id
         self._save_profiles(data, profiles)
 
+    @_transaction
     def delete_ai_profile(self, profile_id):
         data = self._read()
         profiles = self._profiles(data)
@@ -219,6 +238,7 @@ class SettingsStore:
             profiles["active_id"] = None
         self._save_profiles(data, profiles)
 
+    @_transaction
     def clear_ai(self):
         data = self._read()
         profiles = self._profiles(data)
@@ -227,6 +247,7 @@ class SettingsStore:
             profiles["active_id"] = None
         self._save_profiles(data, profiles)
 
+    @_transaction
     def save_ai(self, config):
         current = next((profile.id for profile in self.ai_profiles() if profile.active), None)
         return self.save_ai_profile(config, current)
@@ -246,6 +267,7 @@ class SettingsStore:
                 return health
         return {}
 
+    @_transaction
     def save_ai_health(self, config, status, message="", *, previous_config=None):
         data = self._read()
         profiles = self._profiles(data)

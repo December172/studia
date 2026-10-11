@@ -156,6 +156,15 @@ class TerminalUI:
         self.errors = []
         self.workspace = False
         self.operation_active = False
+        from terminal_runtime import TerminalScreen, RuntimeInput
+        self.screen = TerminalScreen(self.console, enabled=False)
+        self.runtime_input = RuntimeInput(enabled=self.input_fn is None)
+
+    def terminal_output(self):
+        if self.screen.active:
+            from prompt_toolkit.output.defaults import create_output
+            return self.screen.wrap_output(create_output(stdout=self.console.file))
+        return None
 
     @contextmanager
     def session(self):
@@ -167,7 +176,9 @@ class TerminalUI:
         root.addHandler(self.handler)
         token = _active_ui.set(self)
         try:
-            yield self
+            self.screen.enabled = self.input_fn is None and self.console.is_terminal and sys.stdin.isatty()
+            with self.screen:
+                yield self
         finally:
             _active_ui.reset(token)
             root.removeHandler(self.handler)
@@ -226,40 +237,56 @@ class TerminalUI:
 
     def render(self):
         with self.lock:
-            rows = list(self.lines)
-            # Exactly eight physical rows; no wrapping, even for CJK or long URLs.
+            resource_details = []
+            for task in self.progress.tasks:
+                if task.visible and task.fields.get("resources"):
+                    summary = re.search(r'(?:成功|跳过|失败) \d+.*$', task.description)
+                    parts = ([task.description[:summary.start()].rstrip(' ·'), summary.group()]
+                             if summary else [task.description])
+                    resource_details.extend(Text(part, style="muted", no_wrap=True, overflow="ellipsis")
+                                            for part in parts if part)
+            visible_tasks = sum(task.visible for task in self.progress.tasks)
+            log_rows = min(theme.LOG_LINES, max(0, self.console.height - visible_tasks - len(resource_details) - 5))
+            rows = list(self.lines)[-log_rows:] if log_rows else []
+            # Keep the entire live frame shorter than the physical viewport.
             body = Text(no_wrap=True, overflow="ellipsis")
-            for index in range(theme.LOG_LINES):
+            for index in range(log_rows):
                 if index < len(rows):
                     line, level = rows[index]
                     body.append(theme.ICONS.get(level, theme.ICONS["info"]) + " ", style=level)
                     body.append(line, style=level)
-                if index < theme.LOG_LINES - 1:
+                if index < log_rows - 1:
                     body.append("\n")
             panel = Panel(body, title=Text("运行日志 · 最近 8 行", style="muted"),
-                          box=theme.BORDER, border_style="border", height=theme.LOG_LINES + 2, padding=(0, 1))
-            resource_details = [Text(task.description, style="muted") for task in self.progress.tasks
-                                if task.visible and task.fields.get("resources")]
+                          box=theme.BORDER, border_style="border", height=log_rows + 2, padding=(0, 1))
+            if self.screen.active:
+                return Group(Text(self.heading, style="title"), self.progress, *resource_details, panel,
+                             Text("Ctrl+C 停止 · 运行中无需按回车", style="muted", no_wrap=True, overflow="ellipsis"))
             return Group(self.progress, *resource_details, panel)
 
     @contextmanager
     def activity(self, name):
         outer = self.depth == 0
         self.depth += 1
-        if outer:
-            self.progress.update(self.question_task, visible=False)
-            self.progress.update(self.resource_task, visible=False)
-            self.progress.reset(self.task, description=safe_text(name), total=None)
-            self.live = Live(console=self.console, get_renderable=self.render, transient=True,
-                             refresh_per_second=theme.REFRESH_PER_SECOND,
-                             auto_refresh=self.console.is_terminal, redirect_stdout=False, redirect_stderr=False)
-            self.live.start()
+        from contextlib import ExitStack
         try:
-            yield
+            with ExitStack() as stack:
+                if outer:
+                    stack.enter_context(self.runtime_input)
+                    if self.screen.active:
+                        self.screen.page_start()
+                    self.progress.update(self.question_task, visible=False)
+                    self.progress.update(self.resource_task, visible=False)
+                    self.progress.reset(self.task, description=safe_text(name), total=None)
+                    self.live = Live(console=self.console, get_renderable=self.render, transient=True,
+                                     refresh_per_second=theme.REFRESH_PER_SECOND, vertical_overflow='crop',
+                                     auto_refresh=self.console.is_terminal, redirect_stdout=False, redirect_stderr=False)
+                    stack.callback(self.live.stop)
+                    self.live.start()
+                yield
         finally:
             self.depth -= 1
-            if outer and self.live:
-                self.live.stop()
+            if outer:
                 self.live = None
 
     def header(self, version):
@@ -286,7 +313,7 @@ class TerminalUI:
         if self.input_fn is None and self.console.is_terminal and sys.stdin.isatty() and (not secret or self.secret_fn is None):
             rows, self._prompt_rows = self._prompt_rows, []
             above = (lambda width: [line for render in rows for line in render(width)]) if rows else None
-            value = read_terminal_line(text, secret=secret, above_prompt=above)
+            value = read_terminal_line(text, secret=secret, above_prompt=above, output=self.terminal_output())
         elif secret:
             value = (self.secret_fn or getpass.getpass)(text)
         else:
@@ -311,6 +338,8 @@ class TerminalUI:
             return value
 
         live = self.live
+        handoff = self.runtime_input.suspend()
+        handoff.__enter__()
         if live:
             live.stop()
             self.live = None
@@ -367,6 +396,7 @@ class TerminalUI:
         except (Back, Cancelled, EOFError, KeyboardInterrupt):
             return None
         finally:
+            handoff.__exit__(None, None, None)
             if live:
                 self.live = live
                 live.start()
@@ -374,7 +404,10 @@ class TerminalUI:
     def table(self, title, columns, rows, help_text=""):
         self._prompt_rows.clear()
         if self.console.is_terminal:
-            self.console.clear()
+            if self.screen.active:
+                self.screen.page_start()
+            else:
+                self.console.clear()
             self.console.print(Text(self.heading, style="title"))
         table = Table(box=theme.TABLE_BORDER, expand=True, show_edge=False, header_style="table_header")
         for i, column in enumerate(columns):
@@ -471,7 +504,7 @@ class TerminalUI:
                                  cursor=state.get("cursor", 1), refresh="r" in actions,
                                  disabled=disabled,
                                  row_hints=[safe_text(item_hint(item)) for item in items] if item_hint else (),
-                                 extra_headers=[name for name, _ in extra_columns])
+                                 extra_headers=[name for name, _ in extra_columns], output=self.terminal_output())
             state["cursor"] = result.cursor
             state["selected"] = [items[i] for i in result.indexes if i not in disabled]
             if result.action == "back":
@@ -585,9 +618,10 @@ class TerminalUI:
         self.table("课程任务", ["任务", "状态"], [("当前课程", "暂无作业、考试或测验")])
         self.ask("回车返回课程，q 退出")
 
-    def review_study(self, courses):
+    def review_study(self, courses, max_workers=8):
         self.table("自动学习", ["课程", "操作"], [(c.get("courseName", "未知课程"), "完成课程学习任务") for c in courses],
                    "回车开始 · Esc 返回 · q 退出")
+        self.note(f"学习并发：最多 {max_workers} 项，完成即补下一项")
         while self.ask("操作", "开始") != "开始":
             self.note("回车开始；Esc 返回，q 退出。")
 
@@ -655,15 +689,17 @@ class TerminalUI:
                 self.note(str(exc), "warning")
                 step = "url" if provider != 2 else "model"
 
-    def model_picker(self, rows, active_id=None, *, cursor_id=None, message="", locked_ids=()):
+    def model_picker(self, rows, active_id=None, *, cursor_id=None, message="", locked_ids=(),
+                     test_connection=None):
         from model_ui import choose_model, ModelChoice
         rows = [(row[0], *(safe_text(value) for value in row[1:])) for row in rows]
         if self.input_fn is None and self.console.is_terminal and sys.stdin.isatty():
             return choose_model(rows, active_id, cursor_id=cursor_id, message=safe_text(message),
-                                locked_ids=locked_ids)
+                                locked_ids=locked_ids, test_connection=test_connection, output=self.terminal_output())
         self.table("选择模型", ["编号", "供应商", "模型", "状态"],
                    [(str(i), ("● " if row[0] == active_id else "○ ") + row[1], row[2], row[3])
-                    for i, row in enumerate(rows, 1)], "编号 使用 · a 添加 · e 编号 编辑自定义模型 · Esc 返回")
+                    for i, row in enumerate(rows, 1)],
+                   "编号 使用 · t 编号 测试连接 · a 添加 · e 编号 编辑自定义模型 · Esc 返回")
         if message:
             self.note(message)
         while True:
@@ -673,6 +709,14 @@ class TerminalUI:
                 return ModelChoice("back")
             if value == "a":
                 return ModelChoice("add")
+            if value.startswith("t"):
+                index = value[1:].strip()
+                if index.isdigit() and 1 <= int(index) <= len(rows) and test_connection:
+                    self.note(f"测试中 · {rows[int(index) - 1][1]}")
+                    self.note(test_connection(rows[int(index) - 1][0]))
+                    continue
+                self.note("请输入要测试的模型编号，如 t 1。", "warning")
+                continue
             action, index = ("edit", value[1:].strip()) if value.startswith("e") else ("select", value)
             if index.isdigit() and 1 <= int(index) <= len(rows):
                 profile_id = rows[int(index) - 1][0]
@@ -680,12 +724,12 @@ class TerminalUI:
                     self.note("默认供应商不可修改或删除。", "warning")
                     continue
                 return ModelChoice(action, profile_id)
-            self.note("请输入模型编号，或 a 添加、e 编号编辑。", "warning")
+            self.note("请输入模型编号，或 t 编号测试、a 添加、e 编号编辑。", "warning")
 
     def model_editor(self, current=None):
         from model_ui import edit_model, draft_config, ModelEdit
         if self.input_fn is None and self.console.is_terminal and sys.stdin.isatty():
-            return edit_model(current)
+            return edit_model(current, output=self.terminal_output())
         provider_name = current.provider_name if current else ""
         url, model = (current.base_url, current.model) if current else ("", "")
         try:
@@ -855,7 +899,8 @@ class TerminalUI:
             except Back:
                 continue
 
-    def review_ai(self, selected, config, options, check_connection=None, manage_models=None, connection_status=None):
+    def review_ai(self, selected, config, options, check_connection=None, manage_models=None, connection_status=None,
+                  max_workers=8):
         options["config"] = config
         options.setdefault("auto_submit", True)
         value = options.get("threshold", .8)
@@ -867,6 +912,7 @@ class TerminalUI:
                 ("供应商", (config.provider_name or "自定义供应商") if config else "未选择"),
                 ("模型", config.model if config else "未选择"),
                 ("连接状态", connection),
+                ("答题并发", f"最多 {max_workers} 题，完成即补下一题"),
                 ("执行方式", "通过校验后自动交卷" if options["auto_submit"] else "仅生成答案（不交卷，无成绩）"),
                 ("最低置信度", str(options["threshold"])),
             ])
@@ -997,10 +1043,34 @@ class TerminalUI:
                                                   (2, "答题并自动交卷", "全部题目通过校验后提交")], default=2)
         return mode == 2, self.confidence(confidence_default)
 
-    def settings_menu(self, path, ai_status="已配置 · 未测试", *, message=""):
+    def concurrency_editor(self, current, *, message=''):
+        from concurrency_ui import edit_concurrency
+        if self.input_fn is None and self.console.is_terminal and sys.stdin.isatty():
+            return edit_concurrency(current, message=message, output=self.terminal_output())
+        draft = dict(current)
+        try:
+            while True:
+                self.table('并发设置', ['项目', '当前值'],
+                           [('AI 答题', draft['ai']), ('自动学习', draft['study'])])
+                self.note(message or '范围 1–8 · 保存后下次运行生效 · d 恢复默认 · Esc 取消')
+                ai = self.ask('AI 答题并发', draft['ai'])
+                if ai.lower() == 'd':
+                    draft = {'ai': 8, 'study': 8}
+                    continue
+                study = self.ask('自动学习并发', draft['study'])
+                if not ai.isdigit() or not study.isdigit() or not 1 <= int(ai) <= 8 or not 1 <= int(study) <= 8:
+                    message = '请输入 1–8 的整数。'
+                    continue
+                draft = {'ai': int(ai), 'study': int(study)}
+                return draft if self.confirm('保存并发设置', default=True) else None
+        except Back:
+            return None
+
+    def settings_menu(self, path, ai_status="已配置 · 未测试", *, message="", concurrency=None):
+        concurrency = concurrency or {'ai': 8, 'study': 8}
         return self.choice("本机设置", [
             (1, "模型配置", "添加、编辑、切换 · " + ai_status),
-            (2, "测试 AI 连接", "发送一条短测试消息，验证 Key、模型和接口"),
+            (2, "并发设置", f"AI 答题 {concurrency['ai']} · 自动学习 {concurrency['study']} · 可设 1–8"),
             (3, "退出 MOOC 登录", "当前平台退出后立即重新登录，可切换账号"),
             (4, "退出资源库登录", "不影响 MOOC 登录"),
             (0, "返回", "回到功能选择"),
@@ -1024,7 +1094,9 @@ def legacy_input(prompt=""):
     if live:
         live.stop()
     try:
-        return (ui.input_fn if ui and ui.input_fn else input)(prompt)
+        from contextlib import nullcontext
+        with ui.runtime_input.suspend() if ui else nullcontext():
+            return (ui.input_fn if ui and ui.input_fn else input)(prompt)
     finally:
         if live:
             live.start()
