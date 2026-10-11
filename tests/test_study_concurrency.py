@@ -123,6 +123,62 @@ class StudyConcurrencyTests(unittest.TestCase):
                     self.assertTrue(transport.clones)
                     self.assertEqual(set(transport.clone_threads), {threading.get_ident()})
 
+    def test_ninth_resource_starts_while_first_is_slow_with_eight_workers(self):
+        # Completion-driven refill: with eight slots already busy, the 9th
+        # resource must enter while the blocked first one is still running.
+        # The barrier admits only the first eight writes (the index is claimed
+        # under the lock before waiting), so the 9th is never gated by it.
+        workers = 8
+        for cls in (AIMoocHandler, ZYKMoocHandler):
+            with self.subTest(cls=cls):
+                release = threading.Event()
+
+                class RollingTransport(StudyTransport):
+                    def __init__(self):
+                        super().__init__(workers=workers, count=9)
+                        self.order = []
+                        self.active_at_ninth = []
+
+                    def write(self, client, course, source):
+                        with self.lock:
+                            self.active += 1
+                            self.maximum = max(self.maximum, self.active)
+                            index = len(self.writes)
+                            self.writes.append((course, source, id(client)))
+                            self.order.append(('start', source))
+                        try:
+                            if index < self.workers:
+                                self.barrier.wait(timeout=5)
+                            if source == '0':
+                                release.wait(timeout=5)
+                            if source == '8':
+                                self.active_at_ninth.append(self.active)
+                            return {'code': 200, 'msg': 'ok'}
+                        finally:
+                            with self.lock:
+                                self.active -= 1
+                                self.order.append(('end', source))
+                            if source == '8':
+                                release.set()
+
+                transport = RollingTransport()
+                _, events = self.run_study(cls, transport, workers)
+                self.assertEqual(transport.maximum, workers)
+                self.assertEqual(len(transport.writes), 9)
+                self.assertCountEqual([w[1] for w in transport.writes], [str(i) for i in range(9)])
+                self.assertLess(transport.order.index(('start', '8')),
+                                transport.order.index(('end', '0')))
+                # The blocked first resource still holds a slot when the 9th
+                # starts, and the pool never exceeds its eight-worker bound.
+                self.assertEqual(len(transport.active_at_ninth), 1)
+                self.assertTrue(2 <= transport.active_at_ninth[0] <= workers,
+                                f'expected 2..{workers} active, got {transport.active_at_ninth}')
+                self.assertEqual([e.status for e in events if e.kind == 'result'], ['success'])
+                progress = [e.completed for e in events if e.kind == 'resources']
+                self.assertEqual(progress, sorted(progress))
+                self.assertEqual(progress[-1], 9)
+                self.assertCountEqual(transport.closed, transport.clones)
+
     def test_default_worker_preserves_resource_order(self):
         for cls in (AIMoocHandler, ZYKMoocHandler):
             transport = StudyTransport(count=4)

@@ -187,7 +187,7 @@ class Application:
             self.view.cancelled = True
             return
         self.view.plan("学习管理", selected)
-        self.view.note("自动学习：最多 2 项同时处理，完成即更新进度")
+        self.view.note(f"自动学习：最多 {max_workers} 项同时处理，完成即更新进度")
         with self.view.activity("处理课程"):
             handler(client=client, course_rows=selected, on_progress=self.view.on_progress,
                     max_workers=max_workers)
@@ -268,7 +268,7 @@ class Application:
         # Verify with synthetic material before paper() can start an attempt.
         runner = None
         results = []
-        self.view.note("AI 答题：最多 2 题同时处理，完成即保存并更新进度")
+        self.view.note(f"AI 答题：最多 {max_workers} 题同时处理，完成即保存并更新进度")
         with self.view.activity("AI 答题"):
             self.progress.begin("AI 答题", len(selected), "份试卷")
             for course, item, category in selected:

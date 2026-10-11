@@ -76,21 +76,23 @@ class ConcurrencySettingsTests(unittest.TestCase):
         self.assertNotIn('并发数（', output.getvalue())
         self.assertEqual(self.store.path.read_bytes(), before)
 
-    def test_execution_uses_two_workers_even_with_legacy_settings(self):
+    def test_execution_uses_eight_workers_even_with_legacy_settings(self):
         self.store.save_concurrency(8, 2)
-        view, _ = self.view([])
+        view, output = self.view([])
         app = Application(view, self.store)
         course = {'id': 'ci', 'courseId': 'c', 'courseName': 'course'}
         client = Mock()
         with patch('app.AIMoocHandler') as mooc, patch('app.ZYKMoocHandler') as zyk:
             app.study(0, client, [course])
             app.study(1, client, [course])
-        self.assertEqual(mooc.call_args.kwargs['max_workers'], 2)
-        self.assertEqual(zyk.call_args.kwargs['max_workers'], 2)
+        self.assertEqual(mooc.call_args.kwargs['max_workers'], 8)
+        self.assertEqual(zyk.call_args.kwargs['max_workers'], 8)
+        self.assertIn('最多 8 项同时处理', output.getvalue())
         with patch.object(app, 'verify_ai', return_value=Mock()), patch('app.AnswerRunner') as runner:
             runner.return_value.run_paper.return_value = {'status': 'preview'}
             app.execute_ai(client, [(course, {'id': 'exam'}, 3)], Mock(), False, .8, api=Mock())
-            self.assertEqual(runner.call_args.kwargs['max_workers'], 2)
+            self.assertEqual(runner.call_args.kwargs['max_workers'], 8)
             self.store.save_concurrency(1, 1)
             app.execute_ai(client, [(course, {'id': 'exam'}, 3)], Mock(), False, .8, api=Mock())
-            self.assertEqual(runner.call_args.kwargs['max_workers'], 2)
+            self.assertEqual(runner.call_args.kwargs['max_workers'], 8)
+        self.assertIn('最多 8 题同时处理', output.getvalue())
