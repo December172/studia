@@ -91,12 +91,13 @@ class ConcurrencySettingsTests(unittest.TestCase):
         self.assertIn('最多 2 项同时处理', output.getvalue())
         with patch.object(app, 'verify_ai', return_value=Mock()), patch('app.AnswerRunner') as runner:
             runner.return_value.run_paper.return_value = {'status': 'preview'}
-            app.execute_ai(client, [(course, {'id': 'exam'}, 3)], Mock(), False, .8, api=Mock())
+            app.execute_ai(client, [(course, {'id': 'exam'}, 3)], Mock(), False, api=Mock())
             self.assertEqual(runner.call_args.kwargs['max_workers'], 8)
             self.store.save_concurrency(1, 1)
-            app.execute_ai(client, [(course, {'id': 'exam'}, 3)], Mock(), False, .8, api=Mock())
+            app.execute_ai(client, [(course, {'id': 'exam'}, 3)], Mock(), False, api=Mock())
             self.assertEqual(runner.call_args.kwargs['max_workers'], 1)
-        self.assertIn('最多 8 题同时处理', output.getvalue())
+        # The AI pipeline applies the saved count without explaining it at runtime.
+        self.assertNotIn('题同时处理', output.getvalue())
 
     def test_cancel_does_not_save_and_failed_save_preserves_draft(self):
         view, _ = self.view([])
@@ -120,10 +121,12 @@ class ConcurrencySettingsTests(unittest.TestCase):
         self.assertIn('保存失败', editor.call_args.kwargs['message'])
         self.assertEqual(self.store.concurrency(), draft)
 
-    def test_confirmation_pages_show_their_effective_limits(self):
+    def test_confirmation_pages_state_execution_without_worker_internals(self):
         view, output = self.view(['', ''])
         view.review_study([{'courseName': '课程'}], max_workers=3)
         from ai.client import AIConfig
-        view.review_ai([], AIConfig('https://example.org/v1', 'model', 'key'), {}, max_workers=5)
-        self.assertIn('最多 3 项', output.getvalue())
-        self.assertIn('最多 5 题', output.getvalue())
+        view.review_ai([], AIConfig('https://example.org/v1', 'model', 'key'), {})
+        rendered = output.getvalue()
+        self.assertIn('完成课程学习任务', rendered)
+        self.assertIn('通过校验后自动交卷', rendered)
+        self.assertNotIn('同时处理', rendered)

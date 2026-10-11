@@ -65,9 +65,9 @@ class AIConcurrencyTests(unittest.TestCase):
     def q(i):
         return dict(question(qid=str(i)), title=f'题{i}')
 
-    def run_paper(self, transport, workers=2, manual=None, clock=FakeClock):
+    def run_paper(self, transport, workers=2, clock=FakeClock):
         runner = AnswerRunner(self.api, self.ai, self.temp.name, auto_submit=True,
-                              clock_factory=clock, max_workers=workers, manual_answer=manual,
+                              clock_factory=clock, max_workers=workers,
                               on_progress=lambda event: self.events.append((threading.get_ident(), event)))
         def save(path, report):
             self.assertEqual(threading.get_ident(), self.owner)
@@ -118,7 +118,7 @@ class AIConcurrencyTests(unittest.TestCase):
         self.assertEqual([(e['paperId'], e.get('paperSubId'), e['questionNo'], e['answer']) for e in entries],
                          [('parent', '0', '[0, 0]', '0'), ('parent', '1', '[0, 1]', '3'), ('2', None, 1, '3')])
 
-    def test_manual_abort_stops_dispatch_and_late_results_cannot_submit(self):
+    def test_low_confidence_answers_are_trusted_and_submitted_once(self):
         second = threading.Event()
         def handle(q):
             if q['title'] == '题0':
@@ -127,20 +127,15 @@ class AIConcurrencyTests(unittest.TestCase):
             second.set()
             return response()
         transport = Transport(handle)
-        calls_at_manual = []
-        def manual(q, error):
-            self.assertEqual(threading.get_ident(), self.owner)
-            self.assertEqual(transport.active, 0)
-            calls_at_manual.extend(transport.calls)
-            return None
-        report = self.run_paper(transport, manual=manual)
-        self.assertEqual(report['status'], 'paused')
-        self.assertEqual(transport.calls, calls_at_manual)
-        self.assertTrue({'题0', '题1'}.issubset(transport.calls))
-        self.assertFalse(self.api.submit.called)
-        saved = json.loads(next(Path(self.temp.name).rglob('*.json')).read_text())
-        self.assertEqual(saved['status'], 'paused')
+        report = self.run_paper(transport)
+        self.assertEqual(report['status'], 'submitted')
+        self.assertEqual(report['answers'][0]['confidence'], 0.1)
+        self.assertEqual(Counter(transport.calls), Counter(f'题{i}' for i in range(12)))
+        self.assertEqual(len(self.api.submit.call_args.args[0]['taskExamProblemRecordList']), 12)
+        self.assertEqual(self.api.submit.call_count, 1)
         self.assertTrue(all(s.closed for s, *_ in transport.sessions))
+        saved = json.loads(next(Path(self.temp.name).rglob('*.json')).read_text())
+        self.assertEqual(saved['status'], 'submitted')
 
     def test_fatal_out_of_order_failure_stops_dispatch(self):
         failed = threading.Event()
@@ -241,7 +236,7 @@ class AIConcurrencyTests(unittest.TestCase):
         self.assertEqual(Counter(transport.calls), Counter(['题0', '题1']))
         self.assertFalse(self.api.submit.called)
 
-    def test_fatal_auth_failure_cancels_other_question_retry_before_manual(self):
+    def test_fatal_auth_failure_stops_other_question_retry_and_submission(self):
         first = threading.Event()
         def handle(q):
             if q['title'] == '题0':
@@ -250,11 +245,9 @@ class AIConcurrencyTests(unittest.TestCase):
             self.assertTrue(first.wait(3))
             return response(401)
         transport = Transport(handle)
-        manual = Mock(return_value='B')
-        report = self.run_paper(transport, manual=manual)
+        report = self.run_paper(transport)
         self.assertEqual(report['status'], 'ai_error')
         self.assertEqual(Counter(transport.calls), Counter(['题0', '题1']))
-        self.assertFalse(manual.called)
         self.assertFalse(self.api.submit.called)
         self.assertTrue(all(s.closed for s, *_ in transport.sessions))
 
@@ -315,7 +308,7 @@ class AIConcurrencyTests(unittest.TestCase):
                     return False
                 transport = Transport(handle)
                 questions = prepared_questions([self.q(0), self.q(1)])
-                pool = ParallelAnswers(self.ai, questions, 2, Mock(), allow_manual=True)
+                pool = ParallelAnswers(self.ai, questions, 2, Mock())
                 try:
                     with patch('ai.client.requests.Session', side_effect=transport.session), \
                             patch('ai.concurrency.time.monotonic', side_effect=lambda: now[0]), \
@@ -330,21 +323,17 @@ class AIConcurrencyTests(unittest.TestCase):
                 finally:
                     pool.close()
 
-    def test_manual_recovery_preserves_later_answers_and_resumes_dispatch(self):
+    def test_low_confidence_answer_does_not_repeat_other_questions(self):
         self.api.paper.return_value['questions'] = [self.q(i) for i in range(4)]
         def handle(q):
             if q['title'] == '题0':
                 return response(content='{"answer":"A","confidence":0.1,"explanation":"unsure"}')
             return response()
         transport = Transport(handle)
-        def manual(q, error):
-            self.assertEqual(threading.get_ident(), self.owner)
-            self.assertEqual(Counter(transport.calls), Counter(['题0', '题1']))
-            return 'B'
-        report = self.run_paper(transport, manual=manual)
+        report = self.run_paper(transport)
         self.assertEqual(report['status'], 'submitted')
         self.assertEqual(Counter(transport.calls), Counter(['题0', '题1', '题2', '题3']))
-        self.assertEqual([row['record']['answer'] for row in report['answers']], ['0', '3', '3', '3'])
+        self.assertEqual([row['record']['answer'] for row in report['answers']], ['3', '3', '3', '3'])
         self.assertEqual(self.api.submit.call_count, 1)
 
     def test_invalid_worker_settings_fail_before_any_platform_request(self):

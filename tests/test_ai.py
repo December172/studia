@@ -213,15 +213,21 @@ class WorkflowTests(unittest.TestCase):
         self.api.submit.assert_not_called()
         self.assertTrue(list(Path(self.temp.name).rglob("*.md")))
 
-    def test_partial_low_confidence_and_ai_failure_never_submit(self):
+    def test_invalid_answers_and_ai_failure_never_submit(self):
         for result in [{"answer": None, "confidence": 0.9, "explanation": ""},
-                       {"answer": "A", "confidence": 0.2, "explanation": ""},
                        {"answer": "Z", "confidence": 0.99, "explanation": ""}]:
             self.ai.answer.return_value = result
             self.assertEqual(self.run_paper()["status"], "needs_review")
+            self.api.paper.return_value["taskExamRecord"]["id"] += "-next"
         self.ai.answer.side_effect = AIError("AI failed")
+        self.api.paper.return_value["taskExamRecord"]["id"] += "-next"
         self.assertEqual(self.run_paper()["status"], "needs_review")
         self.api.submit.assert_not_called()
+
+    def test_low_confidence_answer_is_valid_and_submitted(self):
+        self.ai.answer.return_value = {"answer": "A", "confidence": 0.2, "explanation": ""}
+        self.assertEqual(self.run_paper()["status"], "submitted")
+        self.api.submit.assert_called_once()
 
     def test_unsupported_question_blocks_whole_paper(self):
         self.api.paper.return_value["questions"].append(question(12, "file"))

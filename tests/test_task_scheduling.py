@@ -54,14 +54,15 @@ class TaskSchedulingTests(unittest.TestCase):
             self.assertEqual(self.run_paper(clock_factory=FakeClock)['status'], 'preview')
         sleep.assert_not_called()
 
-    def test_manual_recovery_continues_without_artificial_pause(self):
+    def test_low_confidence_answer_is_used_without_artificial_pause(self):
         self.ai.answer.side_effect = [
             {'answer': 'A', 'confidence': .1, 'explanation': 'unsure'},
             self.ai.answer.return_value, self.ai.answer.return_value]
         with patch('ai.runner.time.sleep') as sleep:
-            result = self.run_paper(clock_factory=FakeClock, manual_answer=lambda *_: 'B')
-        self.assertEqual(result['status'], 'preview')
-        self.assertEqual(result['answers'][0]['source'], 'manual')
+            result = self.run_paper(auto_submit=True, clock_factory=FakeClock)
+        self.assertEqual(result['status'], 'submitted')
+        self.assertEqual([row['answer'] for row in result['answers']], ['A', 'A', 'A'])
+        self.assertEqual(self.api.submit.call_count, 1)
         sleep.assert_not_called()
 
     def test_interrupt_during_next_request_preserves_saved_answer(self):

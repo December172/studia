@@ -30,10 +30,10 @@ class AnswerProgressTests(unittest.TestCase):
         self.ai.answer.return_value = self.good
         self.events = []
 
-    def run_paper(self, manual=None):
+    def run_paper(self):
         runner = AnswerRunner(self.api, self.ai, self.temp.name, auto_submit=True,
                               clock_factory=FakeClock, output=Mock(),
-                              on_progress=self.events.append, manual_answer=manual)
+                              on_progress=self.events.append)
         with patch('ai.runner.time.sleep'):
             return runner.run_paper({'id': 'ci', 'courseId': 'c'}, {'id': 'exam'}, 3)
 
@@ -52,14 +52,13 @@ class AnswerProgressTests(unittest.TestCase):
         self.assertEqual(stages[-1], '已交卷')
         self.assertEqual(self.events[-1].completed, 2)
 
-    def test_retry_and_manual_pause_do_not_advance_unfinished_question(self):
+    def test_retry_exhaustion_does_not_advance_unfinished_question(self):
         self.ai.answer.side_effect = [self.good] + [AIResponseError('bad')] * 3
-        self.assertEqual(self.run_paper(manual=lambda q, err: None)['status'], 'paused')
+        self.assertEqual(self.run_paper()['status'], 'needs_review')
         events = [e for e in self.events if e.kind == 'questions']
         self.assertTrue(any('重试 1/2' in e.name and e.completed == 1 for e in events))
-        self.assertTrue(any('人工补答' in e.name and e.completed == 1 for e in events))
         self.assertEqual(events[-1].completed, 1)
-        self.assertIn('待补答', events[-1].name)
+        self.assertIn('答案未完成', events[-1].name)
 
     def test_compound_questions_count_each_answerable_child(self):
         self.api.paper.return_value['questions'] = [

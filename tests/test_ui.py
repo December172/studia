@@ -102,7 +102,8 @@ class RenderingTests(unittest.TestCase):
         ui.finish()
         self.assertIn("成功 2 · 失败 2", output.getvalue())
         self.assertIn("跳过 1", output.getvalue())
-        self.assertIn("待人工 1", output.getvalue())
+        self.assertIn("未完成 1", output.getvalue())
+        self.assertNotIn("待人工", output.getvalue())
         self.assertIn("结果未知 1", output.getvalue())
 
     def test_observer_failures_do_not_escape(self):

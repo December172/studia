@@ -103,7 +103,7 @@ class AvailabilityWorkflowTests(unittest.TestCase):
             app=Application(view,SettingsStore(directory))
             with patch.object(app,'verify_ai') as verify,patch('app.AnswerRunner') as runner:
                 runner.return_value.run_paper.return_value={'status':'preview'}
-                reports=app.execute_ai(Mock(),[(COURSE,FUTURE,2),(COURSE,CLOSED,2)],Mock(),True,.8,api=Mock())
+                reports=app.execute_ai(Mock(),[(COURSE,FUTURE,2),(COURSE,CLOSED,2)],Mock(),True,api=Mock())
         self.assertEqual([r['status'] for r in reports],['skipped','skipped'])
         verify.assert_not_called()
         runner.assert_not_called()
@@ -114,7 +114,7 @@ class AvailabilityWorkflowTests(unittest.TestCase):
             app=Application(view,SettingsStore(directory))
             with patch.object(app,'verify_ai'),patch('app.AnswerRunner') as factory:
                 factory.return_value.run_paper.return_value={'status':'preview','paper':'可答测验'}
-                results=app.execute_ai(Mock(),[(COURSE,FUTURE,2),(COURSE,OPEN,3)],Mock(),False,.8,api=Mock())
+                results=app.execute_ai(Mock(),[(COURSE,FUTURE,2),(COURSE,OPEN,3)],Mock(),False,api=Mock())
         self.assertEqual([r['status'] for r in results],['skipped','preview'])
         factory.return_value.run_paper.assert_called_once_with(COURSE,OPEN,3)
 
@@ -160,7 +160,7 @@ class AvailabilityWorkflowTests(unittest.TestCase):
             def runner(*args,**kwargs):
                 return AnswerRunner(*args,**kwargs,output_dir=directory,clock_factory=FakeClock)
             with patch.object(app,'verify_ai',side_effect=verify),patch('app.AnswerRunner',side_effect=runner):
-                reports=app.execute_ai(Mock(),[(COURSE,first,3),(COURSE,OPEN,3)],Mock(),False,.8,api=api)
+                reports=app.execute_ai(Mock(),[(COURSE,first,3),(COURSE,OPEN,3)],Mock(),False,api=api)
         self.assertEqual([r['status'] for r in reports],['skipped','preview'])
         api.paper.assert_called_once_with('open')
 

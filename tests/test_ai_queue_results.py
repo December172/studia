@@ -38,7 +38,7 @@ class QueueResultTests(unittest.TestCase):
             return AnswerRunner(*args,**kwargs,output_dir=self.temp.name,clock_factory=FakeClock,
                                 on_log=lambda message:None)
         with patch.object(self.app,'verify_ai',return_value=self.ai),patch('app.AnswerRunner',side_effect=factory):
-            return self.app.execute_ai(Mock(),selected or self.selected,Mock(),True,.8,api=self.api)
+            return self.app.execute_ai(Mock(),selected or self.selected,Mock(),True,api=self.api)
 
     def paper(self,exam_id):
         return {'questions':[question(qid=exam_id)],'taskExamRecord':{'id':'task-'+exam_id,'status':0}}

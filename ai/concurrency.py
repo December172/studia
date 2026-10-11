@@ -37,14 +37,12 @@ class ParallelAnswers:
     """Bound pending requests and buffered answers together.
 
     Refill only when the caller resumes iteration after handling an answer.
-    Manual input drains in-flight requests without dispatching replacements.
     """
-    def __init__(self, ai, questions, max_workers, clock, allow_manual=False):
+    def __init__(self, ai, questions, max_workers, clock):
         self.config = replace(ai.config)
         self.questions = questions
         self.max_workers = max_workers
         self.clock = clock
-        self.allow_manual = allow_manual
         self.fatal_error = None
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='ai-answer')
         self.stopped = threading.Event()
@@ -96,7 +94,7 @@ class ParallelAnswers:
                 self.results[position] = future.result()
             except AIError as exc:
                 self.results[position] = exc
-                if isinstance(exc, AIServiceError) and not (exc.retryable and self.allow_manual):
+                if isinstance(exc, AIServiceError):
                     self.fatal_error = exc
                     self.stopped.set()
                     for pending in self.futures:
@@ -104,20 +102,13 @@ class ParallelAnswers:
             except CancelledError:
                 self.results[position] = AIServiceError('AI 服务失败，本题已停止：' + str(self.fatal_error))
 
-    def drain(self):
-        """Finish existing requests before manual input, without filling slots."""
-        while self.futures:
-            self.clock.check()
-            done, _ = wait(self.futures, timeout=0.05, return_when=FIRST_COMPLETED)
-            self._collect(done)
-
     def answers(self):
         """Yield (original position, answer or error) as results become ready."""
         while self.next_index < len(self.questions) or self.futures or self.results:
             self.clock.check()
             self._collect([future for future in self.futures if future.done()])
             # Handle buffered results before starting anything else: a result
-            # may need manual input or stop this paper entirely.
+            # may stop this paper entirely.
             if not self.results and not self.stopped.is_set():
                 while (self.next_index < len(self.questions) and
                        len(self.futures) + len(self.results) < self.max_workers):

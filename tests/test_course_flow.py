@@ -106,18 +106,20 @@ class SummaryTests(unittest.TestCase):
         options = view.review_export(self.selected, {})
         self.assertEqual(options["export_format"], "docx")
 
-    def test_ai_summary_defaults_to_submission_and_allows_report_only(self):
+    def test_ai_summary_defaults_to_submission_and_keeps_only_execution_mode(self):
         config = AIConfig("https://example.org/v1", "model", "secret")
-        view, output = make_view(["", "s", "1", "1", "b", ""])
+        view, output = make_view(["", "s", "1", ""])
         self.assertTrue(hasattr(view, "review_ai"))
-        self.assertEqual(view.review_ai(self.selected, config, {}), (True, .8))
-        self.assertEqual(view.review_ai(self.selected, config, {"threshold": .9}), (False, .9))
+        self.assertIs(view.review_ai(self.selected, config, {}), True)
+        self.assertIs(view.review_ai(self.selected, config, {"auto_submit": False}), False)
         self.assertIn("不交卷，无成绩", output.getvalue())
         self.assertNotIn("secret", output.getvalue())
 
-    def test_legacy_ai_settings_defaults_to_submission_and_point_eight(self):
+    def test_legacy_ai_settings_choose_only_execution_mode(self):
         view, _ = make_view(["", ""])
-        self.assertEqual(view.answer_settings(), (True, .8))
+        self.assertIs(view.answer_settings(), True)
+        view, _ = make_view(["1", ""])
+        self.assertIs(view.answer_settings(), False)
 
     def test_local_answers_result_explains_no_platform_grade(self):
         view, output = make_view([""])
@@ -210,21 +212,19 @@ class WorkspaceTests(unittest.TestCase):
     def test_report_only_override_returns_to_auto_submit_next_operation(self):
         catalog = [(COURSES[0], {"id": "a", "name": "第一章"}, 3)]
         _, text, _, runner = self.run_workspace(
-            ["1", "2", "1", "s", "1", "1", "b", "", "", "2", "1", "", "", "q"], catalog)
+            ["1", "2", "1", "s", "1", "", "", "2", "1", "", "", "q"], catalog)
         self.assertEqual([call.kwargs["auto_submit"] for call in runner.call_args_list], [False, True])
         self.assertIsNone(self.store.get("auto_submit"))
 
-    def test_paused_manual_question_stops_queue_without_repeating_errors(self):
-        catalog = [(COURSES[0], {"id": "a", "name": "第一章"}, 3),
-                   (COURSES[0], {"id": "b", "name": "第二章"}, 3)]
-        view, text, _, runner = self.run_workspace(["1", "2", "all", "", "", "q"], catalog,
-            {"status": "paused", "paper": "第一章", "message": "答案已保留，待补答",
+    def test_unfinished_question_is_reported_without_asking_for_retry_notice(self):
+        catalog = [(COURSES[0], {"id": "a", "name": "第一章"}, 3)]
+        view, text, _, runner = self.run_workspace(["1", "2", "1", "", "", "q"], catalog,
+            {"status": "needs_review", "paper": "第一章",
              "answers": [{"error": "单题重试 2 次后仍失败：bad JSON"}]})
         runner.return_value.run_paper.assert_called_once()
-        self.assertEqual(runner.call_args.kwargs["manual_answer"], view.manual_answer)
-        self.assertIn("待补答", text)
-        self.assertIn("失败 0", text)
-        self.assertNotIn("bad JSON", text)
+        # The run continues to the next paper instead of pausing for a human.
+        self.assertNotIn("待补答", text)
+        self.assertIn("bad JSON", text)
 
     def test_settings_logout_invalidates_live_client(self):
         _, text, _, _ = self.run_workspace(["s", "3", "\x1b", "q"])

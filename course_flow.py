@@ -104,7 +104,7 @@ class CourseWorkspace:
         saved = self.store.get("export", {})
         export_options = {key: saved[key] for key in ("export_format", "quiz_mode", "include_my_answer")
                           if isinstance(saved, dict) and key in saved}
-        answer_options = {"auto_submit": True, "threshold": self.store.get("confidence", .8)}
+        answer_options = {"auto_submit": True}
         selected = state.get("selected", [])
         while True:
             # History/status fields can change between reads; selection belongs
@@ -141,18 +141,16 @@ class CourseWorkspace:
                 else:
                     config = self.app.ai_configuration()
                     answer_options["connection_status"] = self.app.ai_status_text(config)
-                    auto_submit, threshold = self.view.review_ai(
+                    auto_submit = self.view.review_ai(
                         selected, config, answer_options,
                         check_connection=lambda: self.app.test_ai_connection(answer_options.get("config")),
                         manage_models=self.app.manage_models,
-                        connection_status=self.app.ai_status_text,
-                        max_workers=self.store.concurrency()['ai'])
+                        connection_status=self.app.ai_status_text)
                     config = answer_options["config"]
-                    self.app.remember(lambda: self.store.set("confidence", threshold))
                     def answer():
-                        results = self.app.execute_ai(self.client, selected, config, auto_submit, threshold)
+                        results = self.app.execute_ai(self.client, selected, config, auto_submit)
                         for report in results:
-                            if report.get("status") in ("paused", "submitted", "preview"):
+                            if report.get("status") in ("submitted", "preview"):
                                 continue
                             if report.get("message"):
                                 self.view.log(report["message"], "warning")

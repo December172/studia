@@ -99,13 +99,13 @@ class QuestionRetryTests(unittest.TestCase):
         self.sleep.assert_not_called()
         self.api.submit.assert_not_called()
 
-    def test_low_confidence_is_not_retried_until_a_higher_score_appears(self):
+    def test_low_confidence_answer_is_accepted_without_rerolling(self):
         self.api.paper.return_value["questions"] = [question()]
         self.session.post.return_value = response(content='{"answer":"A","confidence":0.2,"explanation":"uncertain"}')
-        self.assertEqual(self.run_paper()["status"], "needs_review")
+        self.assertEqual(self.run_paper()["status"], "submitted")
         self.assertEqual(self.session.post.call_count, 1)
         self.sleep.assert_not_called()
-        self.api.submit.assert_not_called()
+        self.api.submit.assert_called_once()
 
     def test_expired_attempt_stops_before_retry(self):
         self.api.paper.return_value["questions"] = [question()]
@@ -127,7 +127,7 @@ class QuestionRetryTests(unittest.TestCase):
         self.assertEqual(self.run_paper()['status'], 'submitted')
         self.assertEqual(sum(call.args[0] for call in self.sleep.call_args_list), 5)
 
-    def test_manual_recovery_does_not_bypass_final_service_cooldown(self):
+    def test_exhausted_cooldown_reaches_the_next_question_without_replaying_the_failed_one(self):
         self.api.paper.return_value['questions'] = [question(qid='first'), question(qid='next')]
         now, started = [100.0], []
         replies = []
@@ -142,11 +142,12 @@ class QuestionRetryTests(unittest.TestCase):
         self.session.post.side_effect = request
         self.sleep.side_effect = lambda delay: now.__setitem__(0, now[0] + delay)
         with patch('ai.runner.time.monotonic', side_effect=lambda: now[0]):
-            runner = AnswerRunner(self.api, self.ai, self.temp.name, clock_factory=FakeClock,
-                                  manual_answer=lambda *_: 'B')
+            runner = AnswerRunner(self.api, self.ai, self.temp.name, clock_factory=FakeClock)
             report = runner.run_paper({'id': 'ci', 'courseId': 'c'}, {'id': 'exam'}, 3)
-        self.assertEqual(report['status'], 'preview')
-        self.assertEqual(started, [100, 101, 103, 403])
+        self.assertEqual(report['status'], 'ai_error')
+        self.assertEqual(started, [100, 101, 103])
+        self.assertEqual(runner.service_cooldown_until, 403)
+        self.api.submit.assert_not_called()
 
     def test_long_retry_and_carried_cooldown_notice_deadline_promptly(self):
         for carried in (False, True):
