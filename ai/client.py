@@ -202,10 +202,11 @@ class AIClient:
                 raise ValueError("invalid schema")
             parsed = {"answer": result["answer"], "explanation": result["explanation"]}
             # Confidence is legacy metadata only: absent or malformed values are
-            # ignored rather than blocking an otherwise valid answer.
+            # ignored rather than blocking an otherwise valid answer. The range
+            # check runs first so an oversized integer never reaches float().
             confidence = result.get("confidence")
             if (not isinstance(confidence, bool) and isinstance(confidence, (int, float))
-                    and math.isfinite(confidence) and 0 <= confidence <= 1):
+                    and 0 <= confidence <= 1 and math.isfinite(confidence)):
                 parsed["confidence"] = confidence
             return parsed
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):

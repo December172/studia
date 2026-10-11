@@ -65,15 +65,18 @@ class ClientTests(unittest.TestCase):
     def test_valid_answer_ignores_any_legacy_confidence_field(self):
         for field in ('"confidence":0.1,', '"confidence":null,', '"confidence":"high",',
                       '"confidence":true,', '"confidence":NaN,', '"confidence":-1,',
-                      '"confidence":2,', ''):
-            with self.subTest(field=field):
+                      '"confidence":2,', '"confidence":%s,' % (10 ** 400),
+                      '"confidence":-%s,' % (10 ** 400), '"confidence":1e400,',
+                      '"confidence":-1e400,', ''):
+            with self.subTest(field=field[:40]):
                 client, _ = self.client('{"answer":"A",%s"explanation":"理由"}' % field)
                 self.assertEqual(client.answer({"title": "题干"})["answer"], "A")
 
     def test_only_a_usable_confidence_metadata_value_is_kept(self):
         for field in ('"confidence":"high",', '"confidence":null,', '"confidence":true,',
-                      '"confidence":NaN,', '"confidence":-1,', '"confidence":2,', ''):
-            with self.subTest(field=field):
+                      '"confidence":NaN,', '"confidence":-1,', '"confidence":2,', '',
+                      '"confidence":%s,' % (10 ** 400), '"confidence":-%s,' % (10 ** 400)):
+            with self.subTest(field=field[:40]):
                 client, _ = self.client('{"answer":"A",%s"explanation":""}' % field)
                 self.assertNotIn("confidence", client.answer({"title": "题干"}))
         for value in (0, 0.2, 1):

@@ -58,7 +58,7 @@
 - [x] Update active documentation; leave historical plans/specs as historical records.
       Evidence: README.md, docs/USAGE.md, docs/EXAM_PROTOCOL.md and docs/DEVELOPMENT.md no longer describe confidence thresholds, manual补答 or `paused`; historical plans and research notes under docs/superpowers/ and docs/research/ are untouched.
 - [x] Run full offline suite: `/Users/yijunjie/mooc/.venv/bin/python -m unittest discover -s tests -q`.
-      Evidence: `Ran 414 tests ... OK` (baseline was 411; the two renamed manual-answer modules were replaced by 28 focused tests).
+      Evidence: `Ran 419 tests ... OK` after the review fixes (baseline was 411; the two renamed manual-answer modules were replaced by focused tests).
 - [x] Run compileall and `git diff --check`; inspect rendered terminal output at 120×30 and a small terminal.
       Evidence: `python -m compileall -q .` is clean, `git diff --check` reports nothing; the runtime frame, AI summary and result page were rendered offline at 120×30 and 52 columns with no footer and no line exceeding the terminal width.
 - [x] Commit tested work. Coordinator creates PR, obtains CI and independent review, resolves findings, then merges.

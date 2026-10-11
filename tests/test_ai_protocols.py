@@ -97,15 +97,29 @@ class ProtocolTests(unittest.TestCase):
                     client.answer({'title': 'test'})
                 self.assertNotIn('private provider data', str(caught.exception))
 
-    def test_responses_accepts_a_valid_answer_without_confidence_metadata(self):
+    def test_responses_accepts_a_valid_answer_without_usable_confidence_metadata(self):
         for text in ('{"answer":"A","explanation":"ok"}', '{"answer":"A","confidence":null,"explanation":"ok"}',
                      '{"answer":"A","confidence":"high","explanation":"ok"}',
-                     '{"answer":"A","confidence":-1,"explanation":"ok"}'):
-            with self.subTest(text=text):
+                     '{"answer":"A","confidence":-1,"explanation":"ok"}',
+                     '{"answer":"A","confidence":%s,"explanation":"ok"}' % 10 ** 400,
+                     '{"answer":"A","confidence":-%s,"explanation":"ok"}' % 10 ** 400):
+            with self.subTest(text=text[:40]):
                 client, _ = self.client(response_payload(text))
                 result = client.answer({'title': 'test'})
                 self.assertEqual(result['answer'], 'A')
                 self.assertEqual(result['explanation'], 'ok')
+                self.assertNotIn('confidence', result)
+
+    def test_chat_completions_accepts_a_valid_answer_without_usable_confidence_metadata(self):
+        for text in ('{"answer":"A","explanation":"ok"}', '{"answer":"A","confidence":true,"explanation":"ok"}',
+                     '{"answer":"A","confidence":NaN,"explanation":"ok"}',
+                     '{"answer":"A","confidence":%s,"explanation":"ok"}' % 10 ** 400,
+                     '{"answer":"A","confidence":-%s,"explanation":"ok"}' % 10 ** 400):
+            with self.subTest(text=text[:40]):
+                payload = {'choices': [{'finish_reason': 'stop', 'message': {'content': text}}]}
+                client, _ = self.client(payload, 'chat_completions')
+                result = client.answer({'title': 'test'})
+                self.assertEqual(result['answer'], 'A')
                 self.assertNotIn('confidence', result)
 
     def test_connection_test_accepts_answer_without_confidence_in_either_format(self):
