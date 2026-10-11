@@ -29,13 +29,14 @@ from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
-from prompt_toolkit.widgets import Label, TextArea
+from prompt_toolkit.widgets import TextArea
 
 from checklist import fit
 from name_animation import NameAnimation, terminal_color_depth
 from terminal_widgets import (CURSOR, ROW, ROW_DISABLED, ROW_SELECTED, STYLE_DICT,
-                              action_rows, cycle_focus, field, frame, name_fragments,
-                              responsive_actions, status_window, wrap_help)
+                              action_rows, cycle_focus, field, frame, frame_chrome,
+                              name_fragments, responsive_actions, status_window,
+                              wrap_help)
 
 STYLE = Style.from_dict(dict(STYLE_DICT, **{
     'text-area': 'bg:#202b33 #ffffff', 'text-area focused': 'bg:#263b45 #ffffff',
@@ -49,13 +50,17 @@ EMPTY_CONFIRM = '没有匹配的项目；请调整搜索或返回。'
 
 @dataclass
 class ChooseResult:
-    """Keyboard outcome; ``kind`` is select/action/back/quit."""
+    """Keyboard outcome; ``kind`` is select/action/back/quit.
+
+    ``cursor`` is ``None`` when the path cannot know it (a closed pipe), so a
+    caller keeping its own list state never has a real position overwritten.
+    """
     kind: str
     value: object = None
     index: Optional[int] = None
     action: Optional[str] = None
     indexes: tuple = ()
-    cursor: int = 0
+    cursor: Optional[int] = None
 
 
 def _same(left, right):
@@ -268,7 +273,8 @@ def _controls(title, state, *, buttons, listctl, search, heading, account_name, 
         rows += 1  # status line
         rows += help_count()
         rows += 1 if account_name else 0
-        return rows
+        return rows + frame_chrome(heading=bool(heading), search=search_field is not None,
+                                   actions=True, help_text=bool(help_text))
 
     def available_rows():
         return max(1, get_app().output.get_size().rows - chrome_rows())
@@ -331,11 +337,11 @@ def _controls(title, state, *, buttons, listctl, search, heading, account_name, 
     if search_field is not None:
         @keys.add('escape', filter=~has_focus(search_field))
         def back(event):
-            event.app.exit(result=ChooseResult('back'))
+            event.app.exit(result=ChooseResult('back', cursor=state['cursor']))
     else:
         @keys.add('escape')
         def back(event):
-            event.app.exit(result=ChooseResult('back'))
+            event.app.exit(result=ChooseResult('back', cursor=state['cursor']))
 
     @keys.add('up', filter=has_focus(body))
     @keys.add('down', filter=has_focus(body))
@@ -400,7 +406,8 @@ def option_menu(title, choices, default=None, help_text=HELP_MENU, *, message=''
         app.exit(result=ChooseResult('select', key, state['cursor'], cursor=state['cursor']))
 
     buttons = [field('选择', choose, width=10),
-               field('返回', lambda: app.exit(result=ChooseResult('back')), width=10)]
+               field('返回', lambda: app.exit(result=ChooseResult('back', cursor=state['cursor'])),
+                     width=10)]
     app, body, search, keys, _ = _controls(
         title, state, buttons=buttons, listctl=listctl, search=False, heading=heading,
         account_name=account_name, help_text=help_text, input=input, output=output)
@@ -417,7 +424,8 @@ def option_menu(title, choices, default=None, help_text=HELP_MENU, *, message=''
 
         keys.add(char, filter=has_focus(body))(make())
 
-    def digit(value):
+    def choose_key(value):
+        """Move the cursor to an explicitly keyed row without selecting it."""
         def handler(event):
             for index, (key, _, _) in enumerate(choices):
                 if str(key) == value:
@@ -425,8 +433,15 @@ def option_menu(title, choices, default=None, help_text=HELP_MENU, *, message=''
                     return
         return handler
 
-    for value in '1234567890':
-        keys.add(value, filter=has_focus(body))(digit(value))
+    # Explicitly supplied keys (digits or letters such as r/s/t) move the
+    # highlight only; Enter still confirms, so a letter never exits the page.
+    # Page-level control keys win: escape/back, q/quit, movement and Tab are
+    # registered above and below, and reserved names are skipped here.
+    reserved = {'q', 'b', 'escape', 'tab', 's-tab', 'enter', 'up', 'down', 'left', 'right',
+                'pageup', 'pagedown', 'c-c', 'c-d', ' '}
+    for key in {str(key) for key, _, _ in choices}:
+        if len(key) == 1 and key not in reserved and key not in (quick or {}):
+            keys.add(key, filter=has_focus(body))(choose_key(key))
 
     listctl.visible_indexes = listctl.visible('')
     return _run(app, input, output)
@@ -522,7 +537,8 @@ def single_picker(title, items, label, details=None, *, actions=None, state=None
     result = _run(app, input, output)
     if search is not None:
         state['query'] = search.text
-    state['cursor'] = result.cursor
+    if result.cursor is not None:
+        state['cursor'] = result.cursor
     if result.kind == 'select':
         state['selected'] = list(result.value or [])
     return result
@@ -578,7 +594,8 @@ def action_page(title, lines, actions, *, default='start', status='', help_text=
             chrome += len(wrap_help(help_text, max(1, columns - 2)))
         if account_name:
             chrome += 1
-        return max(1, total - chrome)
+        return max(1, total - chrome - frame_chrome(
+            heading=bool(heading), actions=True, help_text=bool(help_text)))
 
     def content():
         rows = get_lines()

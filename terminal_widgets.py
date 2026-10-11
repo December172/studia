@@ -8,7 +8,7 @@ combined selectors below win because the fragment's own class set is a superset
 of the window's, so focused labels and arrows stay readable.
 """
 from prompt_toolkit.application import get_app
-from prompt_toolkit.layout import Container, DynamicContainer, HSplit, VSplit, Window
+from prompt_toolkit.layout import DynamicContainer, HSplit, VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
@@ -28,6 +28,7 @@ STYLE_DICT = {
     'cursor': 'bg:ansicyan ansiblack bold',  # the control that owns focus
     'checked': 'ansicyan bold',
     'columns': 'bold',
+    'rule': 'ansibrightblack',
     'button': 'ansicyan',
     'button.focused': 'bg:ansicyan ansiblack bold',
     'button.focused button.text': 'ansiblack bold',
@@ -43,9 +44,73 @@ ROW_SELECTED = 'class:row.selected'
 ROW_DISABLED = 'class:row.disabled'
 ERROR = 'class:error'
 
+# Secondary chrome is dropped on short terminals before any control is.
+RULE_ROWS = 20   # the thin content/action rule needs this many terminal rows
+SPACING_ROWS = 24  # extra breathing room between groups needs this many
+
 
 def text_width(value):
     return get_cwidth(str(value))
+
+
+def _terminal_rows():
+    return get_app().output.get_size().rows
+
+
+def _terminal_columns():
+    return get_app().output.get_size().columns
+
+
+def spacing():
+    """Whether this height can afford one blank separation row per group."""
+    return _terminal_rows() >= SPACING_ROWS
+
+
+def spacer():
+    """One-row gap; collapses to nothing when the terminal is short."""
+    return Window(height=lambda: 1 if spacing() else 0, always_hide_cursor=True)
+
+
+def filler():
+    """Flexible blank block that keeps the bottom chrome at the bottom.
+
+    It asks for no preferred height, so a list or form first receives its
+    natural height and only the *surplus* rows turn into blank space between
+    the content and the actions. The user asked for a filled window with a
+    blank middle: headings and content stay at the top, the action/status/help
+    group stays at the bottom, and the gap grows or shrinks with the terminal.
+    On a short terminal it collapses to zero, so nothing reachable is lost.
+    """
+    return Window(always_hide_cursor=True)
+
+
+def rule_height():
+    """Rows a content/action rule costs here: 1, or 0 when too short."""
+    return 1 if _terminal_rows() >= RULE_ROWS else 0
+
+
+def frame_chrome(*, heading=False, search=False, actions=False, help_text=False):
+    """Gap/rule rows ``frame`` spends for this configuration right now.
+
+    ``frame`` is built before its application exists, so it may only create
+    containers whose height is decided at render time. Callers that reserve
+    rows for the body (native viewports) use this same live predicate so the
+    reservation can never drift from what the frame actually renders.
+    """
+    rows = 0
+    if spacing():
+        rows += (1 if heading else 0) + 1 + (1 if search else 0) + (1 if help_text else 0)
+    if actions:
+        rows += rule_height()
+    return rows
+
+
+def rule():
+    """Dim separator whose row height and length follow the live terminal."""
+    return Window(
+        FormattedTextControl(lambda: [('class:rule', '─' * max(1, _terminal_columns() - 2))]),
+        height=lambda: rule_height(), wrap_lines=False,
+        always_hide_cursor=True, dont_extend_width=True)
 
 
 def field(text, handler=None, *, width=None):
@@ -177,21 +242,36 @@ def frame(title, content, actions=None, *, heading=None, search=None, status=Non
 
     ``content`` is one container (usually a header+body ``HSplit``); the frame
     only arranges the surrounding chrome so every native page shares one shape.
+
+    Spacing is one blank row between semantic groups (heading/title, content,
+    search, actions, help) plus a dim rule between the content and the actions,
+    so a page reads as tidy blocks instead of a compressed stack. Both the gaps
+    and the rule are dynamic containers: ``frame`` runs before its application
+    exists, so deciding here would read a dummy terminal and the rule would
+    survive on a 16-row screen. Short terminals drop every spacer and the rule
+    before anything else gives way; padding never competes with the list or the
+    action row. ``frame_chrome`` mirrors these rows for viewport reservations.
     """
     rows = []
     if heading:
         rows.append(Label(str(heading), style='class:title'))
+        rows.append(spacer())
     rows.append(Label(title, style='class:title'))
+    rows.append(spacer())
     rows.append(content)
     if search is not None:
+        rows.append(spacer())
         rows.append(search)
+    rows.append(filler())
     if actions is not None:
+        rows.append(rule())
         rows.append(actions)
     if status is not None:
         rows.append(status_window(status, height=status_height)
                     if isinstance(status, (str, bytes)) or callable(status)
                     else status)
     if help_text:
+        rows.append(spacer())
         rows.append(help_window(help_text))
     if footer is not None:
         rows.append(footer)

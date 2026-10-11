@@ -85,6 +85,56 @@ def menu(keys, choices, **kwargs):
     return result, frames
 
 
+def connection_view():
+    import io
+
+    from rich.console import Console
+
+    import theme
+    import ui
+    return ui.TerminalUI(console=Console(file=io.StringIO(), force_terminal=True,
+                                         theme=theme.THEME))
+
+
+def route(keys, *, call, columns=80, rows=24, timeout=6):
+    """Drive one TerminalUI method with real native rendering and a real pipe."""
+    frames = []
+    real_application = native_ui.Application
+
+    def factory(*a, **kw):
+        def grab(app):
+            screen = app.renderer.last_rendered_screen
+            if screen:
+                frames.append([
+                    ''.join(screen.data_buffer[y][x].char for x in sorted(screen.data_buffer[y])).rstrip()
+                    for y in sorted(screen.data_buffer)])
+
+        # The production route creates its own terminal input; drive it with the
+        # pipe so the test never touches the process's stdin.
+        kw.setdefault('input', None)
+        kw['input'] = kw['input'] or pipe
+        app = real_application(*a, **kw, after_render=grab)
+
+        async def watchdog():
+            await asyncio.sleep(timeout)
+            app.exit(exception=RuntimeError('native route did not exit in time'))
+
+        def prep():
+            app.create_background_task(watchdog())
+            threading.Thread(target=lambda: pipe.send_text(keys), daemon=True).start()
+        app.pre_run_callables.append(prep)
+        return app
+
+    with create_pipe_input() as pipe, \
+            patch.object(native_ui, 'Application', side_effect=factory), \
+            patch('sys.stdin.isatty', return_value=True):
+        view = connection_view()
+        # Patch the output so the native page lays out for the requested size.
+        with patch.object(view, 'terminal_output', return_value=SizedOutput(columns, rows)):
+            value = call(view)
+    return value, frames
+
+
 def confirm(keys, default=False, **kwargs):
     result, frames = run(native_ui.confirm_prompt, keys, '确认操作', default=default, **kwargs)
     return result, frames
@@ -394,6 +444,75 @@ class TerminalUIRoutingTests(unittest.TestCase):
              patch('sys.stdin.isatty', return_value=True):
             self.assertIs(confirm_view.confirm('确认', default=True), False)
         native_confirm.assert_not_called()
+
+
+class CursorRetentionTests(unittest.TestCase):
+    """Every return path keeps the caller's cursor for the next re-entry."""
+
+    def test_escape_back_keeps_the_supplied_cursor(self):
+        state = {}
+        pick([DOWN, DOWN, ESC], state=state)
+        self.assertEqual(state['cursor'], 2)
+
+    def test_escape_keeps_a_supplied_cursor_when_nothing_moved(self):
+        state = {'cursor': 2}
+        pick([ESC], state=state)
+        self.assertEqual(state['cursor'], 2)
+
+    def test_back_button_and_action_carry_the_cursor(self):
+        for keys in (TAB + ENTER, TAB + TAB + ENTER):
+            with self.subTest(keys=keys):
+                state = {}
+                pick([DOWN, DOWN, keys], actions={'r': '刷新'}, state=state)
+                self.assertEqual(state['cursor'], 2)
+
+
+class StringOptionKeyTests(unittest.TestCase):
+    """Pages with explicit string keys accept those letters on the body."""
+
+    CHOICES = [('r', '重试登录 / 读取课程', ''), ('s', '本机设置', ''), ('t', '切换平台', '')]
+
+    def test_string_choice_keys_move_the_highlight_and_enter_confirms(self):
+        for keys, expected in (('s' + ENTER, 's'), ('t' + ENTER, 't'), (DOWN + ENTER, 's')):
+            with self.subTest(keys=keys):
+                result, _ = menu(keys, self.CHOICES)
+                self.assertEqual(result.kind, 'select')
+                self.assertEqual(result.value, expected)
+
+    def test_page_keys_win_over_a_same_letter_choice(self):
+        choices = [('q', '退出选项', ''), ('b', '返回选项', ''), ('1', '第一个', '')]
+        self.assertEqual(menu('q', choices)[0].kind, 'quit')
+        self.assertEqual(menu(ESC, choices)[0].kind, 'back')
+        # Reserved names are never rebound as choice keys: 'b' changes nothing,
+        # so Enter still confirms the retained first row.
+        result, _ = menu('b' + ENTER, choices)
+        self.assertEqual(result.kind, 'select')
+        self.assertEqual(result.value, 'q')
+        # A digit key stays a real shortcut: it moves the highlight to its row.
+        result, _ = menu('1' + ENTER, choices)
+        self.assertEqual(result.value, '1')
+
+    def test_letters_stay_literal_inside_the_search_field(self):
+        # 'r' is a page action here; typed into the search field it is text, so
+        # applying the filter cannot fire the action.
+        result, _ = pick('/r\r' + ESC, actions={'r': '刷新'})
+        self.assertEqual(result.kind, 'back')
+
+
+class ConnectionProblemRouteTests(unittest.TestCase):
+    """The real TerminalUI route keeps the r/s/t contract on a TTY."""
+
+    def test_typed_letter_returns_that_specific_option(self):
+        # s+Enter / t+Enter pick that row instead of falling back to the first.
+        for keys, expected in (('s' + ENTER, 's'), ('t' + ENTER, 't'), (ENTER, 'r')):
+            with self.subTest(keys=keys):
+                value, _ = route(keys, call=lambda view: view.connection_problem('登录已过期'))
+                self.assertEqual(value, expected)
+
+    def test_escape_still_navigates_back(self):
+        import ui
+        with self.assertRaises(ui.Back):
+            route(ESC, call=lambda view: view.connection_problem('登录已过期'))
 
 
 if __name__ == '__main__':

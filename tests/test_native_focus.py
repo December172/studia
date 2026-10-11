@@ -17,6 +17,8 @@ from prompt_toolkit.data_structures import Size
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
+DOWN = '\x1b[B'
+
 
 class SizedOutput(DummyOutput):
     def __init__(self, columns=120, rows=30):
@@ -26,12 +28,16 @@ class SizedOutput(DummyOutput):
         return Size(rows=self.rows, columns=self.columns)
 
 
-def run_frames(module, func, chunks, *args, columns=120, rows=30, timeout=6, **kwargs):
+def run_frames(module, func, chunks, *args, columns=120, rows=30, timeout=6, output=None,
+               **kwargs):
     """Run a native form with real rendering, capturing resolved cell attrs.
 
-    ``chunks`` is sent progressively so intermediate (focused) frames render.
-    A watchdog background task exits the app with an exception if the final
-    chunk fails to close it, so a capture can never hang the suite.
+    ``chunks`` is sent progressively so intermediate (focused) frames render; a
+    callable chunk runs in the feeder with the running application instead of
+    being typed, which lets a test resize the terminal the way a real SIGWINCH
+    would (change the size, then invalidate). A watchdog background task exits
+    the app with an exception if the final chunk fails to close it, so a
+    capture can never hang the suite.
     """
     frames = []
     real_application = module.Application
@@ -63,6 +69,11 @@ def run_frames(module, func, chunks, *args, columns=120, rows=30, timeout=6, **k
             def feed():
                 for text in chunks:
                     time.sleep(0.2)
+                    if callable(text):
+                        # Resize-style steps get the running app so they can
+                        # invalidate it exactly like a real SIGWINCH would.
+                        text(app)
+                        continue
                     try:
                         pipe.send_text(text)
                     except Exception:
@@ -73,12 +84,29 @@ def run_frames(module, func, chunks, *args, columns=120, rows=30, timeout=6, **k
 
     with create_pipe_input() as pipe:
         with patch.object(module, 'Application', side_effect=application):
-            result = func(*args, input=pipe, output=SizedOutput(columns, rows), **kwargs)
+            result = func(*args, input=pipe, output=output or SizedOutput(columns, rows), **kwargs)
     return result, frames
 
 
 def _is_focused_button_cell(style, attrs):
     return 'button.focused' in style and attrs is not None and attrs.bgcolor == 'ansicyan'
+
+
+def visible_cells(line):
+    return [(char, style, attrs) for char, style, attrs in line if char.strip()]
+
+
+def button_focused_frame(frames, label=None):
+    """The last frame in which a button owns the only focused background."""
+    found = None
+    for lines in frames:
+        for line in lines:
+            if any(_is_focused_button_cell(style, attrs) and char.strip()
+                   for char, style, attrs in line) and (label is None or label in
+                                                        ''.join(c for c, _, _ in line)):
+                found = lines
+                break
+    return found
 
 
 def focused_frame(frames, label):
@@ -117,6 +145,22 @@ class FocusContrastTests(unittest.TestCase):
                                 f'{label}: {char!r} has fg==bg ({attrs.color})')
             checked += 1
         self.assertGreater(checked, 0, f'{label}: focused button had no visible glyphs')
+
+    def assert_row_has_no_focus_background(self, cells, label):
+        """A list row must never carry the focused control's background.
+
+        The row is checked through its *resolved* background, not through the
+        ``button.focused`` class name: a row style that wrongly painted the
+        cursor background would still be a plain row fragment.
+        """
+        checked = 0
+        for char, style, attrs in visible_cells(cells):
+            if attrs is None:
+                continue
+            self.assertNotEqual(attrs.bgcolor or '', 'ansicyan',
+                                f'{label}: {char!r} ({style}) claims the focus background')
+            checked += 1
+        self.assertGreater(checked, 0, f'{label}: no rendered row cells')
 
     def test_model_picker_focused_button_cells_have_contrast(self):
         import model_ui
@@ -171,14 +215,12 @@ class FocusContrastTests(unittest.TestCase):
         import model_ui
         _, frames = run_frames(model_ui, model_ui.choose_model, ['\t', '\x1b'],
                                [('a', '供应商一', 'same', '?')], 'a')
-        frame = next(lines for lines in frames
-                     if any(_is_focused_button_cell(s, a) and c.strip() for line in lines
-                            for c, s, a in line))
+        frame = button_focused_frame(frames, '使用此模型')
+        self.assertIsNotNone(frame, 'no button-focused frame captured')
         list_row = next(line for line in frame if '供应商一' in ''.join(c for c, _, _ in line))
         # The retained row keeps its cyan foreground but must not claim the
         # focused button background while focus is on the actions.
-        self.assertFalse(any(_is_focused_button_cell(s, a) and c.strip()
-                             for c, s, a in list_row))
+        self.assert_row_has_no_focus_background(list_row, '模型行')
 
     def test_model_editor_focused_save_button_has_contrast(self):
         import model_ui
@@ -204,11 +246,10 @@ class FocusContrastTests(unittest.TestCase):
         import concurrency_ui
         _, frames = run_frames(concurrency_ui, concurrency_ui.edit_concurrency,
                                ['\t', '\x1b'], {'ai': 5, 'study': 6})
-        frame = next(lines for lines in frames
-                     if any('button.focused' in s and a is not None and a.bgcolor == 'ansicyan'
-                            for line in lines for c, s, a in line))
+        frame = button_focused_frame(frames, '保存')
+        self.assertIsNotNone(frame, 'no button-focused frame captured')
         row = next(line for line in frame if 'AI答题' in ''.join(c for c, _, _ in line))
-        self.assertFalse(any(_is_focused_button_cell(s, a) and c.strip() for c, s, a in row))
+        self.assert_row_has_no_focus_background(row, '并发行')
 
     def test_checklist_cursor_row_uses_focused_style(self):
         import checklist
@@ -242,6 +283,119 @@ class FocusContrastTests(unittest.TestCase):
         self.assertTrue(any('>' in ''.join(c for c, _, _ in line) and '任务0' in
                             ''.join(c for c, _, _ in line) for line in frame))
         self.assertTrue(any('[x]' in ''.join(c for c, _, _ in line) for line in frame))
+
+
+class LongListAnchorTests(unittest.TestCase):
+    """A Tab-focused action must not throw the list back to its first row.
+
+    The list window scrolls to its content's cursor position. Dropping that
+    anchor when the body loses focus moved the highlight off screen while the
+    button still acted on the retained row.
+    """
+
+    def screen_text(self, lines):
+        return '\n'.join(''.join(c for c, _, _ in line) for line in lines)
+
+    def test_model_picker_keeps_the_highlighted_row_visible_after_tab(self):
+        import model_ui
+        rows = [(f'm{i:02d}', f'供应商{i:02d}', f'model-{i:02d}', '?') for i in range(30)]
+        result, frames = run_frames(model_ui, model_ui.choose_model,
+                                    [DOWN * 24, '\t', '\x1b'], rows, 'm00',
+                                    columns=40, rows=16, timeout=10)
+        self.assertEqual(result.action, 'back')
+        frame = button_focused_frame(frames, '使用此模型')
+        self.assertIsNotNone(frame, 'no button-focused frame captured')
+        text = self.screen_text(frame)
+        self.assertIn('供应商24', text.split('使用此模型')[0])
+        self.assertNotIn('供应商00', text.split('使用此模型')[0])
+
+    def test_checklist_keeps_the_highlighted_row_visible_after_tab(self):
+        import checklist
+        rows = [(f'任务{i:02d}', '未作答', '作业') for i in range(30)]
+        _, frames = run_frames(checklist, checklist.choose_many,
+                               [DOWN * 24, '\t', '\x1b'], '选择任务', rows,
+                               columns=40, rows=16, timeout=10)
+        frame = button_focused_frame(frames, '确认')
+        self.assertIsNotNone(frame, 'no button-focused frame captured')
+        text = self.screen_text(frame)
+        self.assertIn('任务24', text.split('确认')[0])
+        self.assertNotIn('任务00', text.split('确认')[0])
+
+
+class SharedFrameFillTests(unittest.TestCase):
+    """Every native page fills the window: content on top, actions at the bottom.
+
+    The user asked for a filled window with a blank middle (窗口铺满，中间留空):
+    headings and content stay at the top, the rule/actions/status/help/footer
+    group sits at the bottom, and the surplus rows in between stay blank. The
+    flexible filler must give way on short terminals so nothing becomes
+    unreachable, and a live resize must reflow naturally.
+    """
+
+    def screen(self, lines):
+        return [''.join(c for c, _, _ in line).rstrip() for line in lines]
+
+    def test_short_model_page_keeps_actions_at_the_bottom(self):
+        import model_ui
+        _, frames = run_frames(model_ui, model_ui.choose_model, ['\x1b'],
+                               [('a', '供应商一', 'model', '?')], 'a')
+        lines = self.screen(frames[-1])
+        self.assertEqual(len(lines), 30)
+        content = next(i for i, line in enumerate(lines) if '供应商一' in line)
+        rule = next(i for i, line in enumerate(lines) if '─' in line)
+        action = next(i for i, line in enumerate(lines) if '使用此模型' in line)
+        self.assertLess(content, 5, 'content must stay at the top')
+        self.assertGreater(action, 24, 'actions must sit at the bottom')
+        self.assertEqual(rule + 1, action, 'the rule marks the content/action boundary')
+        self.assertTrue(any(not line.strip() for line in lines[content + 1:rule]),
+                        'the surplus rows between content and actions must stay blank')
+        self.assertIn('Esc 返回', '\n'.join(lines[action:]))
+
+    def test_short_checklist_keeps_its_actions_at_the_bottom(self):
+        import checklist
+        _, frames = run_frames(checklist, checklist.choose_many, ['\x1b'], '选择任务',
+                               [('第一章 测验', '已提交', '测验')])
+        lines = self.screen(frames[-1])
+        self.assertEqual(len(lines), 30)
+        action = next(i for i, line in enumerate(lines) if '确认' in line)
+        self.assertGreater(action, 24, 'checklist actions must sit at the bottom')
+        self.assertLess(next(i for i, line in enumerate(lines) if '第一章' in line), 5)
+        self.assertIn('空格 勾选/取消', '\n'.join(lines[action:]))
+
+    def test_short_page_collapses_the_filler_at_16_rows(self):
+        import model_ui
+        result, frames = run_frames(model_ui, model_ui.choose_model, ['\x1b'],
+                                    [('a', '供应商一', 'model', '?')], 'a',
+                                    columns=40, rows=16)
+        self.assertEqual(result.action, 'back')
+        text = '\n'.join(self.screen(frames[-1]))
+        self.assertNotIn('Window too small', text)
+        for label in ('供应商一', '使用此模型', '测试连接', '编辑', '返回', 'Esc 返回'):
+            self.assertIn(label, text)
+        self.assertEqual(len(self.screen(frames[-1])), 16)
+
+    def test_resize_reflows_the_filler_without_hiding_rows(self):
+        import model_ui
+        output = SizedOutput(120, 30)
+
+        def shrink(app):
+            size = output.get_size()
+            self.assertEqual((size.rows, size.columns), (30, 120))
+            output.columns, output.rows = 40, 16
+            # A real SIGWINCH makes the app notice and repaint; this is the same
+            # path a terminal resize takes for this application.
+            app.invalidate()
+
+        rows = [(f'm{i:02d}', f'供应商{i:02d}', f'model-{i:02d}', '?') for i in range(30)]
+        result, frames = run_frames(model_ui, model_ui.choose_model, [shrink, '\x1b'],
+                                    rows, 'm00', output=output, timeout=10)
+        self.assertEqual(result.action, 'back')
+        lines = self.screen(frames[-1])
+        self.assertEqual(len(lines), 16, 'the frame must follow the new terminal height')
+        text = '\n'.join(lines)
+        self.assertNotIn('Window too small', text)
+        for label in ('供应商00', '使用此模型', '测试连接', '编辑', '返回'):
+            self.assertIn(label, text)
 
 
 class ScopedBindingTests(unittest.TestCase):

@@ -179,7 +179,11 @@ def choose_many(title, rows, *, selected=(), cursor=1, refresh=False, heading=''
             disabled_row = index - 1 in disabled
             style = 'class:cursor' if focused else 'class:row.disabled' if disabled_row \
                 else 'class:row.selected' if highlighted or mark == 'x' else ''
-            if focused:
+            if highlighted:
+                # Anchor the window scroll to the highlighted row even when Tab
+                # moved focus to a button. The cursor itself only becomes visible
+                # for the focused window, so an unfocused body shows no cursor
+                # while the list stays scrolled to the selected row.
                 fragments.append(('[SetCursorPosition]', ''))
             prefix = ('> ' if highlighted else '  ') + f'[{mark}] '
             line = prefix + '  '.join(

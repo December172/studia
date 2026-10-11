@@ -99,7 +99,12 @@ def choose_model(rows, active_id=None, *, cursor_id=None, message='', locked_ids
             retained = not highlighted and i < len(rows) and rows[i][0] == active_id
             style = 'class:cursor' if focused else 'class:row.focused' if highlighted else \
                 'class:row.selected' if retained else ''
-            if focused:
+            if highlighted:
+                # The anchor keeps the window scrolled to the highlighted row even
+                # when Tab moved focus to a button: prompt_toolkit only *shows* a
+                # cursor for the focused window, so this changes nothing visible
+                # while the body is unfocused. Without it the list snapped back to
+                # its first rows while the button still acted on the retained row.
                 fragments.append(('[SetCursorPosition]', ''))
             if i == len(rows):
                 line = '  ＋ 添加模型'
@@ -191,9 +196,10 @@ def choose_model(rows, active_id=None, *, cursor_id=None, message='', locked_ids
 
     layout = frame(
         '模型配置 · ● 当前使用',
-        HSplit([body, button_row]),
-        heading=None, status=lambda: state['message'], status_height=2,
-        help_text=context_help, footer=None)
+        body,
+        button_row,
+        status=lambda: state['message'], status_height=2,
+        help_text=context_help)
     app = Application(layout=Layout(layout, focused_element=body),
                       key_bindings=keys, style=STYLE, full_screen=True,
                       input=input, output=output)
@@ -242,7 +248,7 @@ def edit_model(current=None, *, input=None, output=None):
     buttons = [save_button, field('取消', lambda: finish('back'))]
     if current:
         buttons.append(field('删除', lambda: finish('delete')))
-    responsive_buttons = responsive_actions(buttons)
+    action_row = responsive_actions(buttons)
 
     keys.add('tab')(focus_next)
     keys.add('s-tab')(focus_previous)
@@ -257,17 +263,23 @@ def edit_model(current=None, *, input=None, output=None):
     def cancel(event):
         finish('back')
 
-    app = Application(layout=Layout(HSplit([
-        Label('编辑模型' if current else '添加模型', style='class:title'),
+    # The fields share the one frame shape with every other native page, so the
+    # editor gets the same group gaps and content/action rule as the picker.
+    fields = HSplit([
         Label('供应商名称（可留空）'), provider,
         Label('接口地址（OpenAI 兼容 · 含 /v1 等路径）'), url,
         Label('模型名称（Model ID）'), model,
         Label('API Key · 已设置，留空保留' if current else 'API Key'), key,
-        Window(height=1), responsive_buttons,
-        Label('Tab 下一项 · Shift+Tab 上一项 · Esc 返回'),
-        Window(FormattedTextControl(lambda: [('class:error', error)]), height=2, wrap_lines=True),
-    ]), focused_element=provider), key_bindings=keys, style=STYLE, full_screen=True,
-        input=input, output=output)
+    ])
+    layout = frame(
+        '编辑模型' if current else '添加模型',
+        fields,
+        action_row,
+        status=status_window(lambda: error, height=2, style='class:error'),
+        help_text='Tab 下一项 · Shift+Tab 上一项 · Esc 返回')
+    app = Application(layout=Layout(layout, focused_element=provider),
+                      key_bindings=keys, style=STYLE, full_screen=True,
+                      input=input, output=output)
     try:
         return app.run()
     except EOFError:

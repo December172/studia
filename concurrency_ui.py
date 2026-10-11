@@ -10,10 +10,9 @@ from prompt_toolkit.application import Application, get_app
 from prompt_toolkit.filters import has_focus
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.bindings.focus import focus_next, focus_previous
-from prompt_toolkit.layout import HSplit, Layout, Window
+from prompt_toolkit.layout import Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
-from prompt_toolkit.widgets import Label
 
 from base.concurrency import MAX_WORKERS, validate_workers
 from terminal_widgets import STYLE_DICT, field, frame, responsive_actions

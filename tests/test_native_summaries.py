@@ -111,13 +111,37 @@ class ActionPageTests(unittest.TestCase):
                 for line in frames[-1]:
                     self.assertLessEqual(len(line), columns)
 
-    def test_short_body_does_not_stretch_actions_to_the_bottom(self):
-        # At 120x30 a three-line page must keep the action row near the content.
-        _, frames = page(ESC, lines=('甲', '乙', '丙'), columns=120, rows=30)
+    def test_short_page_fills_the_window_with_a_blank_middle(self):
+        # The user asked for a filled window: the heading/content stay at the
+        # top and the action/help group sits at the bottom, with the surplus
+        # rows blank in between instead of one compressed stack of lines.
+        _, frames = page(ESC, lines=('甲', '乙', '丙'), columns=120, rows=30,
+                         help_text='Esc 返回 · q 退出')
         lines = frames[-1]
-        action_row = next((i for i, line in enumerate(lines) if '开始' in line), None)
-        self.assertIsNotNone(action_row)
-        self.assertLess(action_row, 12)
+        content_row = next(i for i, line in enumerate(lines) if '甲' in line)
+        rule_row = next(i for i, line in enumerate(lines) if '─' in line)
+        action_row = next(i for i, line in enumerate(lines) if '开始' in line)
+        help_row = next(i for i, line in enumerate(lines) if 'Esc 返回' in line)
+        self.assertLess(content_row, 6, 'content must stay at the top')
+        self.assertGreater(action_row, 24, 'actions must sit at the bottom')
+        self.assertEqual(rule_row + 1, action_row, 'the rule marks the content/action boundary')
+        self.assertGreater(help_row, action_row)
+        middle = lines[content_row + 1:rule_row]
+        self.assertTrue(any(not line.strip() for line in middle),
+                        'the surplus space between content and actions must stay blank')
+        self.assertEqual(len(lines), 30)
+
+    def test_short_page_keeps_everything_reachable_at_16_rows(self):
+        # The flexible filler collapses on short terminals: nothing scrolls off
+        # and no field/action/help row is lost.
+        lines = ['供应商 · 演示', '模型 · 示例模型']
+        result, frames = page(ESC, lines=lines, columns=40, rows=16,
+                              help_text='Enter 开始 · Tab 按钮 · Esc 返回 · q 退出')
+        self.assertEqual(result.kind, 'back')
+        text = '\n'.join(frames[-1])
+        for value in ('供应商 · 演示', '模型 · 示例模型', '开始', '设置', 'Esc 返回'):
+            self.assertIn(value, text)
+        self.assertNotIn('Window too small', text)
 
     def test_help_wraps_by_whole_segments_without_splitting_tokens(self):
         _, frames = page(ESC, columns=40, rows=16,
