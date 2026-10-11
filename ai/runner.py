@@ -1,7 +1,6 @@
 """Selected-paper workflow with local reports and verified submission outcomes."""
 import hashlib
 import json
-import math
 import os
 import threading
 import time
@@ -83,7 +82,7 @@ def write_report(path, report):
         lines += ["## %d. %s" % (item.get("question_number", index), item.get("title", "无法解析的题目")), ""]
         for opt in item.get("options", []):
             lines.append("%s. %s" % (opt["label"], opt["text"]))
-        lines += ["", ("人工答案：" if item.get("source") == "manual" else "AI 答案：") + json.dumps(item.get("answer"), ensure_ascii=False),
+        lines += ["", "AI 答案：" + json.dumps(item.get("answer"), ensure_ascii=False),
                   "置信度：" + str(item.get("confidence", "")),
                   item.get("explanation", ""), item.get("error", ""), ""]
     path.with_suffix(".md").write_text("\n".join(lines), encoding="utf-8")
@@ -106,17 +105,14 @@ def attempt_not_draft(records, task_id):
 
 
 class AnswerRunner:
-    def __init__(self, api, ai, output_dir="ai_results", auto_submit=False, min_confidence=0.8, output=None, clock_factory=AttemptClock, *, on_log=None, on_progress=None, manual_answer=None, max_workers=1):
-        if not math.isfinite(min_confidence) or not 0 <= min_confidence <= 1:
-            raise ValueError("置信度阈值必须在 0 到 1 之间")
+    def __init__(self, api, ai, output_dir="ai_results", auto_submit=False, output=None, clock_factory=AttemptClock, *, on_log=None, on_progress=None, max_workers=1):
         self.max_workers = validate_workers(max_workers)
         self.api, self.ai, self.output_dir = api, ai, output_dir
-        self.auto_submit, self.min_confidence = auto_submit, min_confidence
+        self.auto_submit = auto_submit
         self.output = lambda message: log_callback(on_log if on_log is not None else output, message)
         self.clock_factory = clock_factory
         self.progress = Reporter(on_progress)
         self.reused = False
-        self.manual_answer = manual_answer
         self.service_cooldown_until = 0.0
 
     def wait_for_ai(self, clock, delay):
@@ -251,8 +247,7 @@ class AnswerRunner:
             failures = 0
             question_total = len(items)
             if self.max_workers > 1 and question_total > 1:
-                parallel = ParallelAnswers(self.ai, [q for _, q, _ in items], self.max_workers, clock,
-                                           allow_manual=self.manual_answer is not None)
+                parallel = ParallelAnswers(self.ai, [q for _, q, _ in items], self.max_workers, clock)
                 parallel.cooldown_until = self.service_cooldown_until
             self.progress.questions("AI 生成 · 等待答案", 0, question_total)
             results = parallel.answers() if parallel is not None else ((i, None) for i in range(len(items)))
@@ -287,22 +282,12 @@ class AnswerRunner:
                                 stage + " · 重试 %s/2" % retry, completed, question_total))
                     self.progress.questions(stage + " · 校验答案", completed, question_total)
                     item_report.update(answer)
-                    if (answer.get("source") != "manual" and
-                            (not isinstance(answer.get("confidence"), (int, float)) or
-                             isinstance(answer["confidence"], bool) or not math.isfinite(answer["confidence"]) or
-                             not self.min_confidence <= answer["confidence"] <= 1)):
-                        raise ValueError("置信度低于设置阈值，需要人工检查")
                     entry = answer_record(q, answer["answer"])
                     entries[position] = entry
                     item_report["record"] = entry
                 except (ValueError, TypeError, AIError) as exc:
                     item_report["error"] = str(exc)
-                    if parallel is not None and q is not None and self.manual_answer is not None:
-                        save_answer(position, item_report)
-                        write_report(path, report)
-                        self.progress.questions(stage + " · 等待在途请求结束后补答", completed, question_total)
-                        parallel.drain()
-                    if isinstance(exc, AIServiceError) and not (exc.retryable and self.manual_answer is not None):
+                    if isinstance(exc, AIServiceError):
                         save_answer(position, item_report)
                         report.update(status="ai_error", message=str(exc))
                         return report
@@ -310,38 +295,18 @@ class AnswerRunner:
                         save_answer(position, item_report)
                         report.update(status="ai_error", message=str(parallel.fatal_error))
                         return report
-                    if q is not None and self.manual_answer is not None:
-                        # Persist before waiting for input, including EOF or Ctrl+C.
-                        item_report["pending_manual"] = True
-                        save_answer(position, item_report)
-                        report.update(status="paused", message="报告已保存；重新开始时全部由 AI 作答")
-                        write_report(path, report)
-                        clock.check()
-                        self.progress.questions(stage + " · 人工补答", completed, question_total)
-                        manual = self.manual_answer(q, str(exc))
-                        if manual is None:
-                            return report
-                        try:
-                            entry = answer_record(q, manual)
-                        except (ValueError, TypeError) as invalid:
-                            item_report["error"] = str(invalid)
-                            return report
-                        item_report.update(answer=manual, confidence=None, explanation="人工补答",
-                                           source="manual", record=entry)
-                        item_report.pop("error", None)
-                        item_report.pop("pending_manual", None)
-                        entries[position] = entry
-                        report.update(status="answering", message="")
-                        write_report(path, report)
-                        completed += 1
-                        self.progress.questions("已处理题目", completed, question_total)
-                        clock.check()
-                        continue
+                    # Unsupported or invalid questions are reported and kept in
+                    # the local report; the paper is never submitted incomplete.
                     failures += 1
                 save_answer(position, item_report)
                 write_report(path, report)
-                completed += 1
-                self.progress.questions("已处理题目", completed, question_total)
+                if position in entries:
+                    # Only a question with a valid, submittable answer advances
+                    # the counter; failed questions stay visible as unfinished.
+                    completed += 1
+                    self.progress.questions("已处理题目", completed, question_total)
+                else:
+                    self.progress.questions("第 %s 题 · 答案未完成" % (position + 1), completed, question_total)
                 clock.check()
             clock.stop()
             clock.check()
@@ -394,8 +359,8 @@ class AnswerRunner:
             # draft when no new paper was opened.
             if report["status"] != "skipped" or paper_opened:
                 write_report(path, report)
-            stage = {"submitted": "已交卷", "preview": "答案已生成 · 未交卷", "paused": "待补答",
-                     "needs_review": "待人工检查", "skipped": "已跳过", "submission_unknown": "交卷结果待确认"}.get(
+            stage = {"submitted": "已交卷", "preview": "答案已生成 · 未交卷",
+                     "needs_review": "答案未完成", "skipped": "已跳过", "submission_unknown": "交卷结果待确认"}.get(
                          report["status"], "处理停止")
             self.progress.questions(stage, completed, question_total)
             report_location = "；报告 %s" % path if path.exists() else ""

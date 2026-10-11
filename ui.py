@@ -6,7 +6,6 @@ from dataclasses import replace
 import getpass
 import io
 import logging
-import math
 import re
 import sys
 import threading
@@ -230,9 +229,9 @@ class TerminalUI:
                 self.results.append((event.name, event.status))
                 self.progress.advance(self.task)
                 label = {"success": "成功", "submitted": "已交卷", "preview": "答案已生成 · 未交卷",
-                         "skipped": "跳过", "paused": "待补答", "needs_review": "待人工处理", "submission_unknown": "交卷结果未知",
+                         "skipped": "跳过", "needs_review": "答案未完成", "submission_unknown": "交卷结果未知",
                          "submitting": "交卷结果未知", "error": "失败", "ai_error": "AI 服务失败", "cancelled": "中断"}.get(event.status, event.status)
-                level = "success" if event.status in ("success", "submitted", "preview") else "info" if event.status == "paused" else "warning" if event.status == "skipped" else "error"
+                level = "success" if event.status in ("success", "submitted", "preview") else "warning" if event.status == "skipped" else "error"
                 self.log(f"{event.name} · {label}", level)
 
     def render(self):
@@ -260,8 +259,7 @@ class TerminalUI:
             panel = Panel(body, title=Text("运行日志 · 最近 8 行", style="muted"),
                           box=theme.BORDER, border_style="border", height=log_rows + 2, padding=(0, 1))
             if self.screen.active:
-                return Group(Text(self.heading, style="title"), self.progress, *resource_details, panel,
-                             Text("Ctrl+C 停止 · 运行中无需按回车", style="muted", no_wrap=True, overflow="ellipsis"))
+                return Group(Text(self.heading, style="title"), self.progress, *resource_details, panel)
             return Group(self.progress, *resource_details, panel)
 
     @contextmanager
@@ -294,7 +292,7 @@ class TerminalUI:
         self.console.print(Panel(Text.assemble(("ICVE AI Assistant", "title"),
                                               (f"  {version}\n智慧职教 AI 助手", "muted")),
                                  box=theme.BORDER, border_style="border"))
-        self.note("Esc 返回 · q 退出 · 运行时 Ctrl+C 停止")
+        self.note("Esc 返回 · q 退出")
 
     def note(self, message, level="muted"):
         if self._prompt_rows and not self.live:
@@ -326,80 +324,6 @@ class TerminalUI:
         if navigation and not secret and value.strip().lower() == "b":
             raise Back()
         return value.strip() or (str(default) if default is not None else "")
-
-    def manual_answer(self, question, reason):
-        """Collect one local answer while the runner keeps the attempt alive."""
-        from ai.questions import answer_record
-
-        def read(prompt):
-            value = self.ask(prompt, navigation=False)
-            if value.lower() == ":q":
-                raise Cancelled()
-            return value
-
-        live = self.live
-        handoff = self.runtime_input.suspend()
-        handoff.__enter__()
-        if live:
-            live.stop()
-            self.live = None
-        try:
-            heading = f"第 {question['number'] + 1} 题"
-            if question.get("child_number") is not None:
-                heading += f" · 第 {question['child_number'] + 1} 小题"
-            self.note(f"{heading} · {question['type']} · 手动补答", "title")
-            # Only display known reason categories, never provider response text.
-            reason = str(reason)
-            label = "AI 未能作答"
-            if "置信度" in reason:
-                label = "AI 把握不足"
-            elif "格式" in reason or "选项" in reason:
-                label = "AI 答案无效"
-            self.note(label)
-            if question.get("context"):
-                self.note(question["context"], "info")
-            self.note(question["title"], "info")
-            for option in question.get("options", []):
-                self.note(f"{option['label']}. {option['text']}", "info")
-            self.shortcuts("Esc 保存报告并返回 · 重新开始会全部重新答题")
-
-            kind = question["type_id"]
-            hints = {1: "输入选项字母，如 B", 2: "输入多个选项，如 AC 或 A,C",
-                     3: "输入对/错（或 true/false、1/0）", 6: "输入答案正文"}
-            while True:
-                if kind in (4, 5):
-                    answer = []
-                    for index in range(question["blank_count"]):
-                        while True:
-                            value = read(f"第 {index + 1} 空")
-                            if value:
-                                answer.append(value)
-                                break
-                            self.note("答案不能为空，请重新输入。", "warning")
-                else:
-                    raw = read(hints[kind])
-                    if kind == 1:
-                        answer = raw.upper()
-                    elif kind == 2:
-                        answer = list(re.sub(r"[\s,，、]+", "", raw.upper()))
-                    elif kind == 3:
-                        answer = {"对": True, "正确": True, "true": True, "1": True, "y": True,
-                                  "错": False, "错误": False, "false": False, "0": False, "n": False}.get(raw.lower())
-                    else:
-                        answer = raw
-                try:
-                    answer_record(question, answer)
-                except ValueError:
-                    self.note("答案无效，请按提示重新输入。", "warning")
-                    continue
-                return answer
-        except (Back, Cancelled, EOFError, KeyboardInterrupt):
-            return None
-        finally:
-            handoff.__exit__(None, None, None)
-            if live:
-                self.live = live
-                live.start()
 
     def table(self, title, columns, rows, help_text=""):
         self._prompt_rows.clear()
@@ -621,7 +545,6 @@ class TerminalUI:
     def review_study(self, courses, max_workers=8):
         self.table("自动学习", ["课程", "操作"], [(c.get("courseName", "未知课程"), "完成课程学习任务") for c in courses],
                    "回车开始 · Esc 返回 · q 退出")
-        self.note(f"学习并发：最多 {max_workers} 项，完成即补下一项")
         while self.ask("操作", "开始") != "开始":
             self.note("回车开始；Esc 返回，q 退出。")
 
@@ -753,18 +676,6 @@ class TerminalUI:
         except Back:
             return ModelEdit("back")
 
-    def confidence(self, default=0.8):
-        if not isinstance(default, (int, float)) or not math.isfinite(default) or not 0 <= default <= 1:
-            default = 0.8
-        while True:
-            try:
-                value = float(self.ask("最低置信度（0–1，模型自报值不代表正确率）", str(default)))
-                if math.isfinite(value) and 0 <= value <= 1:
-                    return value
-            except ValueError:
-                pass
-            self.note("请输入 0 到 1 之间的数字。", "warning")
-
     def finish(self):
         from MoocMain.log import redact
         if self.finished:
@@ -784,9 +695,7 @@ class TerminalUI:
         if self.counts["skipped"]:
             text += f" · 跳过 {self.counts['skipped']}"
         if self.counts["needs_review"]:
-            text += f" · 待人工 {self.counts['needs_review']}"
-        if self.counts["paused"]:
-            text += f" · 待补答 {self.counts['paused']}"
+            text += f" · 未完成 {self.counts['needs_review']}"
         if self.unit == "份试卷":
             total = self.progress.tasks[0].total
             pending = max(0, int(total) - len(self.results)) if total is not None else 0
@@ -820,15 +729,15 @@ class TerminalUI:
     def operation_result(self, paths=()):
         from MoocMain.log import redact
         statuses = {"success": "完成", "submitted": "已交卷", "preview": "答案已生成 · 未交卷",
-                    "skipped": "已跳过", "paused": "待补答", "needs_review": "待人工处理", "error": "失败", "ai_error": "AI 服务失败",
+                    "skipped": "已跳过", "needs_review": "未完成 · 未交卷", "error": "失败", "ai_error": "AI 服务失败",
                     "submission_unknown": "交卷结果未知", "submitting": "交卷结果未知"}
         self.table("执行结果", ["任务", "结果"],
                    [(name, statuses.get(status, status)) for name, status in self.results])
         self.finish()
         if self.counts["preview"]:
             self.note("本地答案未提交到平台，不会产生成绩。需要交卷时，在执行摘要按 s → 执行方式 → 答题并自动交卷。", "warning")
-        if self.counts["paused"]:
-            self.note("报告已保存；重新开始时全部由 AI 重新答题。")
+        if self.counts["needs_review"]:
+            self.note("存在未完成或不支持的题目；仅保存本地报告，未交卷。")
         for error in self.errors:
             self.note(error, "warning")
         if self.pending_error:
@@ -899,12 +808,9 @@ class TerminalUI:
             except Back:
                 continue
 
-    def review_ai(self, selected, config, options, check_connection=None, manage_models=None, connection_status=None,
-                  max_workers=8):
+    def review_ai(self, selected, config, options, check_connection=None, manage_models=None, connection_status=None):
         options["config"] = config
         options.setdefault("auto_submit", True)
-        value = options.get("threshold", .8)
-        options["threshold"] = value if isinstance(value, (float, int)) and math.isfinite(value) and 0 <= value <= 1 else .8
         while True:
             connection = str(options.get("connection_status", ""))
             connection = "连接失败" if "失败" in connection else "已通过" if "通过" in connection else "未测试"
@@ -912,9 +818,7 @@ class TerminalUI:
                 ("供应商", (config.provider_name or "自定义供应商") if config else "未选择"),
                 ("模型", config.model if config else "未选择"),
                 ("连接状态", connection),
-                ("答题并发", f"最多 {max_workers} 题，完成即补下一题"),
                 ("执行方式", "通过校验后自动交卷" if options["auto_submit"] else "仅生成答案（不交卷，无成绩）"),
-                ("最低置信度", str(options["threshold"])),
             ])
             self.selected_task_note(selected)
             self.shortcuts("回车开始 · " + ("m 模型配置 · " if manage_models else "") +
@@ -924,7 +828,7 @@ class TerminalUI:
                 if config is None:
                     self.note("请按 m 选择模型。", "warning")
                     continue
-                return options["auto_submit"], options["threshold"]
+                return options["auto_submit"]
             if action.lower() == "s":
                 self.edit_answer_options(options)
             if action.lower() == "t" and check_connection:
@@ -935,23 +839,13 @@ class TerminalUI:
                 options["connection_status"] = connection_status(config) if connection_status else "未测试"
 
     def edit_answer_options(self, options):
-        while True:
-            try:
-                action = self.choice("AI 答题设置", [(1, "执行方式", "仅本次操作有效"),
-                                                    (2, "最低置信度", "模型自报值不代表正确率")],
-                                     help_text="Esc 返回摘要 · q 退出")
-            except Back:
-                return
-            try:
-                if action == 1:
-                    mode = self.choice("执行方式", [(1, "仅生成答案", "不交卷，无平台成绩"),
-                                                    (2, "答题并自动交卷", "全部题目通过校验后提交")],
-                                       default=2 if options["auto_submit"] else 1)
-                    options["auto_submit"] = mode == 2
-                else:
-                    options["threshold"] = self.confidence(options["threshold"])
-            except Back:
-                continue
+        try:
+            mode = self.choice("执行方式", [(1, "仅生成答案", "不交卷，无平台成绩"),
+                                            (2, "答题并自动交卷", "全部题目通过校验后提交")],
+                               default=2 if options["auto_submit"] else 1)
+        except Back:
+            return
+        options["auto_submit"] = mode == 2
 
     def home(self, platform_default=0):
         mode = self.choice("1 / 选择功能", [
@@ -1038,10 +932,10 @@ class TerminalUI:
                                           ("剩余次数", lambda x: attempts_text(x[1], x[2]))),
                            actions={"r": "刷新状态"} if refresh else None)
 
-    def answer_settings(self, confidence_default=0.8):
+    def answer_settings(self):
         mode = self.choice("AI / 执行方式", [(1, "仅生成答案", "不交卷，无平台成绩"),
                                                   (2, "答题并自动交卷", "全部题目通过校验后提交")], default=2)
-        return mode == 2, self.confidence(confidence_default)
+        return mode == 2
 
     def concurrency_editor(self, current, *, message=''):
         from concurrency_ui import edit_concurrency

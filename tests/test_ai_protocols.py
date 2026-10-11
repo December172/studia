@@ -45,6 +45,7 @@ class ProtocolTests(unittest.TestCase):
         result = client.answer({'type': '单选', 'title': 'test', 'options': [],
                                 'platform_token': 'private', 'std_answer': 'old answer'})
         self.assertEqual(result, {'answer': 'A', 'confidence': .95, 'explanation': 'ok'})
+        self.assertEqual(sorted(result), ['answer', 'confidence', 'explanation'])
         call = session.post.call_args
         self.assertEqual(call.args[0], 'https://example.org/v1/responses')
         body = call.kwargs['json']
@@ -80,7 +81,7 @@ class ProtocolTests(unittest.TestCase):
         variants += [dict(response_payload(), error={'message': 'private provider data'}),
                      dict(response_payload(), output=[]), {'output_text': ANSWER},
                      response_payload('bad JSON'), response_payload('{"answer":"A"}'),
-                     response_payload('{"answer":"A","confidence":true,"explanation":"ok"}')]
+                     response_payload('{"answer":"A","explanation":null}')]
         for content in [[{'type': 'refusal', 'refusal': 'no'}],
                         [{'type': 'output_text', 'text': None}], []]:
             payload = response_payload()
@@ -95,6 +96,45 @@ class ProtocolTests(unittest.TestCase):
                 with self.assertRaises(AIResponseError) as caught:
                     client.answer({'title': 'test'})
                 self.assertNotIn('private provider data', str(caught.exception))
+
+    def test_responses_accepts_a_valid_answer_without_usable_confidence_metadata(self):
+        for text in ('{"answer":"A","explanation":"ok"}', '{"answer":"A","confidence":null,"explanation":"ok"}',
+                     '{"answer":"A","confidence":"high","explanation":"ok"}',
+                     '{"answer":"A","confidence":-1,"explanation":"ok"}',
+                     '{"answer":"A","confidence":%s,"explanation":"ok"}' % 10 ** 400,
+                     '{"answer":"A","confidence":-%s,"explanation":"ok"}' % 10 ** 400):
+            with self.subTest(text=text[:40]):
+                client, _ = self.client(response_payload(text))
+                result = client.answer({'title': 'test'})
+                self.assertEqual(result['answer'], 'A')
+                self.assertEqual(result['explanation'], 'ok')
+                self.assertNotIn('confidence', result)
+
+    def test_chat_completions_accepts_a_valid_answer_without_usable_confidence_metadata(self):
+        for text in ('{"answer":"A","explanation":"ok"}', '{"answer":"A","confidence":true,"explanation":"ok"}',
+                     '{"answer":"A","confidence":NaN,"explanation":"ok"}',
+                     '{"answer":"A","confidence":%s,"explanation":"ok"}' % 10 ** 400,
+                     '{"answer":"A","confidence":-%s,"explanation":"ok"}' % 10 ** 400):
+            with self.subTest(text=text[:40]):
+                payload = {'choices': [{'finish_reason': 'stop', 'message': {'content': text}}]}
+                client, _ = self.client(payload, 'chat_completions')
+                result = client.answer({'title': 'test'})
+                self.assertEqual(result['answer'], 'A')
+                self.assertNotIn('confidence', result)
+
+    def test_connection_test_accepts_answer_without_confidence_in_either_format(self):
+        payload = response_payload('{"answer":"A","explanation":"ok"}')
+        client, session = self.client(payload)
+        client.check_connection()
+        self.assertEqual(session.post.call_count, 1)
+        chat = {'choices': [{'finish_reason': 'stop',
+                             'message': {'content': '{"answer":"A","explanation":"ok"}'}}]}
+        client, session = self.client(chat, 'chat_completions')
+        client.check_connection()
+        self.assertEqual(session.post.call_count, 1)
+        prompt = session.post.call_args.kwargs['json']['messages'][0]['content']
+        self.assertNotIn('confidence', prompt)
+        self.assertIn('"answer"', prompt)
 
     def test_responses_preserves_service_error_and_network_retry_classification(self):
         for status, error in [(401, AIServiceError), (429, AITransientServiceError),

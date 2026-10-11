@@ -65,7 +65,7 @@ class AIHealthTests(unittest.TestCase):
         selected = [({'id': 'ci', 'courseId': 'c'}, {'id': 'paper', 'name': '任务'}, 1)]
         with patch('app.AIClient', return_value=AIClient(self.config, session)):
             with self.assertRaises(AIError):
-                self.app.execute_ai(Mock(), selected, self.config, False, .8, api=api)
+                self.app.execute_ai(Mock(), selected, self.config, False, api=api)
         api.paper.assert_not_called()
         self.assertIn('失败', self.app.ai_status_text(self.config))
 

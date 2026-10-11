@@ -66,7 +66,7 @@ class AttachmentWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             app = Application(view, SettingsStore(directory))
             with patch.object(app, 'verify_ai') as verify, patch('app.AnswerRunner') as runner:
-                reports = app.execute_ai(Mock(), [(COURSE, ATTACHMENT, 1)], Mock(), True, .8)
+                reports = app.execute_ai(Mock(), [(COURSE, ATTACHMENT, 1)], Mock(), True)
         self.assertEqual(reports[0]['status'], 'skipped')
         self.assertIn('附件作业', reports[0]['message'])
         verify.assert_not_called()
@@ -79,7 +79,7 @@ class AttachmentWorkflowTests(unittest.TestCase):
             with patch.object(app, 'verify_ai'), patch('app.AnswerRunner') as factory:
                 factory.return_value.run_paper.return_value = {'status': 'preview', 'paper': '普通作业'}
                 reports = app.execute_ai(Mock(), [(COURSE, ATTACHMENT, 1), (COURSE, NORMAL, 1)],
-                                         Mock(), False, .8, api=Mock())
+                                         Mock(), False, api=Mock())
         self.assertEqual([r['status'] for r in reports], ['skipped', 'preview'])
         factory.return_value.run_paper.assert_called_once_with(COURSE, NORMAL, 1)
 

@@ -120,14 +120,13 @@ report('done')
         self.assertIn('interrupted', self.messages)
         self.until(lambda: {'restored_echo': True} in self.messages)
 
-    def test_manual_answer_handoff_returns_to_runtime_mode(self):
-        self.launch('''with u.session():
+    def test_runtime_input_handoff_returns_to_runtime_mode(self):
+        self.launch('''from ui import legacy_input
+with u.session():
  with u.activity('synthetic'):
   report('running')
   wait()
-  answer=u.manual_answer({'number':0,'paper_id':'synthetic','paper_sub_id':None,'raw_options':[],
-    'type':'单选','type_id':1,'title':'Synthetic',
-    'options':[{'label':'A','text':'one','value':'a'},{'label':'B','text':'two','value':'b'}]}, '格式错误')
+  answer=legacy_input('输入选项 ')
   report(answer)
   report('resumed')
   wait()
@@ -137,6 +136,8 @@ report('done')
         os.write(self.master, b'\r' * 5)
         os.write(self.release, b'x')
         self.until(lambda: '输入选项'.encode() in self.raw)
+        # The suspended prompt accepts ordinary echoing input.
+        self.assertTrue(termios.tcgetattr(self.slave)[3] & termios.ECHO)
         os.write(self.master, b'B\r')
         self.until(lambda: 'resumed' in self.messages)
         self.assertIn('B', self.messages)

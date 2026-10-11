@@ -244,13 +244,13 @@ class ModelManagementTests(unittest.TestCase):
         self.store.save_ai_profile(self.a)
         second = self.store.save_ai_profile(self.b)
         selected = [({'id': 'ci', 'courseId': 'c'}, {'id': 'p', 'name': '试卷'}, 1)]
-        inputs = iter(['s', '2', '.9', 'b', 'm', 't', ''])
+        inputs = iter(['s', '2', 'm', 't', ''])
         self.view.input_fn = lambda: next(inputs)
         state = {}
         seen = []
 
-        def execute(client, tasks, config, auto_submit, threshold):
-            seen.append((tasks, config, auto_submit, threshold))
+        def execute(client, tasks, config, auto_submit):
+            seen.append((tasks, config, auto_submit))
             return []
 
         with patch.object(self.app, 'task_catalog', return_value=selected), \
@@ -260,7 +260,7 @@ class ModelManagementTests(unittest.TestCase):
              patch.object(self.app, 'execute_ai', side_effect=execute), \
              patch.object(self.view, 'operation_result', return_value=1):
             CourseWorkspace(self.app).tasks([selected[0][0]], 2, state)
-        self.assertEqual(seen, [self.b, (selected, self.b, True, .9)])
+        self.assertEqual(seen, [self.b, (selected, self.b, True)])
         self.assertEqual(self.store.ai_config(), self.b)
         self.assertIn('second', self.output.getvalue())
 

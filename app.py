@@ -260,10 +260,9 @@ class Application:
             self.view.cancelled = True
             return []
         config = self.ai_configuration()
-        auto_submit, threshold = self.view.answer_settings(self.store.get("confidence", 0.8))
-        self.remember(lambda: self.store.set("confidence", threshold))
+        auto_submit = self.view.answer_settings()
         self.view.ai_plan(selected, auto_submit)
-        return self.execute_ai(client, selected, config, auto_submit, threshold, api=api)
+        return self.execute_ai(client, selected, config, auto_submit, api=api)
 
     def task_catalog(self, client, courses):
         api = ExamAPI(client)
@@ -285,12 +284,11 @@ class Application:
                         catalog.append((course, dict(item, _completion_status=statuses[exam_id]), category))
         return catalog
 
-    def execute_ai(self, client, selected, config, auto_submit, threshold, api=None):
+    def execute_ai(self, client, selected, config, auto_submit, api=None):
         max_workers = self.store.concurrency()['ai']
         # Verify with synthetic material before paper() can start an attempt.
         runner = None
         results = []
-        self.view.note(f"AI 答题：最多 {max_workers} 题同时处理，完成即保存并更新进度")
         with self.view.activity("AI 答题"):
             self.progress.begin("AI 答题", len(selected), "份试卷")
             for course, item, category in selected:
@@ -307,8 +305,7 @@ class Application:
                         ai_client = self.verify_ai(config)
                         api = api or ExamAPI(client)
                         runner = AnswerRunner(api, ai_client, auto_submit=auto_submit,
-                                              min_confidence=threshold, on_progress=self.view.on_progress,
-                                              manual_answer=self.view.manual_answer, max_workers=max_workers)
+                                              on_progress=self.view.on_progress, max_workers=max_workers)
                     result = runner.run_paper(course, item, category)
                     results.append(result)
                 except TaskUnavailableError as exc:
@@ -325,9 +322,8 @@ class Application:
                 if status == "ai_error":
                     self.remember(lambda: self.store.save_ai_health(config, "error", result.get("message", "AI 服务失败")))
                 self.progress.result(name, status)
-                if result.get("stop_queue") or status in ("submission_unknown", "submitting", "ai_error", "paused"):
-                    if result["status"] != "paused":
-                        logger.warning("队列停止：服务不可用或交卷结果待确认；其余试卷未执行。")
+                if result.get("stop_queue") or status in ("submission_unknown", "submitting", "ai_error"):
+                    logger.warning("队列停止：服务不可用或交卷结果待确认；其余试卷未执行。")
                     break
         return results
 
