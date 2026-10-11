@@ -191,6 +191,48 @@ class AIConcurrencyTests(unittest.TestCase):
         self.assertTrue(all(len(threads) == 1 for threads in session_threads.values()))
         self.assertFalse(self.ai.session.post.called)
 
+    def test_ninth_question_starts_while_first_is_slow_with_eight_workers(self):
+        # Completion-driven refill: the 9th question must enter while the slow
+        # first question still holds one of the eight workers.
+        self.api.paper.return_value['questions'] = [self.q(i) for i in range(9)]
+        barrier = threading.Barrier(8)
+        release = threading.Event()
+        order, snapshot = [], []
+        lock = threading.Lock()
+        def handle(q):
+            title = q['title']
+            if title != '题8':
+                barrier.wait(3)
+            with lock:
+                order.append(('start', title))
+            if title == '题0':
+                self.assertTrue(release.wait(5), 'slow first question never unblocked')
+            if title == '题8':
+                # Later questions may not start before an earlier answer is saved.
+                report = json.loads(next(Path(self.temp.name).rglob('*.json')).read_text())
+                snapshot.extend(report['answers'])
+            with lock:
+                order.append(('end', title))
+            if title == '题8':
+                release.set()
+            return response()
+        transport = Transport(handle)
+        report = self.run_paper(transport, workers=8)
+        self.assertEqual(report['status'], 'submitted')
+        self.assertEqual(transport.peak, 8)
+        self.assertEqual(Counter(transport.calls), Counter(f'题{i}' for i in range(9)))
+        self.assertEqual([a['title'] for a in report['answers']], [f'题{i}' for i in range(9)])
+        # The 9th started before the blocked first finished.
+        self.assertLess(order.index(('start', '题8')), order.index(('end', '题0')))
+        self.assertNotIn('题0', [a['title'] for a in snapshot])
+        self.assertTrue(snapshot, 'no completed answer was saved before the 9th started')
+        self.assertTrue(set(a['title'] for a in snapshot).issubset({f'题{i}' for i in range(1, 8)}))
+        self.assertEqual(len(self.api.submit.call_args.args[0]['taskExamProblemRecordList']), 9)
+        self.assertEqual(self.api.submit.call_count, 1)
+        completed = [event.completed for _, event in self.events if event.kind == 'questions' and event.total]
+        self.assertEqual(completed, sorted(completed))
+        self.assertEqual(max(completed), 9)
+
     def test_duplicate_identity_is_not_requested_twice_or_submitted(self):
         self.api.paper.return_value['questions'] = [self.q(0), self.q(0), self.q(1)]
         transport = Transport(lambda _: response())

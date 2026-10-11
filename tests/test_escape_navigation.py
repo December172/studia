@@ -8,6 +8,7 @@ from unittest.mock import patch
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from rich.console import Console
+from rich.text import Text
 
 import theme
 import ui
@@ -45,8 +46,10 @@ class EscapeNavigationTests(unittest.TestCase):
             with patch('ui.read_terminal_line', side_effect=reader), patch('sys.stdin.isatty', return_value=True):
                 with self.assertRaises(ui.Back):
                     view.review_ai([], AIConfig('https://example.org/v1', 'model', 'key'), {})
-        self.assertIn('Esc 返回', output.getvalue())
-        self.assertNotIn('b 返回', output.getvalue())
+        # Render output carries ANSI styling; assert on the visible text only.
+        plain = Text.from_ansi(output.getvalue()).plain
+        self.assertIn('Esc 返回', plain)
+        self.assertNotIn('b 返回', plain)
 
     def test_escape_in_scripted_secret_and_manual_input_also_navigates_back(self):
         view, _ = self.view(['\x1b'])

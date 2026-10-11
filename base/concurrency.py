@@ -2,7 +2,7 @@
 
 DEFAULT_WORKERS = 1
 MAX_WORKERS = 8
-INTERACTIVE_WORKERS = 2
+INTERACTIVE_WORKERS = 8
 
 
 def validate_workers(value):
