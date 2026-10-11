@@ -1,4 +1,6 @@
 import io
+import threading
+import time
 import unittest
 
 from prompt_toolkit.input import create_pipe_input
@@ -9,15 +11,29 @@ from prompt_toolkit.data_structures import Size
 
 from ai.client import AIConfig
 
+ROWS = [('a', '供应商一', 'same', '?'), ('b', '供应商二', 'same', '?')]
+
 
 class ModelUITests(unittest.TestCase):
-    def picker(self, keys, active='a', rows=None):
+    def picker(self, keys, active='a', rows=None, **kwargs):
         from model_ui import choose_model
         rows = rows if rows is not None else [('a', '供应商一', 'same', '✓'),
                                               ('b', '供应商二', 'same', '?')]
         with create_pipe_input() as pipe:
             pipe.send_text(keys)
-            return choose_model(rows, active, input=pipe, output=DummyOutput())
+            return choose_model(rows, active, input=pipe, output=DummyOutput(), **kwargs)
+
+    def terminal_picker(self, keys, active='a', rows=None, **kwargs):
+        from model_ui import choose_model
+        rows = rows if rows is not None else ROWS
+        stream = io.StringIO()
+        output = Vt100_Output(stream, lambda: Size(rows=24, columns=80),
+                              term='xterm-256color', default_color_depth=ColorDepth.DEPTH_8_BIT,
+                              enable_cpr=False)
+        with create_pipe_input() as pipe:
+            pipe.send_text(keys)
+            result = choose_model(rows, active, input=pipe, output=output, **kwargs)
+        return result, stream.getvalue()
 
     def form(self, keys, current=None):
         from model_ui import edit_model
@@ -121,6 +137,100 @@ class ModelUITests(unittest.TestCase):
         old = AIConfig('https://one.example/v1', 'old', 'secret-key')
         self.assertEqual(self.form('\t\t\t\t\t\t\r', old).action, 'delete')
         self.assertEqual(self.form('\t\t\t\t\t\r').action, 'back')
+
+    def wait_until(self, predicate, description):
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(.01)
+        self.fail('timed out waiting for ' + description)
+
+    def running_picker(self, keys, rows=None, **kwargs):
+        from model_ui import choose_model
+        stream = io.StringIO()
+        output = Vt100_Output(stream, lambda: Size(rows=24, columns=80),
+                              term='xterm-256color', enable_cpr=False)
+        context = create_pipe_input()
+        pipe = context.__enter__()
+        self.addCleanup(context.__exit__, None, None, None)
+        state = {}
+        def run():
+            try:
+                state['value'] = choose_model(rows or ROWS, 'a', input=pipe, output=output, **kwargs)
+            except BaseException as exc:
+                state['error'] = exc
+            finally:
+                state['done'] = True
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(pipe.send_text, '\x03')
+        pipe.send_text(keys)
+        return pipe, state, stream
+
+    def test_pending_test_prevents_duplicates_and_retains_selection(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        calls = []
+        def check(profile):
+            calls.append(profile)
+            release.wait(3)
+            return '连接通过'
+        pipe, state, stream = self.running_picker('\x1b[Btt\x1b[A\r', test_connection=check)
+        self.wait_until(lambda: '测试中' in stream.getvalue(), 'pending frame')
+        self.assertEqual(calls, ['b'])
+        self.assertFalse(state.get('done'))
+        release.set()
+        self.wait_until(lambda: '连接通过' in stream.getvalue(), 'result frame')
+        self.assertIn('秒', stream.getvalue())
+        pipe.send_text('\r')
+        self.wait_until(lambda: state.get('done'), 'selection')
+        self.assertNotIn('error', state)
+        self.assertEqual(state['value'].profile_id, 'b')
+
+    def test_visible_test_button_and_retest_do_not_activate_or_exit(self):
+        calls = []
+        pipe, state, stream = self.running_picker('\x1b[B\t\t\r',
+            test_connection=lambda profile: calls.append(profile) or '连接通过')
+        self.wait_until(lambda: '连接通过' in stream.getvalue(), 'button test result')
+        self.assertEqual(calls, ['b'])
+        self.assertFalse(state.get('done'))
+        pipe.send_text('t')
+        self.wait_until(lambda: len(calls) == 2, 'retest')
+        pipe.send_text('\x1b')
+        self.wait_until(lambda: state.get('done'), 'back')
+        self.assertEqual(state['value'].action, 'back')
+        for label in ('使用此模型', '测试连接', '编辑'):
+            self.assertIn(label, stream.getvalue())
+
+    def test_builtin_can_be_tested_and_failures_are_inline(self):
+        calls = []
+        pipe, state, stream = self.running_picker('t', rows=[('a', '默认供应商', 'model', '?')],
+            locked_ids={'a'}, test_connection=lambda profile: calls.append(profile) or '连接失败：网络超时')
+        self.wait_until(lambda: '网络超时' in stream.getvalue(), 'failed test')
+        self.assertEqual(calls, ['a'])
+        self.assertFalse(state.get('done'))
+        pipe.send_text('e\r')
+        self.wait_until(lambda: state.get('done'), 'selection after locked edit')
+        self.assertEqual(state['value'].action, 'select')
+
+    def test_back_during_pending_test_closes_without_worker_exception(self):
+        release = threading.Event()
+        done = threading.Event()
+        self.addCleanup(release.set)
+        def check(profile):
+            release.wait(3)
+            done.set()
+            raise RuntimeError('token=never-show')
+        pipe, state, stream = self.running_picker('t', test_connection=check)
+        self.wait_until(lambda: '测试中' in stream.getvalue(), 'pending frame')
+        pipe.send_text('\x1b')
+        self.wait_until(lambda: state.get('done'), 'back during pending')
+        release.set()
+        self.assertTrue(done.wait(3))
+        self.assertEqual(state['value'].action, 'back')
+        self.assertNotIn('never-show', stream.getvalue())
 
     def test_passwords_are_masked_in_real_terminal_rendering(self):
         from model_ui import edit_model

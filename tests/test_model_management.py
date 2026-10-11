@@ -1,5 +1,6 @@
 import io
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -144,6 +145,95 @@ class ModelManagementTests(unittest.TestCase):
             self.assertEqual(self.app.manage_models(), self.a)
         self.assertEqual(self.store.ai_config(), self.a)
         self.assertIn('磁盘已满', self.output.getvalue())
+
+    def test_picker_test_checks_the_highlighted_model_without_activating_it(self):
+        first = self.store.save_ai_profile(self.a)
+        second = self.store.save_ai_profile(self.b)
+        tests = []
+
+        def picker(rows, active_id, *, cursor_id=None, message="", locked_ids=(), test_connection=None):
+            self.assertEqual(active_id, first)
+            status = test_connection(second)
+            tests.append(status)
+            return ModelChoice('back')
+
+        with patch.object(self.view, 'model_picker', side_effect=picker), \
+             patch('app.AIClient.check_connection', autospec=True, return_value=None) as check:
+            self.assertEqual(self.app.manage_models(), self.a)
+        self.assertEqual(self.store.ai_config(), self.a)
+        self.assertEqual(self.store.ai_health(self.b)['status'], 'ok')
+        self.assertIn('通过', tests[0])
+        self.assertEqual(check.call_args.args[0].config, self.b)
+        self.assertNotIn('key-two', repr(tests))
+
+    def test_picker_test_reports_failure_without_activating_or_leaking_reason(self):
+        first = self.store.save_ai_profile(self.a)
+        second = self.store.save_ai_profile(self.b)
+        statuses = []
+        with patch.object(self.view, 'model_picker', side_effect=lambda rows, active_id, **kwargs:
+                          statuses.append(kwargs['test_connection'](second)) or ModelChoice('back')), \
+             patch('app.AIClient.check_connection', autospec=True, side_effect=AIError('网络超时')):
+            self.assertEqual(self.app.manage_models(), self.a)
+        self.assertEqual(self.store.ai_config(), self.a)
+        self.assertIn('网络超时', statuses[0])
+        self.assertEqual(self.store.ai_health(self.b)['status'], 'error')
+
+    def test_default_provider_can_be_tested(self):
+        self.store.ensure_default_model()
+        default = self.store.ai_profiles()[0]
+        statuses = []
+        with patch.object(self.view, 'model_picker', side_effect=lambda rows, active_id, **kwargs:
+                          statuses.append(kwargs['test_connection'](default.id)) or ModelChoice('back')), \
+             patch('app.AIClient.check_connection', autospec=True, return_value=None) as check:
+            self.app.manage_models()
+        self.assertIn('通过', statuses[0])
+        self.assertEqual(check.call_args.args[0].config, default.config)
+
+    def test_unexpected_test_error_is_safe_and_never_opens_a_live_renderer(self):
+        profile = self.store.save_ai_profile(self.a)
+        with patch('app.AIClient.check_connection', side_effect=OSError('socket token=never-show')), \
+             patch.object(self.view, 'activity', side_effect=AssertionError('nested renderer')) as activity:
+            status = self.app.test_profile_connection(profile)
+        self.assertIn('失败', status)
+        self.assertNotIn('never-show', status)
+        activity.assert_not_called()
+
+    def test_settings_menu_has_no_standalone_connection_test(self):
+        entries = []
+        self.view.input_fn = lambda: entries.append(True) or '0'
+        self.app.manage_settings()
+        rendered = self.output.getvalue()
+        self.assertNotIn('测试 AI 连接', rendered)
+        self.assertIn('模型配置', rendered)
+
+    def test_background_health_save_cannot_overwrite_a_later_activation(self):
+        self.store.save_ai_profile(self.a)
+        second = self.store.save_ai_profile(self.b)
+        other_store = SettingsStore(self.temp.name)
+        writing = threading.Event()
+        release = threading.Event()
+        activated = threading.Event()
+        original_write = self.store._write
+        def slow_write(data):
+            writing.set()
+            release.wait(3)
+            original_write(data)
+        def activate():
+            other_store.activate_ai_profile(second)
+            activated.set()
+        with patch.object(self.store, '_write', side_effect=slow_write):
+            worker = threading.Thread(target=lambda: self.store.save_ai_health(self.a, 'ok'))
+            worker.start()
+            self.assertTrue(writing.wait(3))
+            change = threading.Thread(target=activate)
+            change.start()
+            activated.wait(.1)
+            release.set()
+            worker.join(3)
+            change.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(change.is_alive())
+        self.assertEqual(self.store.ai_config(), self.b)
 
     def test_first_configuration_cancel_returns_without_answering(self):
         with patch.object(self.view, 'model_picker', return_value=ModelChoice('back')):

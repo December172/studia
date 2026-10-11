@@ -12,7 +12,6 @@ from ai.client import AIClient, AIError
 from ai.runner import AnswerRunner
 from reporting import Reporter
 from base.auth import AuthenticationExpired, PlatformUnavailable
-from base.concurrency import INTERACTIVE_WORKERS
 from settings import SettingsStore, SettingsError
 from task_capabilities import task_availability
 
@@ -109,7 +108,8 @@ class Application:
                 rows.append((profile.id, name, profile.config.model, status))
             try:
                 choice = self.view.model_picker(rows, active_id, cursor_id=cursor_id,
-                                                message=message, locked_ids=locked_ids)
+                                                message=message, locked_ids=locked_ids,
+                                                test_connection=self.test_profile_connection)
                 if choice.action == "back":
                     return self.store.ai_config()
                 cursor_id = choice.profile_id
@@ -154,6 +154,28 @@ class Application:
             return "上次连接通过 · " + str(health.get("checked_at", "")).replace("T", " ")
         return "连接失败 · " + str(health.get("message", "请重新测试"))
 
+    def test_profile_connection(self, profile_id):
+        """Backend-only test for the picker; no rendering or profile activation."""
+        from dataclasses import replace
+        from MoocMain.log import redact
+        try:
+            config = next((p.config for p in self.store.ai_profiles() if p.id == profile_id), None)
+            if config is None:
+                return '连接失败：配置已不存在，请重新打开列表'
+            previous = replace(config)
+            try:
+                AIClient(config).check_connection()
+            except AIError as exc:
+                reason = ' '.join(str(redact(str(exc))).split()).replace(config.api_key, '***')
+                self.store.save_ai_health(config, 'error', reason)
+                return '连接失败：' + reason
+            self.store.save_ai_health(config, 'ok', previous_config=previous)
+            return '连接通过'
+        except SettingsError:
+            return '测试结果无法保存，请检查配置文件权限后重试'
+        except Exception:
+            return '连接测试失败，请检查配置后重试'
+
     def verify_ai(self, config, client=None):
         from dataclasses import replace
         previous_config = replace(config)
@@ -179,13 +201,13 @@ class Application:
         return self.ai_status_text(config)
 
     def study(self, version, client=None, selected=None):
-        max_workers = INTERACTIVE_WORKERS
         api_class, handler = (ZYKMoocApi, ZYKMoocHandler) if version == 1 else (AIMoocApi, AIMoocHandler)
         if client is None:
             client, selected = self.client_and_courses(api_class)
         if not selected:
             self.view.cancelled = True
             return
+        max_workers = self.store.concurrency()['study']
         self.view.plan("学习管理", selected)
         self.view.note(f"自动学习：最多 {max_workers} 项同时处理，完成即更新进度")
         with self.view.activity("处理课程"):
@@ -264,7 +286,7 @@ class Application:
         return catalog
 
     def execute_ai(self, client, selected, config, auto_submit, threshold, api=None):
-        max_workers = INTERACTIVE_WORKERS
+        max_workers = self.store.concurrency()['ai']
         # Verify with synthetic material before paper() can start an attempt.
         runner = None
         results = []
@@ -314,12 +336,27 @@ class Application:
         self.remember(self.store.ensure_default_model)
         return CourseWorkspace(self).run()
 
+    def manage_concurrency(self):
+        draft, message = self.store.concurrency(), ''
+        while True:
+            edited = self.view.concurrency_editor(draft, message=message)
+            if edited is None:
+                return False
+            draft = edited
+            try:
+                self.store.save_concurrency(draft['ai'], draft['study'])
+            except SettingsError as exc:
+                message = str(exc)
+                continue
+            return True
+
     def manage_settings(self, current_platform="mooc"):
         from ui import Back
         message = ""
         while True:
             try:
-                action = self.view.settings_menu(self.store.path, self.ai_status_text(), message=message)
+                action = self.view.settings_menu(self.store.path, self.ai_status_text(), message=message,
+                                                 concurrency=self.store.concurrency())
                 message = ""
             except Back:
                 return False
@@ -331,11 +368,8 @@ class Application:
                 except SettingsError as exc:
                     self.view.note(str(exc), "error")
             elif action == 2:
-                self.view.note(self.test_ai_connection())
-                try:
-                    self.view.ask("回车或 Esc 返回设置")
-                except Back:
-                    pass
+                if self.manage_concurrency():
+                    message = '并发设置已保存，下次运行生效。'
             elif action in (3, 4):
                 platform = "mooc" if action == 3 else "zyk"
                 if self.remember(lambda: self.store.clear_session(platform)):

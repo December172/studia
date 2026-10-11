@@ -196,6 +196,7 @@ class ObservationTests(unittest.TestCase):
         course = {"id": "ci", "courseId": "c", "courseName": "课程"}
         selected = [(course, {"id": "a", "name": "A"}, 1), (course, {"id": "b", "name": "B"}, 1)]
         store = Mock()
+        store.concurrency.return_value = {'ai': 8, 'study': 8}
         from ai.client import AIConfig
         store.ai_config.return_value = AIConfig('https://example.org/v1', 'test-model', 'synthetic-key')
         app = Application(ui, store=store)

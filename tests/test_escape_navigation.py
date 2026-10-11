@@ -59,13 +59,12 @@ class EscapeNavigationTests(unittest.TestCase):
         with self.assertRaises(ui.Back):
             view.ask('Key', secret=True)
 
-    def test_escape_from_connection_result_returns_to_settings(self):
+    def test_escape_from_concurrency_editor_returns_to_settings(self):
         view, _ = self.view(['2', '\x1b', '0'])
         with tempfile.TemporaryDirectory() as directory:
             app = Application(view, SettingsStore(Path(directory)))
-            with patch.object(app, 'test_ai_connection', return_value='未配置') as test_connection:
-                self.assertFalse(app.manage_settings())
-                test_connection.assert_called_once()
+            self.assertFalse(app.manage_settings())
+            self.assertFalse(app.store.path.exists())
 
     def test_escape_delete_confirmation_returns_to_editor_without_deleting(self):
         view, _ = self.view(['\x1b'])

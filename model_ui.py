@@ -1,5 +1,7 @@
 """Model picker and draft editor. Never writes credentials or contacts a service."""
 from dataclasses import dataclass
+import threading
+import time
 from typing import Optional
 
 from prompt_toolkit.application import Application, get_app
@@ -19,6 +21,7 @@ from checklist import fit
 STYLE = Style.from_dict({
     'title': 'ansicyan bold', 'active': 'ansicyan bold',
     'cursor': 'bg:ansicyan ansiblack bold', 'error': 'ansiyellow',
+    'pending': 'ansiyellow', 'result': 'ansigreen',
     'text-area': 'bg:#202b33 #ffffff', 'text-area focused': 'bg:#263b45 #ffffff',
     'button': 'ansicyan', 'button.focused': 'bg:ansicyan ansiblack bold',
 })
@@ -35,72 +38,131 @@ class ModelEdit:
     config: Optional[AIConfig] = None
 
 
-def choose_model(rows, active_id=None, *, cursor_id=None, message='', locked_ids=(), input=None, output=None):
-    """Rows contain only (id, provider, model, status), never API keys."""
+def choose_model(rows, active_id=None, *, cursor_id=None, message='', locked_ids=(),
+                 input=None, output=None, test_connection=None):
+    """Test the highlighted saved profile without activating it or leaving the page."""
+    rows = list(rows)
     cursor = next((i for i, row in enumerate(rows) if row[0] == (cursor_id or active_id)), 0)
     keys = KeyBindings()
+    state = {'pending': False, 'message': message}
+    closed = threading.Event()
+
+    def finish(action):
+        if not state['pending']:
+            app.exit(result=ModelChoice(action, rows[cursor][0] if cursor < len(rows) else None))
+
+    def use():
+        finish('select' if cursor < len(rows) else 'add')
+
+    def edit():
+        if cursor < len(rows) and rows[cursor][0] not in locked_ids:
+            finish('edit')
+
+    def start_test():
+        if state['pending'] or test_connection is None or cursor >= len(rows):
+            return
+        profile_id = rows[cursor][0]
+        started = time.monotonic()
+        state.update(pending=True, message='测试中 · ' + rows[cursor][1])
+        loop = app.loop
+        app.invalidate()
+
+        def record(status, elapsed):
+            if closed.is_set():
+                return
+            state.update(pending=False, message=f'{status} · 用时 {elapsed:.1f} 秒')
+            # Only this row changes; the active marker and cursor remain unchanged.
+            row = rows[cursor]
+            rows[cursor] = (*row[:3], '✓ 上次通过' if status == '连接通过' else '× 失败')
+            app.layout.focus(body)
+            app.invalidate()
+
+        def run():
+            try:
+                status = str(test_connection(profile_id))
+            except Exception:
+                status = '连接测试失败，请检查配置后重试'
+            if not closed.is_set():
+                try:
+                    loop.call_soon_threadsafe(record, status, time.monotonic() - started)
+                except RuntimeError:
+                    pass  # The user left the page while the request finished.
+        threading.Thread(target=run, name='model-connection-test', daemon=True).start()
 
     @keys.add('up')
-    def up(event):
-        nonlocal cursor
-        cursor = max(0, cursor - 1)
-
     @keys.add('down')
-    def down(event):
+    def move(event):
         nonlocal cursor
-        cursor = min(len(rows), cursor + 1)
+        if not state['pending']:
+            cursor = max(0, min(len(rows), cursor + (-1 if event.key_sequence[-1].key == 'up' else 1)))
 
-    @keys.add('enter')
-    def select(event):
-        event.app.exit(result=ModelChoice('select', rows[cursor][0]) if cursor < len(rows)
-                       else ModelChoice('add'))
+    @keys.add('t')
+    def test(event):
+        start_test()
 
     @keys.add('e')
-    def edit(event):
-        if cursor < len(rows) and rows[cursor][0] not in locked_ids:
-            event.app.exit(result=ModelChoice('edit', rows[cursor][0]))
+    def edit_key(event):
+        edit()
+
+    @keys.add('tab')
+    @keys.add('s-tab')
+    def focus(event):
+        if not state['pending']:
+            (focus_previous if event.key_sequence[-1].key == 's-tab' else focus_next)(event)
 
     @keys.add('escape')
     @keys.add('b')
     @keys.add('c-c')
     @keys.add('c-d')
     def back(event):
-        event.app.exit(result=ModelChoice('back'))
+        app.exit(result=ModelChoice('back'))
 
     def content():
-        width = max(12, app.output.get_size().columns - 2)
-        name_width = max(5, (width - 5) // 3)
-        status_width = min(10, max(4, width // 5))
-        model_width = max(1, width - name_width - status_width - 9)
-        result = []
+        width = max(1, app.output.get_size().columns - 2)
+        name_width = max(4, width // 4)
+        model_width = max(1, width - name_width - 20)
+        fragments = []
         for i in range(len(rows) + 1):
             focused = i == cursor
             style = 'class:cursor' if focused else 'class:active' if i < len(rows) and rows[i][0] == active_id else ''
             if focused:
-                result.append(('[SetCursorPosition]', ''))
+                fragments.append(('[SetCursorPosition]', ''))
             if i == len(rows):
                 line = '  ＋ 添加模型'
             else:
                 profile_id, provider, model, status = rows[i]
                 line = ('› ' if focused else '  ') + ('● ' if profile_id == active_id else '○ ')
-                line += fit(provider, name_width) + '  ' + fit(model, model_width) + '  ' + fit(status, status_width)
-            result.append((style, fit(line, width)))
+                line += fit(provider, name_width) + '  ' + fit(model, model_width) + '  ' + status
+            fragments.append((style, fit(line, width)))
             if i < len(rows):
-                result.append(('', '\n'))
-        return result
+                fragments.append(('', '\n'))
+        return fragments
 
     body = Window(FormattedTextControl(content, focusable=True), always_hide_cursor=True,
                   dont_extend_height=True, wrap_lines=False)
+    @keys.add('enter', filter=has_focus(body))
+    def select(event):
+        use()
+
+    buttons = [Button('使用此模型', handler=use, width=14),
+               Button('测试连接', handler=start_test, width=12),
+               Button('编辑', handler=edit, width=8)]
+    horizontal, vertical = VSplit(buttons, padding=2), HSplit(buttons)
+    button_row = DynamicContainer(lambda: vertical if get_app().output.get_size().columns < 42 else horizontal)
     app = Application(layout=Layout(HSplit([
-        Label('选择模型', style='class:title'), Label('● 当前使用'), body,
-        Label('↑↓ 选择 · 回车使用 · e 编辑自定义模型 · Esc 返回'),
-        Label(message, style='class:error'),
+        Label('模型配置 · ● 当前使用', style='class:title'), body,
+        button_row,
+        Window(FormattedTextControl(lambda: [('class:error', state['message'])]),
+               height=2, wrap_lines=True),
+        Label('↑↓ 选择 · 回车使用 · t 测试 · e 编辑 · Tab 按钮 · Esc 返回'),
     ]), focused_element=body), key_bindings=keys, style=STYLE, full_screen=True,
         input=input, output=output)
     try:
         return app.run()
     except EOFError:
         return ModelChoice('back')
+    finally:
+        closed.set()
 
 
 def draft_config(url, model, key, current=None, *, provider_name=""):
