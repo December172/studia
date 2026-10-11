@@ -5,11 +5,14 @@ from typing import Optional
 from name_animation import NameAnimation, terminal_color_depth
 
 from prompt_toolkit.application import Application
+from prompt_toolkit.filters import has_focus
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
+
+from terminal_widgets import STYLE_DICT, cycle_focus, field, frame, responsive_actions
 
 
 @dataclass
@@ -44,42 +47,26 @@ def choose_many(title, rows, *, selected=(), cursor=1, refresh=False, heading=''
     animation = NameAnimation()
     keys = KeyBindings()
 
+    def submit(action=None):
+        from prompt_toolkit.application import get_app
+        get_app().exit(result=Selection(sorted(checked), cursor, action))
+
     def finish(event, action=None):
         event.app.exit(result=Selection(sorted(checked), cursor, action))
 
-    @keys.add('up')
-    def up(event):
-        nonlocal cursor
-        cursor = max(0, cursor - 1)
-
-    @keys.add('down')
-    def down(event):
-        nonlocal cursor
-        cursor = min(len(rows), cursor + 1)
-
-    @keys.add(' ')
-    def toggle(event):
-        nonlocal message
-        message = ''
-        if cursor == 0:
-            if checked == available:
-                checked.clear()
-            else:
-                checked.update(available)
-        elif cursor - 1 in disabled:
-            message = row_hints[cursor - 1] if cursor - 1 < len(row_hints) else '该任务暂不可选，请在平台核对。'
-        elif cursor - 1 in checked:
-            checked.remove(cursor - 1)
-        else:
-            checked.add(cursor - 1)
-
-    @keys.add('enter')
-    def confirm(event):
+    def confirm_action():
         nonlocal message
         if checked:
-            finish(event)
+            submit()
         else:
             message = '请先用空格选择任务。'
+
+    buttons = [field('确认', confirm_action, width=10)]
+    if refresh:
+        buttons.append(field('刷新', lambda: submit('r'), width=10))
+    buttons.append(field('返回', lambda: submit('back'), width=10))
+    body = Window(FormattedTextControl(lambda: content(), focusable=True), wrap_lines=False,
+                  always_hide_cursor=True, dont_extend_height=True)
 
     @keys.add('escape')
     @keys.add('b')
@@ -97,16 +84,56 @@ def choose_many(title, rows, *, selected=(), cursor=1, refresh=False, heading=''
         def reload(event):
             finish(event, 'r')
 
-    def header():
-        text = (heading + '\n\n') if heading else ''
+    @keys.add('tab')
+    def next_focus(event):
+        cycle_focus(event.app, [body, *buttons], 1)
+
+    @keys.add('s-tab')
+    def previous_focus(event):
+        cycle_focus(event.app, [body, *buttons], -1)
+
+    @keys.add('up', filter=has_focus(body))
+    def up(event):
+        nonlocal cursor
+        cursor = max(0, cursor - 1)
+
+    @keys.add('down', filter=has_focus(body))
+    def down(event):
+        nonlocal cursor
+        cursor = min(len(rows), cursor + 1)
+
+    @keys.add(' ', filter=has_focus(body))
+    def toggle(event):
+        nonlocal message
+        message = ''
+        if cursor == 0:
+            if checked == available:
+                checked.clear()
+            else:
+                checked.update(available)
+        elif cursor - 1 in disabled:
+            message = row_hints[cursor - 1] if cursor - 1 < len(row_hints) else '该任务暂不可选，请在平台核对。'
+        elif cursor - 1 in checked:
+            checked.remove(cursor - 1)
+        else:
+            checked.add(cursor - 1)
+
+    @keys.add('enter', filter=has_focus(body))
+    def confirm(event):
+        confirm_action()
+
+    def heading_text():
         unavailable = f' · {len(rows) - len(available)} 项暂不可选' if disabled else ''
-        return [('class:title', text + f'{title}  ·  已选 {len(checked)}/{len(available)} 项' + unavailable + '\n')]
+        return f'{title}  ·  已选 {len(checked)}/{len(available)} 项' + unavailable
 
     def columns():
         """Use one set of terminal-cell widths for the entire list and its header."""
         terminal_width = app.output.get_size().columns
         width = max(1, terminal_width - 2)
         task_rows = any(row[1] for row in rows) or bool(extra_headers)
+        # Under 52 columns the Type/detail column is dropped so name, status,
+        # score and remaining keep useful widths instead of showing '状… 成…'.
+        show_detail = terminal_width >= 52
         fields = []
         if task_rows:
             fields.append(('状态', 1, 10))
@@ -116,7 +143,7 @@ def choose_many(title, rows, *, selected=(), cursor=1, refresh=False, heading=''
             elif name in ('剩余次数', '剩余'):
                 name = '剩余(次)' if terminal_width >= 80 else '剩余'
             fields.append((name, index, 10))
-        if task_rows or any(row[2] for row in rows):
+        if show_detail and (task_rows or any(row[2] for row in rows)):
             fields.append(('类型' if task_rows else '详情', 2, min(24, width // 4)))
         widths = [max(get_cwidth(name), min(limit, max(
             (get_cwidth(str(row[index])) for row in rows if index < len(row)), default=0)))
@@ -142,12 +169,23 @@ def choose_many(title, rows, *, selected=(), cursor=1, refresh=False, heading=''
         display = [(all_mark, all_label, '', '')]
         display += [('-' if i in disabled else 'x' if i in checked else ' ', *row) for i, row in enumerate(rows)]
         fragments = []
+        # Only the body owning focus may claim the cursor background; after Tab
+        # moves focus to a button the highlighted row keeps its > marker and a
+        # plain selected style, so exactly one control ever looks focused.
+        body_focused = app.layout.has_focus(body)
         for index, (mark, *values) in enumerate(display):
-            active = index == cursor
-            style = 'class:cursor' if active else 'class:disabled' if index - 1 in disabled else 'class:checked' if mark == 'x' else ''
-            if active:
+            highlighted = index == cursor
+            focused = highlighted and body_focused
+            disabled_row = index - 1 in disabled
+            style = 'class:cursor' if focused else 'class:row.disabled' if disabled_row \
+                else 'class:row.selected' if highlighted or mark == 'x' else ''
+            if highlighted:
+                # Anchor the window scroll to the highlighted row even when Tab
+                # moved focus to a button. The cursor itself only becomes visible
+                # for the focused window, so an unfocused body shows no cursor
+                # while the list stays scrolled to the selected row.
                 fragments.append(('[SetCursorPosition]', ''))
-            prefix = ('> ' if active else '  ') + f'[{mark}] '
+            prefix = ('> ' if highlighted else '  ') + f'[{mark}] '
             line = prefix + '  '.join(
                 fit(values[column] if column < len(values) else '', size)
                 for _, column, size in fields)
@@ -173,17 +211,13 @@ def choose_many(title, rows, *, selected=(), cursor=1, refresh=False, heading=''
             hint += ' · r 刷新状态'
         return fragments + [('', hint), ('class:warning', '\n' + message if message else '')]
 
-    body = Window(FormattedTextControl(content, focusable=True), wrap_lines=False,
-                  always_hide_cursor=True, dont_extend_height=True)
-    app = Application(layout=Layout(HSplit([
-        Window(FormattedTextControl(header), dont_extend_height=True),
-        Window(FormattedTextControl(column_header), height=1, wrap_lines=False),
-        body,
-        Window(FormattedTextControl(footer), dont_extend_height=True, wrap_lines=True),
-    ]), focused_element=body), key_bindings=keys, full_screen=True,
-        style=Style.from_dict({'title': 'ansicyan bold', 'columns': 'bold', 'checked': 'ansicyan bold',
-                               'cursor': 'bg:ansicyan ansiblack bold', 'warning': 'ansiyellow',
-                               'disabled': 'ansibrightblack'}),
+    layout = frame(
+        heading_text,
+        HSplit([Window(FormattedTextControl(column_header), height=1, wrap_lines=False), body]),
+        heading=heading or None, actions=responsive_actions(buttons),
+        footer=Window(FormattedTextControl(footer), dont_extend_height=True, wrap_lines=True))
+    app = Application(layout=Layout(layout, focused_element=body), key_bindings=keys, full_screen=True,
+        style=Style.from_dict(dict(STYLE_DICT, warning='ansiyellow')),
         input=input, output=output, color_depth=terminal_color_depth(), refresh_interval=1 / 30 if account_name else None)
     try:
         return app.run()

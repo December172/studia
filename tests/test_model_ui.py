@@ -2,7 +2,9 @@ import io
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
+from prompt_toolkit.application import Application
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.output.vt100 import Vt100_Output
@@ -231,6 +233,70 @@ class ModelUITests(unittest.TestCase):
         self.assertTrue(done.wait(3))
         self.assertEqual(state['value'].action, 'back')
         self.assertNotIn('never-show', stream.getvalue())
+
+    def context_screen(self, keys, rows=None, **kwargs):
+        """Full rendered screen after the keys are processed, as plain lines."""
+        from model_ui import choose_model
+        import model_ui
+        screens = []
+
+        def application(*args, **kw):
+            def capture(app):
+                screen = app.renderer.last_rendered_screen
+                if screen:
+                    screens.append([
+                        ''.join(screen.data_buffer[y][x].char for x in sorted(screen.data_buffer[y])).rstrip()
+                        for y in sorted(screen.data_buffer)])
+            return Application(*args, **kw, after_render=capture)
+
+        with create_pipe_input() as pipe:
+            pipe.send_text(keys)
+            with patch.object(model_ui, 'Application', side_effect=application):
+                choose_model(rows or ROWS, 'a', input=pipe, output=DummyOutput(), **kwargs)
+        return '\n'.join(screens[-1]) if screens else ''
+
+    def test_context_help_matches_the_visible_actions(self):
+        # Add row: only Enter/Tab/Esc, never edit or test hints.
+        add = self.context_screen('\x1b[B\x1b[B\x1b')
+        self.assertIn('Enter 添加', add)
+        self.assertNotIn('e 编辑', add)
+        self.assertNotIn('t 测试', add)
+        # Built-in row: testable and usable, but never editable.
+        builtin = self.context_screen('\x1b', rows=[('a', '默认供应商', 'm', '?')],
+                                      locked_ids={'a'})
+        self.assertIn('Enter 使用', builtin)
+        self.assertIn('t 测试', builtin)
+        self.assertNotIn('e 编辑', builtin)
+
+    def test_custom_row_exposes_a_visible_back_button(self):
+        # Every row context offers an explicit primary and return action; the
+        # custom row keeps Use/Test/Edit order and adds 返回 after Edit.
+        from model_ui import ModelChoice, choose_model
+        with create_pipe_input() as pipe:
+            pipe.send_text('\t\t\t\t\r')  # body → 使用 → 测试 → 编辑 → 返回
+            result = choose_model(ROWS, 'a', input=pipe, output=DummyOutput())
+        self.assertEqual(result.action, 'back')
+
+    def test_custom_row_back_button_is_escape_and_keeps_focus_order(self):
+        from model_ui import choose_model, ModelChoice
+        import model_ui
+        screens = []
+
+        def application(*args, **kw):
+            def capture(app):
+                screen = app.renderer.last_rendered_screen
+                if screen:
+                    screens.append('\n'.join(
+                        ''.join(screen.data_buffer[y][x].char for x in sorted(screen.data_buffer[y]))
+                        for y in sorted(screen.data_buffer)))
+            return Application(*args, **kw, after_render=capture)
+
+        with create_pipe_input() as pipe:
+            pipe.send_text('\t\t\t\t\x1b')
+            with patch.object(model_ui, 'Application', side_effect=application):
+                result = choose_model(ROWS, 'a', input=pipe, output=DummyOutput())
+        self.assertIsInstance(result, ModelChoice)
+        self.assertTrue(any('返回' in frame for frame in screens))
 
     def test_passwords_are_masked_in_real_terminal_rendering(self):
         from model_ui import edit_model

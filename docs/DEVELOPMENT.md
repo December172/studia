@@ -9,8 +9,12 @@
 | `StartWork.py` | 版本识别、程序入口与退出处理 |
 | `app.py` | 登录、课程选择、学习/导出/AI 的流程编排 |
 | `course_flow.py` | 课程工作区导航、返回状态、执行摘要和连续操作 |
-| `ui.py` | Rich 页面、输入、动态进度、日志面板与结束总结 |
-| `checklist.py` | prompt_toolkit 多选列表：方向键、空格、All、确认和刷新 |
+| `ui.py` | 业务侧页面适配：表格、输入、动态进度、日志面板、结束总结；TTY 下把业务返回值接到原生控件 |
+| `native_ui.py` | 原生键盘控件：选项菜单、单选搜索选择器、确认框、执行摘要/结果动作页；只返回值，不执行业务 |
+| `terminal_widgets.py` | 原生控件共享样式、响应式按钮行、页面框架、帮助换行与动画身份 |
+| `checklist.py` | prompt_toolkit 多选列表：方向键、空格、All、确认/刷新/返回按钮和 Tab 焦点 |
+| `model_ui.py` | 模型选择器与模型草稿编辑表单（含上下文动作、连接测试） |
+| `concurrency_ui.py` | 并发草稿编辑表单（1–8，仅返回草稿，不写配置） |
 | `theme.py` | 颜色、图标、边框、刷新频率和面板尺寸 |
 | `reporting.py` | 业务进度事件与回调适配，不依赖 Rich |
 | `task_capabilities.py` | 从平台目录类型识别暂不支持的附件作业 |
@@ -24,6 +28,8 @@
 | `NewMoocMain/oauth_pages.py` | 浏览器登录回调的成功、等待、失败与 404 页面；纯内联资源，不接收令牌 |
 | `MoocMain/` | 共用日志模块，以及保留的旧平台代码 |
 | `tools/` | 开发、排查用的辅助脚本 |
+| `tools/ui_demo.py` | 离线界面预览：编号输入静态样例、HTML 快照，或转交原生预览 |
+| `tools/native_demo.py` | 真实终端中的原生键盘控件预览，只用合成数据，不访问平台 / AI / 配置 |
 | `tests/` | 离线自动化测试 |
 | `assets/` | 应用图标 |
 | `docs/` | 当前使用指南、开发说明与接口说明 |
@@ -33,7 +39,7 @@
 
 `MoocMain/`、`NewMoocMain/` 仍被当前入口引用，不能仅凭名称删除。运行命令均从仓库根目录执行。
 
-版本变更需同步 `pyproject.toml` 与 `uv.lock` 中项目自身的版本（当前 4.1.2）。`StartWork.py` 源码模式从前者读取版本，不检查打包发布更新；发布构建显示 CI 注入的标签。修改源码本身不会自动增加版本号，源码用户按 README 的 Git 更新步骤更新。
+版本变更需同步 `pyproject.toml` 与 `uv.lock` 中项目自身的版本（当前 4.2.0）。`StartWork.py` 源码模式从前者读取版本，不检查打包发布更新；发布构建显示 CI 注入的标签。修改源码本身不会自动增加版本号，源码用户按 README 的 Git 更新步骤更新。
 
 ## 辅助工具
 
@@ -48,15 +54,16 @@ python -m tools.list_structure "课程名称关键词"
 ```bash
 python -m tools.ui_demo
 python -m tools.ui_demo exports/ui-preview.html
+python -m tools.ui_demo --native
 ```
 
-第二条命令生成可用浏览器查看的静态 HTML 样例，保留运行中画面便于检查布局；正常运行会清除动态区域。
+前两条命令使用编号输入渲染静态样例，第二条生成可用浏览器查看的 HTML（保留运行中画面便于检查布局；正常运行会清除动态区域）。`--native` 使用真实 `TerminalUI` 与原生控件展示合成数据，需要真实终端；它不访问平台、AI 或任何配置，只用于人工检查键盘交互。
 
 ## 界面与业务边界
 
 业务模块使用标准 logging 记录消息，通过可选 `on_progress(ProgressEvent)` 报告开始、总数增长、当前任务和结果。AI runner 另支持 `on_log`（旧 `output` 参数仍兼容）。回调错误被隔离，不影响请求与交卷。界面订阅日志和事件，不通过匹配日志文字推断成功。
 
-新增终端显示与输入放在 `ui.py`，样式放在 `theme.py`；业务模块不直接调用 `print` / `input`。`TerminalUI.session()` 管理日志订阅，`activity()` 管理可清除的动态区域。主流程在动态区域之外提问；旧脚本输入适配器会暂停动态显示再读取输入。文件日志独立保留。
+新增终端显示与输入：业务适配与 Rich 运行画面放在 `ui.py`，Rich 运行样式（颜色、图标、边框、刷新频率）放在 `theme.py`；原生键盘页面（选项菜单、选择器、确认、摘要/结果动作页、多选、模型/并发表单）由 `native_ui.py`、`checklist.py`、`model_ui.py`、`concurrency_ui.py` 等原生模块拥有，共享调色板、按钮行和页面框架由 `terminal_widgets.py` 提供。`ui.py` 不再承载键盘控件的键位与布局，只把业务值（含 `0`/`False`、动作字符串、`Back`/`Cancelled` 语义）在原生返回值与既有流程之间转换；原生控件只返回值，绝不直接执行业务。业务模块不直接调用 `print` / `input`。`TerminalUI.session()` 管理日志订阅，`activity()` 管理可清除的动态区域。主流程在动态区域之外提问；旧脚本输入适配器会暂停动态显示再读取输入。文件日志独立保留。
 
 `Application` 可注入 `SettingsStore`，测试使用临时目录或 Mock，不能触碰真实用户配置。平台客户端接收关键字参数 `access_token` 时只验证账号，不再兑换 SSO 令牌；主流程使用严格模式读取课程。只有明确的认证过期会触发重新登录，恢复逻辑只覆盖执行任务前的只读操作，不重试答题或提交。
 
@@ -78,7 +85,7 @@ AI 配置与连接健康状态独立保存；健康记录绑定 endpoint、模�
 
 AI 队列将普通 `ExamError` / `error` 视为单份失败，补齐该份结果后继续；`needs_review` 也计为失败并继续。`ExamServiceError` 专门表示 HTTP 401/429/5xx、业务 401/429 或网络故障，runner 通过 `stop_queue=true` 保留全局故障语义；计时线程必须保留异常类型，不能只转成字符串。普通 HTTP 403 与 code=205 仍按单份错误处理。`ai_error`、`submission_unknown`/`submitting` 继续停止派发，且不重发提交。结果列表与已处理试卷按顺序对应，每份仅触发一次 result；结果页按份统计，预检错误及未派发任务不伪装成失败试卷。
 
-`Application.run()` 进入 `CourseWorkspace`：复用当前客户端和课程，按课程导航，执行结束后留在结果页。`Back` 表示返回上层，`Cancelled` 表示退出；二者不可混用。交互终端中的多选调用 `checklist.choose_many()`：返回原列表索引、光标和动作，状态持久化交由 `TerminalUI` 与工作区处理；刷新后按任务稳定标识恢复勾选。无 TTY 或注入行输入时沿用编号模式。摘要中的自动交卷只属于当次操作。导出器的 `selected_papers` 是精确 `(course, item, category)` 列表；传入空列表必须不导出，不能退回全量目录。`None` 保留旧调用方式。
+`Application.run()` 进入 `CourseWorkspace`：复用当前客户端和课程，按课程导航，执行结束后留在结果页。`Back` 表示返回上层，`Cancelled` 表示退出；二者不可混用。真实终端（`input_fn is None`、`console.is_terminal`、`sys.stdin.isatty()` 同时成立）中的菜单、课程单选、确认、多选题、模型/并发以及执行摘要/结果页都使用原生控件：方向键移动、Enter 采用默认或确认、`Tab`/`Shift+Tab` 在列表与按钮间移动焦点、`Esc` 返回、`q` 退出，数字/字母快捷键只在列表获得焦点时生效，编辑搜索框内的按键保持字面文本。原生控件只返回值，由 `TerminalUI` 解释为业务值或 `Back`/`Cancelled`；非 TTY 或注入行输入时沿用原有编号模式。交互终端中的多选调用 `checklist.choose_many()`：返回原列表索引、光标和动作，状态持久化交由 `TerminalUI` 与工作区处理；刷新后按任务稳定标识恢复勾选。摘要中的自动交卷只属于当次操作。导出器的 `selected_papers` 是精确 `(course, item, category)` 列表；传入空列表必须不导出，不能退回全量目录。`None` 保留旧调用方式。
 
 OAuth 回调使用 `ThreadingHTTPServer` 和有限的连接读取超时：浏览器预连接可能不发送 HTTP 请求，不能让它占住唯一处理线程或阻塞关闭。登录方法统一在 `finally` 清理服务器，包括 Ctrl+C；不再由回调额外启动关闭定时器。回归测试覆盖“已收到令牌但仍有空连接”这一退出阻塞场景。
 

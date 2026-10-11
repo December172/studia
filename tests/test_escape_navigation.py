@@ -8,7 +8,6 @@ from unittest.mock import patch
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from rich.console import Console
-from rich.text import Text
 
 import theme
 import ui
@@ -39,17 +38,24 @@ class EscapeNavigationTests(unittest.TestCase):
             self.assertEqual(ui.read_terminal_line('输入', input=pipe, output=DummyOutput()), 'abc')
 
     def test_native_menu_and_summary_share_escape_input(self):
-        view, output = self.view()
+        import native_ui
+        view, _ = self.view()
+        seen = {}
         with create_pipe_input() as pipe:
             pipe.send_text('\x1b')
-            reader = partial(ui.read_terminal_line, input=pipe, output=DummyOutput())
-            with patch('ui.read_terminal_line', side_effect=reader), patch('sys.stdin.isatty', return_value=True):
+            native = partial(native_ui.action_page, input=pipe, output=DummyOutput())
+
+            def capture(*args, **kwargs):
+                seen.update(kwargs)
+                return native(*args, **kwargs)
+
+            with patch('native_ui.action_page', side_effect=capture), \
+                 patch('sys.stdin.isatty', return_value=True):
                 with self.assertRaises(ui.Back):
                     view.review_ai([], AIConfig('https://example.org/v1', 'model', 'key'), {})
-        # Render output carries ANSI styling; assert on the visible text only.
-        plain = Text.from_ansi(output.getvalue()).plain
-        self.assertIn('Esc 返回', plain)
-        self.assertNotIn('b 返回', plain)
+        # The summary advertises Escape (never a bare ``b``) for returning.
+        self.assertIn('Esc 返回', seen['help_text'])
+        self.assertNotIn('b 返回', seen['help_text'])
 
     def test_escape_in_scripted_secret_and_manual_input_also_navigates_back(self):
         view, _ = self.view(['\x1b'])

@@ -393,8 +393,24 @@ class TerminalUI:
             line.append_text(name)
         return lines
 
+    def native_enabled(self):
+        """True only for a real interactive terminal with no injected input."""
+        return self.input_fn is None and self.console.is_terminal and sys.stdin.isatty()
+
     def choice(self, title, choices, default=None, help_text="", *, message=""):
         values = {str(key): key for key, _, _ in choices}
+        if self.native_enabled():
+            from native_ui import option_menu
+            result = option_menu(title, [(key, name, description) for key, name, description in choices],
+                                 default, help_text=help_text, message=message,
+                                 heading=self.heading, account_name=self.account_name,
+                                 output=self.terminal_output())
+            if result.kind == "back":
+                raise Back()
+            if result.kind == "quit":
+                raise Cancelled()
+            if result.kind == "select":
+                return result.value
         warning = ""
         while True:
             self.table(title, ["编号", "选项", "说明"],
@@ -436,6 +452,29 @@ class TerminalUI:
             if result.action == "quit":
                 raise Cancelled()
             return result.action or state["selected"]
+        if not multiple and self.native_enabled():
+            from native_ui import single_picker
+            state = state if state is not None else {}
+            result = single_picker(
+                safe_text(title), items, lambda item: safe_text(label(item)),
+                (lambda item: safe_text(details(item))) if details else None,
+                actions=actions,
+                state=state,
+                selected=[item for item in items if selected and item in selected],
+                status=(lambda item: safe_text(status(item))) if status else None,
+                extra_columns=tuple((name, (lambda item, value=value: safe_text(value(item))))
+                                    for name, value in extra_columns),
+                selectable=selectable,
+                item_hint=(lambda item: safe_text(item_hint(item))) if item_hint else None,
+                heading=self.heading, account_name=self.account_name,
+                output=self.terminal_output())
+            if result.kind == "back":
+                raise Back()
+            if result.kind == "quit":
+                raise Cancelled()
+            if result.kind == "action":
+                return result.action
+            return result.value
         # Piped input and scripted clients retain a line-based fallback.
         from AIMoocMain.export_questions import parse_index_input
         state = state if state is not None else {}
@@ -539,10 +578,37 @@ class TerminalUI:
                            help_text=redact(str(error)) or "Esc 返回 · q 退出")
 
     def empty_tasks(self):
+        if self.native_enabled():
+            from native_ui import action_page
+            result = action_page(
+                "课程任务", lambda: ["当前课程 · 暂无作业、考试或测验",
+                                     "可在平台或稍后刷新查看。"],
+                {"b": "返回课程"}, default="b",
+                help_text="Enter 返回 · q 退出",
+                heading=self.heading, status="没有可执行的任务。",
+                account_name=self.account_name, output=self.terminal_output())
+            if result.kind == "quit":
+                raise Cancelled()
+            return None
         self.table("课程任务", ["任务", "状态"], [("当前课程", "暂无作业、考试或测验")])
         self.ask("回车返回课程，q 退出")
 
     def review_study(self, courses, max_workers=8):
+        if self.native_enabled():
+            from native_ui import action_page
+            names = [safe_text(c.get("courseName", "未知课程")) for c in courses]
+            lines = lambda: [f"共 {len(names)} 门课程"] + names
+            while True:
+                result = action_page(
+                    "自动学习", lines, {"start": "开始学习", "b": "返回"}, default="start",
+                    help_text="Enter 开始 · Esc 返回 · q 退出",
+                    heading=self.heading, account_name=self.account_name,
+                    output=self.terminal_output())
+                if result.kind == "back" or result.action == "b":
+                    raise Back()
+                if result.kind == "quit":
+                    raise Cancelled()
+                return None
         self.table("自动学习", ["课程", "操作"], [(c.get("courseName", "未知课程"), "完成课程学习任务") for c in courses],
                    "回车开始 · Esc 返回 · q 退出")
         while self.ask("操作", "开始") != "开始":
@@ -559,6 +625,15 @@ class TerminalUI:
         return " · ".join(x for x in parts if x)
 
     def confirm(self, prompt, default=False):
+        if self.native_enabled():
+            from native_ui import confirm_prompt
+            result = confirm_prompt(prompt, default, output=self.terminal_output())
+            if result.kind == "back":
+                raise Back()
+            if result.kind == "quit":
+                raise Cancelled()
+            if result.kind == "select":
+                return result.value
         while True:
             answer = self.ask(prompt + " [y/n]", "y" if default else "n").lower()
             if answer in ("y", "n"):
@@ -676,15 +751,14 @@ class TerminalUI:
         except Back:
             return ModelEdit("back")
 
-    def finish(self):
+    def finish_text(self):
+        """One-line summary and its style, or ``None`` when nothing is shown."""
         from MoocMain.log import redact
         if self.finished:
-            return
+            return None
         self.finished = True
         if self.workspace and not self.operation_active and not self.pending_error:
-            if self.cancelled:
-                self.note("已退出。")
-            return
+            return ("已退出。", "muted") if self.cancelled else None
         success = sum(self.counts[s] for s in ("success", "submitted", "preview"))
         failures = sum(self.counts[s] for s in ("error", "needs_review", "submission_unknown", "submitting", "ai_error"))
         # Fatal errors before any task result must still be visible in the one-line summary.
@@ -710,7 +784,13 @@ class TerminalUI:
         if self.pending_error:
             text += " · " + " ".join(safe_text(redact(self.pending_error)).split())
         style = "error" if failures or self.pending_error else "warning" if self.cancelled else "success"
-        self.console.print(Text(text, style=style, no_wrap=True, overflow="ellipsis"))
+        return text, style
+
+    def finish(self):
+        result = self.finish_text()
+        if result:
+            text, style = result
+            self.console.print(Text(text, style=style, no_wrap=True, overflow="ellipsis"))
 
     def begin_operation(self):
         self.unit = "项"
@@ -731,6 +811,39 @@ class TerminalUI:
         statuses = {"success": "完成", "submitted": "已交卷", "preview": "答案已生成 · 未交卷",
                     "skipped": "已跳过", "needs_review": "未完成 · 未交卷", "error": "失败", "ai_error": "AI 服务失败",
                     "submission_unknown": "交卷结果未知", "submitting": "交卷结果未知"}
+        if self.native_enabled():
+            from native_ui import action_page
+            summary = self.finish_text()
+
+            def lines():
+                rows = [f"{safe_text(name)} · {statuses.get(status, status)}"
+                        for name, status in self.results]
+                if not rows and not self.pending_error:
+                    rows.append("本次没有处理任务。")
+                if self.counts["preview"]:
+                    rows.append("本地答案未提交到平台，不会产生成绩。")
+                if self.counts["needs_review"]:
+                    rows.append("存在未完成或不支持的题目；仅保存本地报告，未交卷。")
+                rows += [safe_text(error) for error in self.errors]
+                if self.pending_error:
+                    rows.append("错误 · " + safe_text(redact(self.pending_error)))
+                for path in dict.fromkeys(str(p) for p in paths):
+                    rows.append(f"文件 · {safe_text(path)}")
+                return rows
+
+            status = summary[0] if summary else ""
+            result = action_page(
+                "执行结果", lines, {"1": "返回本课程", "2": "切换课程"}, default="1",
+                status=status, help_text="Enter 返回 · 2 切换课程 · Esc 返回本课程 · q 退出",
+                heading=self.heading, account_name=self.account_name,
+                output=self.terminal_output())
+            if result.kind == "quit":
+                raise Cancelled()
+            if result.kind == "action" and result.action == "2":
+                return 2
+            if result.kind == "action" and result.action == "1":
+                return 1
+            return 1  # Esc / back returns to the current course
         self.table("执行结果", ["任务", "结果"],
                    [(name, statuses.get(status, status)) for name, status in self.results])
         self.finish()
@@ -769,6 +882,37 @@ class TerminalUI:
         if options.get("quiz_mode") not in ("per_chapter", "merged"):
             options["quiz_mode"] = "per_chapter"
         options["include_my_answer"] = options.get("include_my_answer") is True
+        if self.native_enabled():
+            from native_ui import action_page
+            formats = {"md": "Markdown", "docx": "Word", "both": "Markdown + Word"}
+
+            def lines():
+                rows = [f"文件格式 · {formats[options['export_format']]}",
+                        f"文件组织 · {'按课程合并' if options['quiz_mode'] == 'merged' else '每份一个文件'}",
+                        f"历史答案 · {'包含' if options['include_my_answer'] else '不包含'}",
+                        "保存位置 · tiku/<课程名>/"]
+                for course, item, _ in selected[:5]:
+                    from AIMoocMain.export_questions import paper_display_name
+                    rows.append(f"{safe_text(course.get('courseName', ''))} / "
+                                f"{safe_text(paper_display_name(item))}")
+                if len(selected) > 5:
+                    rows.append(f"… 共 {len(selected)} 份")
+                return rows
+
+            while True:
+                result = action_page(
+                    f"导出 {len(selected)} 份题目", lines, {"start": "开始导出", "s": "修改设置", "b": "返回"},
+                    default="start", help_text="Enter 开始 · s 修改设置 · Esc 返回 · q 退出",
+                    heading=self.heading, account_name=self.account_name,
+                    output=self.terminal_output())
+                if result.kind == "quit":
+                    raise Cancelled()
+                if result.kind == "back" or result.action == "b":
+                    raise Back()
+                if result.action == "start":
+                    return options
+                if result.action == "s":
+                    self.edit_export_options(options)
         while True:
             self.table(f"导出 {len(selected)} 份题目", ["设置", "当前值"], [
                 ("文件格式", {"md": "Markdown", "docx": "Word", "both": "Markdown + Word"}[options["export_format"]]),
@@ -811,6 +955,57 @@ class TerminalUI:
     def review_ai(self, selected, config, options, check_connection=None, manage_models=None, connection_status=None):
         options["config"] = config
         options.setdefault("auto_submit", True)
+        if self.native_enabled():
+            from native_ui import action_page
+            message = ""
+
+            def connection_text():
+                value = str(options.get("connection_status", ""))
+                return "连接失败" if "失败" in value else "已通过" if "通过" in value else "未测试"
+
+            def lines():
+                rows = [f"供应商 · {(config.provider_name or '自定义供应商') if config else '未选择'}",
+                        f"模型 · {config.model if config else '未选择'}",
+                        f"连接状态 · {connection_text()}",
+                        "执行方式 · " + ("答题并自动交卷" if options["auto_submit"] else "仅生成答案（不交卷，无成绩）")]
+                for course, item, _ in selected[:5]:
+                    from AIMoocMain.export_questions import paper_display_name
+                    rows.append(f"{safe_text(course.get('courseName', ''))} / "
+                                f"{safe_text(paper_display_name(item))}")
+                if len(selected) > 5:
+                    rows.append(f"… 共 {len(selected)} 份")
+                return rows
+
+            actions = {"start": "开始答题", "s": "答题设置"}
+            if manage_models:
+                actions["m"] = "模型配置"
+            if check_connection:
+                actions["t"] = "测试连接"
+            actions["b"] = "返回"
+            while True:
+                result = action_page(
+                    f"AI 答题 · {len(selected)} 份任务", lines, actions, default="start",
+                    status=lambda: message,
+                    help_text="Enter 开始 · m 模型配置 · s 答题设置 · t 测试连接 · Esc 返回 · q 退出",
+                    heading=self.heading, account_name=self.account_name,
+                    output=self.terminal_output())
+                if result.kind == "quit":
+                    raise Cancelled()
+                if result.kind == "back" or result.action == "b":
+                    raise Back()
+                if result.action == "s":
+                    self.edit_answer_options(options)
+                elif result.action == "t" and check_connection:
+                    options["connection_status"] = check_connection()
+                elif result.action == "m" and manage_models:
+                    config = manage_models()
+                    options["config"] = config
+                    options["connection_status"] = connection_status(config) if connection_status else "未测试"
+                elif result.action == "start":
+                    if config is None:
+                        message = "请按 m 选择模型。"
+                        continue
+                    return options["auto_submit"]
         while True:
             connection = str(options.get("connection_status", ""))
             connection = "连接失败" if "失败" in connection else "已通过" if "通过" in connection else "未测试"

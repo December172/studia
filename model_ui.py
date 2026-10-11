@@ -4,27 +4,25 @@ import threading
 import time
 from typing import Optional
 
-from prompt_toolkit.application import Application, get_app
+from prompt_toolkit.application import Application
 from prompt_toolkit.filters import has_focus
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.bindings.focus import focus_next, focus_previous
-from prompt_toolkit.layout import HSplit, VSplit, Layout, Window
+from prompt_toolkit.layout import DynamicContainer, HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.layout.containers import DynamicContainer
 from prompt_toolkit.styles import Style
-from prompt_toolkit.widgets import TextArea, Button, Label
+from prompt_toolkit.widgets import TextArea, Label
 
 from ai.client import AIConfig
 from checklist import fit
+from terminal_widgets import STYLE_DICT, field, frame, responsive_actions, status_window
 
-
-STYLE = Style.from_dict({
-    'title': 'ansicyan bold', 'active': 'ansicyan bold',
-    'cursor': 'bg:ansicyan ansiblack bold', 'error': 'ansiyellow',
-    'pending': 'ansiyellow', 'result': 'ansigreen',
+# Shared palette plus the editor's text-area colors. Focused-button contrast is
+# defined once in terminal_widgets and must not be overridden here.
+STYLE = Style.from_dict(dict(STYLE_DICT, **{
+    'active': 'ansicyan bold',
     'text-area': 'bg:#202b33 #ffffff', 'text-area focused': 'bg:#263b45 #ffffff',
-    'button': 'ansicyan', 'button.focused': 'bg:ansicyan ansiblack bold',
-})
+}))
 
 @dataclass
 class ModelChoice:
@@ -89,25 +87,66 @@ def choose_model(rows, active_id=None, *, cursor_id=None, message='', locked_ids
                     pass  # The user left the page while the request finished.
         threading.Thread(target=run, name='model-connection-test', daemon=True).start()
 
-    @keys.add('up')
-    @keys.add('down')
+    def content():
+        width = max(1, app.output.get_size().columns - 2)
+        name_width = max(4, width // 4)
+        model_width = max(1, width - name_width - 20)
+        list_focused = app.layout.has_focus(body)
+        fragments = []
+        for i in range(len(rows) + 1):
+            highlighted = i == cursor
+            focused = highlighted and list_focused
+            retained = not highlighted and i < len(rows) and rows[i][0] == active_id
+            style = 'class:cursor' if focused else 'class:row.focused' if highlighted else \
+                'class:row.selected' if retained else ''
+            if highlighted:
+                # The anchor keeps the window scrolled to the highlighted row even
+                # when Tab moved focus to a button: prompt_toolkit only *shows* a
+                # cursor for the focused window, so this changes nothing visible
+                # while the body is unfocused. Without it the list snapped back to
+                # its first rows while the button still acted on the retained row.
+                fragments.append(('[SetCursorPosition]', ''))
+            if i == len(rows):
+                line = '  ＋ 添加模型'
+            else:
+                profile_id, provider, model, status = rows[i]
+                line = ('› ' if highlighted else '  ') + ('● ' if profile_id == active_id else '○ ')
+                line += fit(provider, name_width) + '  ' + fit(model, model_width) + '  ' + status
+            fragments.append((style, fit(line, width)))
+            if i < len(rows):
+                fragments.append(('', '\n'))
+        return fragments
+
+    body = Window(FormattedTextControl(content, focusable=True), always_hide_cursor=True,
+                  dont_extend_height=True, wrap_lines=False)
+
+    @keys.add('up', filter=has_focus(body))
+    @keys.add('down', filter=has_focus(body))
     def move(event):
         nonlocal cursor
         if not state['pending']:
             cursor = max(0, min(len(rows), cursor + (-1 if event.key_sequence[-1].key == 'up' else 1)))
 
-    @keys.add('t')
+    @keys.add('t', filter=has_focus(body))
     def test(event):
         start_test()
 
-    @keys.add('e')
+    @keys.add('e', filter=has_focus(body))
     def edit_key(event):
         edit()
 
     @keys.add('tab')
     @keys.add('s-tab')
     def focus(event):
-        if not state['pending']:
+        if state['pending']:
+            return
+        # The visible action set follows the cursor, so navigate to the buttons
+        # that belong to the current row instead of the previous render's set.
+        targets = context_buttons()
+        if event.app.layout.has_focus(body):
+            target = targets[-1] if event.key_sequence[-1].key == 's-tab' else targets[0]
+            event.app.layout.focus(target.window)
+        else:
             (focus_previous if event.key_sequence[-1].key == 's-tab' else focus_next)(event)
 
     @keys.add('escape')
@@ -117,46 +156,53 @@ def choose_model(rows, active_id=None, *, cursor_id=None, message='', locked_ids
     def back(event):
         app.exit(result=ModelChoice('back'))
 
-    def content():
-        width = max(1, app.output.get_size().columns - 2)
-        name_width = max(4, width // 4)
-        model_width = max(1, width - name_width - 20)
-        fragments = []
-        for i in range(len(rows) + 1):
-            focused = i == cursor
-            style = 'class:cursor' if focused else 'class:active' if i < len(rows) and rows[i][0] == active_id else ''
-            if focused:
-                fragments.append(('[SetCursorPosition]', ''))
-            if i == len(rows):
-                line = '  ＋ 添加模型'
-            else:
-                profile_id, provider, model, status = rows[i]
-                line = ('› ' if focused else '  ') + ('● ' if profile_id == active_id else '○ ')
-                line += fit(provider, name_width) + '  ' + fit(model, model_width) + '  ' + status
-            fragments.append((style, fit(line, width)))
-            if i < len(rows):
-                fragments.append(('', '\n'))
-        return fragments
-
-    body = Window(FormattedTextControl(content, focusable=True), always_hide_cursor=True,
-                  dont_extend_height=True, wrap_lines=False)
     @keys.add('enter', filter=has_focus(body))
     def select(event):
         use()
 
-    buttons = [Button('使用此模型', handler=use, width=14),
-               Button('测试连接', handler=start_test, width=12),
-               Button('编辑', handler=edit, width=8)]
-    horizontal, vertical = VSplit(buttons, padding=2), HSplit(buttons)
-    button_row = DynamicContainer(lambda: vertical if get_app().output.get_size().columns < 42 else horizontal)
-    app = Application(layout=Layout(HSplit([
-        Label('模型配置 · ● 当前使用', style='class:title'), body,
+    # Stable buttons: focus targets must never be rebuilt during a render pass.
+    use_button = field('使用此模型', use)
+    test_button = field('测试连接', start_test)
+    edit_button = field('编辑', edit)
+    add_button = field('添加模型', use)
+    back_button = field('返回', lambda: finish('back'))
+    sets = {
+        'add': responsive_actions([add_button, back_button]),
+        'builtin': responsive_actions([use_button, test_button, back_button]),
+        'custom': responsive_actions([use_button, test_button, edit_button, back_button]),
+    }
+    contexts = {
+        'add': [add_button, back_button],
+        'builtin': [use_button, test_button, back_button],
+        'custom': [use_button, test_button, edit_button, back_button],
+    }
+
+    def context_name():
+        if cursor >= len(rows):
+            return 'add'
+        return 'builtin' if rows[cursor][0] in locked_ids else 'custom'
+
+    def context_buttons():
+        return contexts[context_name()]
+
+    button_row = DynamicContainer(lambda: sets[context_name()])
+
+    def context_help():
+        if cursor >= len(rows):
+            return '↑↓ 选择 · Enter 添加 · Tab 按钮 · Esc 返回'
+        if rows[cursor][0] in locked_ids:
+            return '↑↓ 选择 · Enter 使用 · t 测试 · Tab 按钮 · Esc 返回'
+        return '↑↓ 选择 · Enter 使用 · t 测试 · e 编辑 · Tab 按钮 · Esc 返回'
+
+    layout = frame(
+        '模型配置 · ● 当前使用',
+        body,
         button_row,
-        Window(FormattedTextControl(lambda: [('class:error', state['message'])]),
-               height=2, wrap_lines=True),
-        Label('↑↓ 选择 · 回车使用 · t 测试 · e 编辑 · Tab 按钮 · Esc 返回'),
-    ]), focused_element=body), key_bindings=keys, style=STYLE, full_screen=True,
-        input=input, output=output)
+        status=lambda: state['message'], status_height=2,
+        help_text=context_help)
+    app = Application(layout=Layout(layout, focused_element=body),
+                      key_bindings=keys, style=STYLE, full_screen=True,
+                      input=input, output=output)
     try:
         return app.run()
     except EOFError:
@@ -198,14 +244,11 @@ def edit_model(current=None, *, input=None, output=None):
             return
         app.exit(result=ModelEdit('save', config))
 
-    save_button = Button('保存并测试', handler=save, width=16)
-    buttons = [save_button, Button('取消', handler=lambda: finish('back'))]
+    save_button = field('保存并测试', save, width=16)
+    buttons = [save_button, field('取消', lambda: finish('back'))]
     if current:
-        buttons.append(Button('删除', handler=lambda: finish('delete')))
-    button_row = VSplit(buttons, padding=2)
-    button_column = HSplit(buttons)
-    responsive_buttons = DynamicContainer(lambda: button_column
-        if get_app().output.get_size().columns < (44 if current else 30) else button_row)
+        buttons.append(field('删除', lambda: finish('delete')))
+    action_row = responsive_actions(buttons)
 
     keys.add('tab')(focus_next)
     keys.add('s-tab')(focus_previous)
@@ -220,17 +263,23 @@ def edit_model(current=None, *, input=None, output=None):
     def cancel(event):
         finish('back')
 
-    app = Application(layout=Layout(HSplit([
-        Label('编辑模型' if current else '添加模型', style='class:title'),
+    # The fields share the one frame shape with every other native page, so the
+    # editor gets the same group gaps and content/action rule as the picker.
+    fields = HSplit([
         Label('供应商名称（可留空）'), provider,
         Label('接口地址（OpenAI 兼容 · 含 /v1 等路径）'), url,
         Label('模型名称（Model ID）'), model,
         Label('API Key · 已设置，留空保留' if current else 'API Key'), key,
-        Window(height=1), responsive_buttons,
-        Label('Tab 下一项 · Shift+Tab 上一项 · Esc 返回'),
-        Window(FormattedTextControl(lambda: [('class:error', error)]), height=2, wrap_lines=True),
-    ]), focused_element=provider), key_bindings=keys, style=STYLE, full_screen=True,
-        input=input, output=output)
+    ])
+    layout = frame(
+        '编辑模型' if current else '添加模型',
+        fields,
+        action_row,
+        status=status_window(lambda: error, height=2, style='class:error'),
+        help_text='Tab 下一项 · Shift+Tab 上一项 · Esc 返回')
+    app = Application(layout=Layout(layout, focused_element=provider),
+                      key_bindings=keys, style=STYLE, full_screen=True,
+                      input=input, output=output)
     try:
         return app.run()
     except EOFError:

@@ -4,6 +4,8 @@ import unittest
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
+import native_ui
+
 
 class ChecklistTests(unittest.TestCase):
     def test_row_fitting_preserves_checkbox_indent_and_status_alignment(self):
@@ -46,6 +48,23 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(self.choose('q').action, 'quit')
         self.assertEqual(self.choose('\x03').action, 'quit')
 
+    def test_tab_focuses_the_confirm_button_and_enter_activates_it(self):
+        # Space checks the row while the list owns focus; Tab then reaches the
+        # Confirm button, and a focused button must be recognised (not reset to
+        # the first control on every Tab press).
+        result = self.choose(' \t\r')
+        self.assertIsNone(result.action)
+        self.assertEqual(result.indexes, [0])
+
+    def test_shift_tab_reaches_the_back_button(self):
+        self.assertEqual(self.choose('\x1b[Z\r').action, 'back')
+
+    def test_space_is_inert_once_a_button_owns_focus(self):
+        # Tab moves focus off the list; Space must not toggle background rows.
+        result = self.choose('\t \x1b')
+        self.assertEqual(result.action, 'back')
+        self.assertEqual(result.indexes, [])
+
     def test_selected_rows_remain_checked_when_reopened(self):
         self.assertEqual(self.choose('\r', selected=(1, 2)).indexes, [1, 2])
 
@@ -71,6 +90,8 @@ class ChecklistTests(unittest.TestCase):
             pipe.send_text(' r\r')
             native = partial(checklist.choose_many, input=pipe, output=DummyOutput())
             with patch('checklist.choose_many', side_effect=native), \
+                 patch('native_ui.action_page',
+                       return_value=native_ui.PageResult('quit')), \
                  patch('sys.stdin.isatty', return_value=True), \
                  patch('ui.read_terminal_line', return_value='q'), \
                  patch.object(app, 'task_catalog', side_effect=[initial, updated]):
