@@ -104,6 +104,59 @@ report('done')
         self.assertEqual(self.raw.count(b'\x1b[?1049h'), 1)
         self.assertEqual(self.raw.count(b'\x1b[?1049l'), 1)
 
+    def test_native_workflow_menu_to_results(self):
+        """The real adapter path: menu → course → confirm → study → AI → export → results."""
+        self.launch('''from ai.client import AIConfig
+rows=[{'id':'a','courseName':'bqt演示课程'}, {'id':'b','courseName':'另一课程'}]
+with u.session():
+ report('menu')
+ report({'platform':u.choose_platform(0)})
+ report('course')
+ report({'course':u.library(rows,0,{})[0]['id']})
+ report('confirm')
+ report({'confirm':u.confirm('确认操作',False)})
+ report('study')
+ u.review_study([rows[0]])
+ report('ai')
+ selected=[(rows[0],{'id':'p','name':'演示试卷'},1)]
+ config=AIConfig('https://example.org/v1','synthetic-model','synthetic-key')
+ report({'submit':u.review_ai(selected,config,{})})
+ report('export')
+ report({'format':u.review_export(selected,{})['export_format']})
+ report('results')
+ report({'navigation':u.operation_result()})
+report('done')
+''')
+        self.until(lambda: 'menu' in self.messages and '切换平台'.encode() in self.raw)
+        os.write(self.master, b'\r')
+        self.until(lambda: 'course' in self.messages and '我的课程'.encode() in self.raw)
+        self.assertIn({'platform': 0}, self.messages)
+        # A narrow terminal still keeps every action reachable.
+        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack('HHHH', 20, 52, 0, 0))
+        os.write(self.master, b'/bqt\r')
+        self.drain(.25)
+        os.write(self.master, b'\r')
+        self.until(lambda: 'confirm' in self.messages and '确认操作'.encode() in self.raw)
+        self.assertIn({'course': 'a'}, self.messages)
+        os.write(self.master, b'\r')
+        self.until(lambda: 'study' in self.messages and '自动学习'.encode() in self.raw)
+        self.assertIn({'confirm': False}, self.messages)
+        os.write(self.master, b'\r')
+        self.until(lambda: 'ai' in self.messages and 'synthetic-model'.encode() in self.raw)
+        os.write(self.master, b'\r')
+        self.until(lambda: 'export' in self.messages and '导出'.encode() in self.raw)
+        self.assertIn({'submit': True}, self.messages)
+        os.write(self.master, b'\r')
+        self.until(lambda: 'results' in self.messages and '本次没有处理任务'.encode() in self.raw)
+        self.assertIn({'format': 'md'}, self.messages)
+        os.write(self.master, b'\x1b')
+        self.until(lambda: 'done' in self.messages)
+        self.assertIn({'navigation': 1}, self.messages)
+        self.until(lambda: {'restored_echo': True} in self.messages)
+        self.assertEqual(self.raw.count(b'\x1b[?1049h'), 1)
+        self.assertEqual(self.raw.count(b'\x1b[?1049l'), 1)
+        self.assertNotIn(b'Window too small', self.raw)
+
     def test_ctrl_c_still_interrupts_and_restores_terminal(self):
         self.launch('''try:
  with u.session():

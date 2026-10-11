@@ -12,25 +12,26 @@ import checklist
 
 
 class SizedOutput(DummyOutput):
-    def __init__(self, columns):
-        self.columns = columns
+    def __init__(self, columns, rows=18):
+        self.columns, self.rows = columns, rows
 
     def get_size(self):
-        return Size(rows=18, columns=self.columns)
+        return Size(rows=self.rows, columns=self.columns)
 
 
-def render(rows, columns, *, extra_headers=(), cursor=1, keys='q', account_name='', row_hints=()):
+def render(rows, columns, *, extra_headers=(), cursor=1, keys='q', account_name='', row_hints=(),
+           rows_count=18, **kwargs):
     screens = []
 
-    def application(*args, **kwargs):
+    def application(*args, **kwargs2):
         def capture(app):
             screen = app.renderer.last_rendered_screen
             if screen:
                 screens.append([
                     ''.join(screen.data_buffer[y][x].char for x in range(columns)).rstrip()
-                    for y in range(18)
+                    for y in range(rows_count)
                 ])
-        return Application(*args, **kwargs, after_render=capture)
+        return Application(*args, **kwargs2, after_render=capture)
 
     with create_pipe_input() as pipe, patch('checklist.Application', side_effect=application):
         pipe.send_text(keys)
@@ -38,7 +39,7 @@ def render(rows, columns, *, extra_headers=(), cursor=1, keys='q', account_name=
                                        extra_headers=extra_headers,
                                        account_name=account_name,
                                        row_hints=row_hints,
-                                       input=pipe, output=SizedOutput(columns))
+                                       input=pipe, output=SizedOutput(columns, rows_count), **kwargs)
     return screens[0], result
 
 
@@ -107,6 +108,31 @@ class ChecklistLayoutTests(unittest.TestCase):
         self.assertNotIn('状态', headers[0])
         self.assertNotIn('成绩', headers[0])
         self.assertEqual(result.indexes, [0, 1])
+
+    def test_narrow_width_hides_type_column_and_keeps_metrics_useful(self):
+        rows = [('第一章 单元作业', '未提交', '作业', '0', '2'),
+                ('期中测验', '已提交', '测验', '92.5', '不限'),
+                ('附件作业 · 实践报告', '未作答', '附件作业', '--', '1')]
+        screen, _ = render(rows, 40, extra_headers=('成绩', '剩余次数'),
+                           cursor=1, keys='q', row_hints=['附件作业暂不支持'])
+        header = next(line for line in screen if '名称' in line)
+        # No squeezed placeholder column; the three metadata columns fit 38 cells.
+        self.assertNotIn('类', header)
+        for name in ('状态', '成绩', '剩余'):
+            self.assertIn(name, header)
+        self.assertNotIn('…', header)
+        joined = '\n'.join(screen)
+        # A real zero and a real remaining count stay visible at their columns.
+        first = next(line for line in screen if '第一章' in line)
+        metrics = first.split('未提交', 1)[1].split()
+        self.assertEqual(metrics[:2], ['0', '2'])
+        self.assertIn('附件作业暂不支持', joined)
+
+    def test_wide_width_keeps_the_type_column(self):
+        rows = [('第一章 单元作业', '未提交', '作业', '0', '2')]
+        screen, _ = render(rows, 80, extra_headers=('成绩', '剩余次数'))
+        header = next(line for line in screen if '名称' in line)
+        self.assertIn('类型', header)
 
 
 if __name__ == '__main__':
