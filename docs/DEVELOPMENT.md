@@ -66,7 +66,7 @@ python -m tools.ui_demo exports/ui-preview.html
 
 Chat Completions 请求使用 `messages`；Responses 请求使用 `instructions` 和 `input`，并明确设置 `stream=false`、`store=false`。Responses 解析仅接受已完成响应中的消息 `output_text`，忽略 reasoning 等非消息输出；拒绝 refusal、失败、未完成或不合法的答案 JSON。两种协议共用答案校验与重试分类；答题请求不触发协议切换。Responses 协议参考 [OpenAI Create a response](https://developers.openai.com/api/reference/resources/responses/methods/create)。
 
-AI 配置与连接健康状态独立保存；健康记录绑定 endpoint、模型和 Key 的指纹，配置变化后失效。`verify_ai()` 发送固定的合成题验证连接和答案格式，必须先于读取平台试卷。单题生成中，`AITransientServiceError`（网络、408/429、5xx）和 `AIResponseError`（响应格式异常）允许最多 2 次重试，间隔 1、2 秒，每次请求前检查时限。重试耗尽的格式/结构错误按单题失败记入本地报告（`needs_review`），不影响其他题目，也不询问人工；重试耗尽的 `AIServiceError` 和鉴权错误按全局故障处理，保存已生成的题目后停止队列（`ai_error`）。可提交的答案必须通过 `answer_record` 结构校验；模型自报置信度只作为报告元数据，缺失、为 0 或低于旧版保存的阈值都不阻止采用有效答案。平台读取、计时、交卷不由此重放，错误信息不包含 Key 或服务商原始响应。
+AI 配置与连接健康状态独立保存；健康记录绑定 endpoint、模型和 Key 的指纹，配置变化后失效。`verify_ai()` 发送固定的合成题验证连接和答案格式，必须先于读取平台试卷。单题生成中，`AITransientServiceError`（网络、408/429、5xx）和 `AIResponseError`（响应格式异常）允许最多 2 次重试，间隔 1、2 秒，每次请求前检查时限。重试耗尽的格式/结构错误按单题失败记入本地报告（`needs_review`），不影响其他题目，也不询问人工；重试耗尽的 `AIServiceError` 和鉴权错误按全局故障处理，保存已生成的题目后停止队列（`ai_error`）。可提交的答案必须通过 `answer_record` 结构校验；`AIClient` 只要求响应包含 `answer` 和字符串 `explanation`，模型请求的 JSON schema 也不再包含 `confidence`；若响应仍带有合法数字的 `confidence` 则作为报告元数据保留，缺失、null、字符串、布尔、NaN 或越界的 `confidence` 一律忽略，不阻止采用有效答案。平台读取、计时、交卷不由此重放，错误信息不包含 Key 或服务商原始响应。
 
 每次启动答题都重新调用 AI 生成全部答案，不读取旧报告中的答案或题库答案。报告仅用于查阅和交卷状态保护；本次运行内仅重试失败的单题，失败题目保持“未完成”且不推进已处理题数，不会被猜测答案补齐。交卷前仍复查平台记录，结果未知的提交不自动重发。
 
@@ -105,6 +105,6 @@ AI 结果按完成顺序交给协调者，校验、保存及进度更新后才�
 python -m unittest discover -s tests -v
 ```
 
-测试覆盖 AI 服务菜单、选项编号映射、判断/填空、子题、低置信度答案仍被采用、漏答、接口失败、未知响应、重复交卷防护和 Markdown / Word 导出，以及自适应日志区域、长中文截断、搜索翻页、取消清理、回调异常隔离和真实结果统计。GitHub Actions 配置为在 Python 3.9、3.12 上运行测试。
+测试覆盖 AI 服务菜单、选项编号映射、判断/填空、子题、缺失或畸形置信度仍被采用、漏答、接口失败、未知响应、重复交卷防护和 Markdown / Word 导出，以及自适应日志区域、长中文截断、搜索翻页、取消清理、回调异常隔离和真实结果统计。GitHub Actions 配置为在 Python 3.9、3.12 上运行测试。
 
 交卷编码和字段基于平台 2026-10-10 的公开网页代码核对，详见 [接口说明](EXAM_PROTOCOL.md)。2026-10-10 经用户授权，对一份 34 题的真实测验完成 AI 答题、交卷、记录确认和成绩回读：平台返回 92.5 分，剩余次数从 9999 减为 9998。该验证只覆盖这一份测验；平台接口变更或服务商差异可能需要继续适配。不能保证答案正确、获取全部答案或完成全部课程要求。

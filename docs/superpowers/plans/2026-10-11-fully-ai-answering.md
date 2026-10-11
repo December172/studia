@@ -62,3 +62,4 @@
 - [x] Run compileall and `git diff --check`; inspect rendered terminal output at 120×30 and a small terminal.
       Evidence: `python -m compileall -q .` is clean, `git diff --check` reports nothing; the runtime frame, AI summary and result page were rendered offline at 120×30 and 52 columns with no footer and no line exceeding the terminal width.
 - [x] Commit tested work. Coordinator creates PR, obtains CI and independent review, resolves findings, then merges.
+      Evidence: commit cdea17b; independent review found the `AIClient` response parser still required a well-formed `confidence` field, fixed in a follow-up commit.

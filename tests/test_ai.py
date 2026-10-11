@@ -52,13 +52,36 @@ class ClientTests(unittest.TestCase):
         self.assertNotIn("std_answer", json.dumps(body))
         self.assertFalse(session.post.call_args.kwargs["allow_redirects"])
 
-    def test_malformed_truncated_and_invalid_confidence_rejected(self):
-        for content, finish in [("oops", "stop"), ('{"answer":"A","confidence":0.9,"explanation":""}', "length"),
-                                ('{"answer":"A","confidence":true,"explanation":""}', "stop"),
-                                ('{"answer":"A","confidence":NaN,"explanation":""}', "stop")]:
-            client, _ = self.client(content, finish)
-            with self.assertRaises(AIError):
-                client.answer({"title": "题干"})
+    def test_malformed_truncated_or_incomplete_results_are_rejected(self):
+        for content, finish in [("oops", "stop"), ('{"answer":"A","explanation":""}', "length"),
+                                ('{"answer":"A","confidence":0.9,"explanation":7}', "stop"),
+                                ('{"confidence":0.9,"explanation":"理由"}', "stop"),
+                                ('{"answer":"A"}', "stop"), ('[]', "stop")]:
+            with self.subTest(content=content, finish=finish):
+                client, _ = self.client(content, finish)
+                with self.assertRaises(AIError):
+                    client.answer({"title": "题干"})
+
+    def test_valid_answer_ignores_any_legacy_confidence_field(self):
+        for field in ('"confidence":0.1,', '"confidence":null,', '"confidence":"high",',
+                      '"confidence":true,', '"confidence":NaN,', '"confidence":-1,',
+                      '"confidence":2,', ''):
+            with self.subTest(field=field):
+                client, _ = self.client('{"answer":"A",%s"explanation":"理由"}' % field)
+                self.assertEqual(client.answer({"title": "题干"})["answer"], "A")
+
+    def test_only_a_usable_confidence_metadata_value_is_kept(self):
+        for field in ('"confidence":"high",', '"confidence":null,', '"confidence":true,',
+                      '"confidence":NaN,', '"confidence":-1,', '"confidence":2,', ''):
+            with self.subTest(field=field):
+                client, _ = self.client('{"answer":"A",%s"explanation":""}' % field)
+                self.assertNotIn("confidence", client.answer({"title": "题干"}))
+        for value in (0, 0.2, 1):
+            with self.subTest(value=value):
+                client, _ = self.client('{"answer":"A","confidence":%s,"explanation":""}' % value)
+                self.assertEqual(client.answer({"title": "题干"})["confidence"], value)
+
+
 
     def test_network_errors_do_not_echo_credentials(self):
         client, session = self.client("")
