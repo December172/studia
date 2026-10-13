@@ -10,12 +10,17 @@ import threading
 import webbrowser
 import time
 import random
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlencode, urlparse, parse_qs
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from MoocMain.log import Logger
 from NewMoocMain.oauth_pages import render_oauth_page
 
 logger = Logger(__name__).get_log()
+
+SSO_AUTH_URL = "https://sso.icve.com.cn/sso/auth"
+# 官方退出路由：清除 .icve.com.cn 下的 token cookie，再进入带本地回调的登录页。
+SSO_LOGOUT_URL = "https://sso.icve.com.cn/loginOut"
+SSO_SOURCE = "2"
 
 class OAuthLoginHandler:
     """OAuth登录处理器"""
@@ -159,8 +164,7 @@ class OAuthLoginHandler:
                 
                 logger.info(f" OAuth服务已就绪，端口: {self.port}")
                 logger.debug(f"   回调地址: http://localhost:{self.port}/login")
-                logger.debug(f"   登录URL: https://sso.icve.com.cn/sso/auth?mode=simple&source=2&redirect=http://localhost:{self.port}/login")
-                
+
                 # 在新线程中运行服务器
                 self.server_thread = threading.Thread(target=self.server.serve_forever,
                                                       kwargs={"poll_interval": 0.05})
@@ -196,14 +200,25 @@ class OAuthLoginHandler:
         server.server_close()
         logger.info(" OAuth登录服务器已停止")
     
-    def open_login_page(self):
-        """打开登录页面"""
-        # 构建重定向URL
+    def open_login_page(self, force_logout=False):
+        """
+        打开登录页面
+
+        Args:
+            force_logout: 先经官方 /loginOut 清除浏览器共享的 SSO cookie，再回到登录页。
+                          仅用于用户显式退出后；普通登录不传。
+        """
+        # 官方路由把 redirect 原样拼进 /sso/auth?source=...&redirect=...，
+        # 所以这里只给本地回调；嵌套登录页会被它的正则截断。
         redirect_url = f"http://localhost:{self.port}/login"
-        login_url = f"https://sso.icve.com.cn/sso/auth?mode=simple&source=2&redirect={redirect_url}"
-        
+        login_url = f"{SSO_AUTH_URL}?" + urlencode(
+            {"mode": "simple", "source": SSO_SOURCE, "redirect": redirect_url})
+        if force_logout:
+            login_url = f"{SSO_LOGOUT_URL}?" + urlencode(
+                {"source": SSO_SOURCE, "redirect": redirect_url})
+
         logger.info(f" 浏览器已打开，请完成登录...")
-        
+
         try:
             webbrowser.open(login_url)
             return True
@@ -226,13 +241,14 @@ class OAuthLoginHandler:
             logger.error(" 登录超时")
             return None
     
-    def login(self, timeout=300):
+    def login(self, timeout=300, force_logout=False):
         """
         执行OAuth登录流程
-        
+
         Args:
             timeout: 超时时间（秒）
-            
+            force_logout: 先清除浏览器共享的 SSO 登录，再打开登录页
+
         Returns:
             成功返回token字符串，失败返回None
         """
@@ -240,9 +256,9 @@ class OAuthLoginHandler:
             # 1. 启动HTTP服务器
             if not self.start_server():
                 return None
-            
+
             # 2. 打开登录页面
-            self.open_login_page()
+            self.open_login_page(force_logout=force_logout)
             
             # 3. 等待token获取
             token = self.wait_for_token(timeout)
@@ -261,19 +277,20 @@ class OAuthLoginHandler:
         self.stop_server()
 
 
-def oauth_login(timeout=300, preferred_port=None):
+def oauth_login(timeout=300, preferred_port=None, force_logout=False):
     """
     OAuth登录的便捷函数
-    
+
     Args:
         timeout: 超时时间（秒）
         preferred_port: 首选端口，如果为None则随机选择
-        
+        force_logout: 先清除浏览器共享的 SSO 登录，再打开登录页
+
     Returns:
         成功返回token字符串，失败返回None
     """
     handler = OAuthLoginHandler(port=preferred_port)
-    return handler.login(timeout)
+    return handler.login(timeout, force_logout=force_logout)
 
 
 if __name__ == "__main__":

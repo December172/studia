@@ -1160,8 +1160,8 @@ class TerminalUI:
         return self.choice("本机设置", [
             (1, "模型配置", "添加、编辑、切换 · " + ai_status),
             (2, "并发设置", f"AI 答题 {concurrency['ai']} · 自动学习 {concurrency['study']} · 可设 1–8"),
-            (3, "退出 MOOC 登录", "当前平台退出后立即重新登录，可切换账号"),
-            (4, "退出资源库登录", "不影响 MOOC 登录"),
+            (3, "退出 MOOC 登录", "下次浏览器登录先退出共享 SSO，可切换账号"),
+            (4, "退出资源库登录", "下次浏览器登录先退出共享 SSO；MOOC 本机登录保留"),
             (0, "返回", "回到功能选择"),
         ], default=0, help_text=f"配置含凭证，请勿分享：{path}", message=message)
 

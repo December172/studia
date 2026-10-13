@@ -87,7 +87,7 @@ AI 队列将普通 `ExamError` / `error` 视为单份失败，补齐该份结果
 
 `Application.run()` 进入 `CourseWorkspace`：复用当前客户端和课程，按课程导航，执行结束后留在结果页。`Back` 表示返回上层，`Cancelled` 表示退出；二者不可混用。真实终端（`input_fn is None`、`console.is_terminal`、`sys.stdin.isatty()` 同时成立）中的菜单、课程单选、确认、多选题、模型/并发以及执行摘要/结果页都使用原生控件：方向键移动、Enter 采用默认或确认、`Tab`/`Shift+Tab` 在列表与按钮间移动焦点、`Esc` 返回、`q` 退出，数字/字母快捷键只在列表获得焦点时生效，编辑搜索框内的按键保持字面文本。原生控件只返回值，由 `TerminalUI` 解释为业务值或 `Back`/`Cancelled`；非 TTY 或注入行输入时沿用原有编号模式。交互终端中的多选调用 `checklist.choose_many()`：返回原列表索引、光标和动作，状态持久化交由 `TerminalUI` 与工作区处理；刷新后按任务稳定标识恢复勾选。摘要中的自动交卷只属于当次操作。导出器的 `selected_papers` 是精确 `(course, item, category)` 列表；传入空列表必须不导出，不能退回全量目录。`None` 保留旧调用方式。
 
-OAuth 回调使用 `ThreadingHTTPServer` 和有限的连接读取超时：浏览器预连接可能不发送 HTTP 请求，不能让它占住唯一处理线程或阻塞关闭。登录方法统一在 `finally` 清理服务器，包括 Ctrl+C；不再由回调额外启动关闭定时器。回归测试覆盖“已收到令牌但仍有空连接”这一退出阻塞场景。
+OAuth 回调使用 `ThreadingHTTPServer` 和有限的连接读取超时：浏览器预连接可能不发送 HTTP 请求，不能让它占住唯一处理线程或阻塞关闭。登录方法统一在 `finally` 清理服务器，包括 Ctrl+C；不再由回调额外启动关闭定时器。回归测试覆盖“已收到令牌但仍有空连接”这一退出阻塞场景。`open_login_page` 的普通登录打开 `/sso/auth?mode=simple&source=2&redirect=<本地回调>`；显式退出后 `Application.browser_logout_pending` 让下一次 `login()` 传 `force_logout=True`，改为打开官方 `/loginOut?source=2&redirect=<本地回调>`，由该页清除 `.icve.com.cn` 的 token cookie，再按未编码的 redirect 跳到 `/sso/auth?...`。`/loginOut` 的 redirect 必须是本地回调本身：该路由用 `[?|&]redirect=([^&;]+?)` 取第一个值，嵌套登录页会被截断。标记只在成功拿到 token 后消费，失败、超时、取消重试都保留，`clear_session` 写失败时不设置。
 
 进度行使用 ASCII spinner 与单列宽的进度条字符，避免 macOS 终端字体把 Braille / 粗线字符显示成双列宽后，Rich 回退行数不足、每次刷新留下残影。相关显示选项集中在 `theme.py`。
 

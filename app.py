@@ -23,6 +23,9 @@ class Application:
         self.view = view
         self.progress = Reporter(view.on_progress)
         self.store = store if store is not None else SettingsStore()
+        # 显式退出后，下一次浏览器登录先走官方 /loginOut 清掉共享 cookie；
+        # 成功拿到 token 才消费，失败/取消保留退出意图。
+        self.browser_logout_pending = False
 
     def remember(self, operation):
         try:
@@ -37,8 +40,9 @@ class Application:
         while True:
             try:
                 with self.view.activity("等待浏览器登录"):
-                    token = oauth_login(timeout=300)
+                    token = oauth_login(timeout=300, force_logout=self.browser_logout_pending)
                 if token:
+                    self.browser_logout_pending = False
                     return "", "", token
                 self.view.note("登录失败或超时。", "warning")
             except Exception as exc:
@@ -369,6 +373,7 @@ class Application:
             elif action in (3, 4):
                 platform = "mooc" if action == 3 else "zyk"
                 if self.remember(lambda: self.store.clear_session(platform)):
+                    self.browser_logout_pending = True
                     label = "MOOC" if platform == "mooc" else "资源库"
                     if platform == current_platform:
                         self.view.set_user()
