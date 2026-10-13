@@ -15,10 +15,12 @@ from base.util import get_mp3_duration
 
 
 class StudyTransport:
-    def __init__(self, workers=1, count=12, failure=None):
+    def __init__(self, workers=1, count=12, failure=None, *, cancel_event=None):
         self.workers = workers
         self.count = count
         self.failure = failure
+        self.cancel_event = cancel_event
+        self.cancel_observed = None
         self.lock = threading.Lock()
         self.barrier = threading.Barrier(workers) if workers > 1 else None
         self.active = 0
@@ -44,6 +46,14 @@ class StudyTransport:
                 if isinstance(self.failure, BaseException):
                     raise self.failure
                 return self.failure
+            if self.cancel_event is not None and self.failure:
+                # Keep the successful peer in flight until the fatal worker has
+                # been cancelled, so the outcome does not depend on which of the
+                # simultaneously released writes wins the race.
+                if self.cancel_event.wait(timeout=3):
+                    self.cancel_observed = True
+                else:
+                    self.cancel_observed = False
             return {'code': 200, 'msg': 'ok'}
         finally:
             with self.lock:
@@ -213,8 +223,12 @@ class StudyConcurrencyTests(unittest.TestCase):
 
     def test_fatal_auth_stops_pending_resources_and_next_course(self):
         for cls in (AIMoocHandler, ZYKMoocHandler):
-            transport = StudyTransport(2, failure=AuthenticationExpired('expired'))
-            _, events = self.run_study(cls, transport, 2, courses=('one', 'two'))
+            cancel = threading.Event()
+            transport = StudyTransport(2, failure=AuthenticationExpired('expired'),
+                                       cancel_event=cancel)
+            _, events = self.run_study(cls, transport, 2, courses=('one', 'two'),
+                                       cancel_event=cancel)
+            self.assertTrue(transport.cancel_observed)
             self.assertLessEqual(len(transport.writes), 2)
             self.assertEqual(transport.discovered, [('one', 0)])
             self.assertNotIn('success', [e.status for e in events])
@@ -232,8 +246,12 @@ class StudyConcurrencyTests(unittest.TestCase):
     def test_rate_limit_stops_pending_work_without_retrying(self):
         from base.api_client import RequestRateLimited
         for cls in (AIMoocHandler, ZYKMoocHandler):
-            transport = StudyTransport(2, failure=RequestRateLimited('rate limited'))
-            _, events = self.run_study(cls, transport, 2, courses=('one', 'two'))
+            cancel = threading.Event()
+            transport = StudyTransport(2, failure=RequestRateLimited('rate limited'),
+                                       cancel_event=cancel)
+            _, events = self.run_study(cls, transport, 2, courses=('one', 'two'),
+                                       cancel_event=cancel)
+            self.assertTrue(transport.cancel_observed)
             self.assertLessEqual(len(transport.writes), 2)
             self.assertEqual(transport.discovered, [('one', 0)])
             self.assertNotIn('success', [e.status for e in events])
@@ -279,9 +297,12 @@ class StudyConcurrencyTests(unittest.TestCase):
 
     def test_worker_interruption_stops_dispatch_and_closes_all_clones(self):
         for cls in (AIMoocHandler, ZYKMoocHandler):
-            transport = StudyTransport(2, failure=KeyboardInterrupt())
+            cancel = threading.Event()
+            transport = StudyTransport(2, failure=KeyboardInterrupt(),
+                                       cancel_event=cancel)
             with self.assertRaises(KeyboardInterrupt):
-                self.run_study(cls, transport, 2)
+                self.run_study(cls, transport, 2, cancel_event=cancel)
+            self.assertTrue(transport.cancel_observed)
             self.assertLessEqual(len(transport.writes), 2)
             self.assertCountEqual(transport.closed, transport.clones)
 

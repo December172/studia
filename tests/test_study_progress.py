@@ -132,8 +132,11 @@ class StudyProgressTests(unittest.TestCase):
 
     def test_fatal_failure_keeps_partial_progress_and_closes_clients(self):
         for cls in (AIMoocHandler, ZYKMoocHandler):
-            transport = StudyTransport(2, count=8, failure=AuthenticationExpired('expired'))
-            _, events = self.run_study(cls, transport, 2)
+            cancel = threading.Event()
+            transport = StudyTransport(2, count=8, failure=AuthenticationExpired('expired'),
+                                       cancel_event=cancel)
+            _, events = self.run_study(cls, transport, 2, cancel_event=cancel)
+            self.assertTrue(transport.cancel_observed)
             progress = [e for e in events if e.kind == 'resources' and e.total is not None]
             self.assertTrue(progress)
             self.assertEqual(progress[-1].completed, 2)
