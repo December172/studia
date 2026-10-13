@@ -22,6 +22,7 @@ from rich.text import Text
 import theme
 from name_animation import NameAnimation, terminal_color_depth
 from reporting import ProgressEvent
+from ai.questions import manual_answer_value
 
 _active_ui = ContextVar("active_terminal_ui", default=None)
 
@@ -229,7 +230,8 @@ class TerminalUI:
                 self.results.append((event.name, event.status))
                 self.progress.advance(self.task)
                 label = {"success": "成功", "submitted": "已交卷", "preview": "答案已生成 · 未交卷",
-                         "skipped": "跳过", "needs_review": "答案未完成", "submission_unknown": "交卷结果未知",
+                         "skipped": "跳过", "needs_review": "答案未完成", "paused": "待补答",
+                         "submission_unknown": "交卷结果未知",
                          "submitting": "交卷结果未知", "error": "失败", "ai_error": "AI 服务失败", "cancelled": "中断"}.get(event.status, event.status)
                 level = "success" if event.status in ("success", "submitted", "preview") else "warning" if event.status == "skipped" else "error"
                 self.log(f"{event.name} · {label}", level)
@@ -286,6 +288,24 @@ class TerminalUI:
             self.depth -= 1
             if outer:
                 self.live = None
+
+    @contextmanager
+    def prompt_region(self):
+        """Hand the terminal to a blocking manual prompt, then restore the live view."""
+        live = self.live
+        if live:
+            live.stop()
+            self.live = None
+        try:
+            with self.runtime_input.suspend():
+                yield
+        finally:
+            self.live = live
+            if live:
+                try:
+                    live.start()
+                except Exception:
+                    pass
 
     def header(self, version):
         self.heading = f"ICVE AI Assistant · {version}"
@@ -617,6 +637,55 @@ class TerminalUI:
     def courses(self, rows):
         return self.select("选择课程", rows, lambda x: x.get("courseName", "未知课程"), self.course_details)
 
+    def _manual_question_lines(self, question, reason, warning=""):
+        rows = []
+        title = f"{question.get('number', 0) + 1}. {question.get('type', '')}"
+        if question.get("child_number") is not None:
+            title += " · 第 %s 小题" % (question["child_number"] + 1)
+        rows.append(Text(title, style="title"))
+        if question.get("context"):
+            rows.append(Text("材料：" + question["context"], style="muted"))
+        rows.append(Text("题干：" + question.get("title", ""), style="info"))
+        for option in question.get("options", []):
+            rows.append(Text("%s. %s" % (option["label"], option["text"]), style="info"))
+        if question.get("type_id") in (4, 5):
+            rows.append(Text("共 %s 个空，用 | 分隔" % question.get("blank_count"), style="muted"))
+        rows.append(Text("AI 未完成原因：" + safe_text(reason or "AI 未提供答案"), style="warning"))
+        rows.append(Text("B 是选项，不是返回；输入 :s 保存退出，Esc 返回", style="muted"))
+        if warning:
+            rows.append(Text(warning, style="warning"))
+        return rows
+
+    def _read_manual_line(self, rows, prompt="请输入答案"):
+        """Print the question rows and read one line with the live view suspended."""
+        with self.prompt_region():
+            for row in rows:
+                self.console.print(row)
+            return self.ask(prompt, navigation=False)
+
+    def manual_answer(self, question, reason):
+        """Read one human answer with the question, options and reason visible."""
+        warning = ""
+        while True:
+            try:
+                answer = self._read_manual_line(self._manual_question_lines(question, reason, warning)).strip()
+            except Back:
+                return None
+            if answer in (":s", ":save", ":q", ":quit"):
+                return None
+            try:
+                return manual_answer_value(question, answer)
+            except ValueError as exc:
+                warning = "输入无效：%s" % exc
+
+    def confirm_submit(self, paper, completed, total):
+        """Whole-paper confirmation: True submits, False declines, None cancels the run."""
+        try:
+            with self.prompt_region():
+                return self.confirm("%s %s/%s 题已完成，交卷提交整份试卷？" % (paper, completed, total), default=False)
+        except (Back, Cancelled, EOFError, KeyboardInterrupt):
+            return None
+
     @staticmethod
     def course_details(course):
         parts = [str(course.get("courseInfoName") or "")]
@@ -760,7 +829,8 @@ class TerminalUI:
         if self.workspace and not self.operation_active and not self.pending_error:
             return ("已退出。", "muted") if self.cancelled else None
         success = sum(self.counts[s] for s in ("success", "submitted", "preview"))
-        failures = sum(self.counts[s] for s in ("error", "needs_review", "submission_unknown", "submitting", "ai_error"))
+        failures = sum(self.counts[s] for s in ("error", "needs_review", "submission_unknown", "submitting",
+                                                "ai_error", "paused"))
         # Fatal errors before any task result must still be visible in the one-line summary.
         if self.pending_error and self.unit != "份试卷":
             failures += 1
@@ -770,6 +840,8 @@ class TerminalUI:
             text += f" · 跳过 {self.counts['skipped']}"
         if self.counts["needs_review"]:
             text += f" · 未完成 {self.counts['needs_review']}"
+        if self.counts["paused"]:
+            text += f" · 待补答 {self.counts['paused']}"
         if self.unit == "份试卷":
             total = self.progress.tasks[0].total
             pending = max(0, int(total) - len(self.results)) if total is not None else 0
@@ -810,6 +882,7 @@ class TerminalUI:
         from MoocMain.log import redact
         statuses = {"success": "完成", "submitted": "已交卷", "preview": "答案已生成 · 未交卷",
                     "skipped": "已跳过", "needs_review": "未完成 · 未交卷", "error": "失败", "ai_error": "AI 服务失败",
+                    "paused": "待补答 · 未交卷",
                     "submission_unknown": "交卷结果未知", "submitting": "交卷结果未知"}
         if self.native_enabled():
             from native_ui import action_page
@@ -824,6 +897,8 @@ class TerminalUI:
                     rows.append("本地答案未提交到平台，不会产生成绩。")
                 if self.counts["needs_review"]:
                     rows.append("存在未完成或不支持的题目；仅保存本地报告，未交卷。")
+                if self.counts["paused"]:
+                    rows.append("有待补答题目，已在本地保存；再次选择同一试卷可继续补答。")
                 rows += [safe_text(error) for error in self.errors]
                 if self.pending_error:
                     rows.append("错误 · " + safe_text(redact(self.pending_error)))
@@ -851,6 +926,8 @@ class TerminalUI:
             self.note("本地答案未提交到平台，不会产生成绩。需要交卷时，在执行摘要按 s → 执行方式 → 答题并自动交卷。", "warning")
         if self.counts["needs_review"]:
             self.note("存在未完成或不支持的题目；仅保存本地报告，未交卷。")
+        if self.counts["paused"]:
+            self.note("有待补答题目，已在本地保存；再次选择同一试卷可继续补答。", "warning")
         for error in self.errors:
             self.note(error, "warning")
         if self.pending_error:

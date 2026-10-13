@@ -85,6 +85,22 @@ class QueueResultTests(unittest.TestCase):
         self.assertIn('成功 0 · 失败 1',self.output.getvalue())
         self.assertIn('未执行 3',self.output.getvalue())
 
+    def test_a_runner_level_service_error_stops_the_queue_but_a_plain_error_does_not(self):
+        # A global error escaping run_paper must reach the shared stop_queue check
+        # instead of being counted as one local paper failure and continuing.
+        for error, expected in ((exam_api.ExamServiceError('登录已失效'), 1), (ExamError('试卷不可用'), 4)):
+            with self.subTest(error=type(error).__name__):
+                self.view.begin_operation()
+                runner = Mock()
+                runner.run_paper.side_effect = [error] + [
+                    {'status': 'preview', 'paper': '试卷%s' % i} for i in range(4)]
+                with patch.object(self.app, 'verify_ai', return_value=self.ai), \
+                        patch('app.AnswerRunner', return_value=runner):
+                    reports = self.app.execute_ai(Mock(), self.selected, Mock(), True, api=self.api)
+                self.assertEqual(runner.run_paper.call_count, expected)
+                self.assertEqual(len(reports), expected)
+                self.assertEqual(reports[0]['stop_queue'], isinstance(error, exam_api.ExamServiceError))
+
     def test_unknown_submission_stops_without_replay_or_counting_pending_as_failures(self):
         self.api.paper.side_effect=self.paper
         self.api.verify_submitted.return_value=False

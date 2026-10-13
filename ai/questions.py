@@ -69,6 +69,56 @@ def prepare_question(raw, number, parent=None, child_number=None):
     }
 
 
+def question_fingerprint(q):
+    """Identity of a prepared question: any content or position change invalidates saved answers."""
+    return {
+        "paper_id": q["paper_id"], "paper_sub_id": q.get("paper_sub_id"),
+        "number": q["number"], "child_number": q.get("child_number"),
+        "type_id": q["type_id"], "title": q["title"], "context": q.get("context", ""),
+        "blank_count": q.get("blank_count", 0),
+        "options": [[x["label"], x["text"], x["value"]] for x in q.get("options", [])],
+        # sorted keys: the string form must not depend on the platform's key order.
+        "raw_options": json.dumps(q.get("raw_options", []), ensure_ascii=False, sort_keys=True),
+    }
+
+
+def manual_answer_value(q, text):
+    """Convert one human input line into the typed value the AI path produces."""
+    raw = (text or "").strip()
+    kind = q["type_id"]
+    if not raw:
+        raise ValueError("答案不能为空")
+    if kind in (1, 2):
+        letters = raw.replace(" ", "").upper()
+        if not letters.isalpha():
+            raise ValueError("请输入选项字母，例如 A 或 AB")
+        labels = [x["label"] for x in q["options"]]
+        if len(set(letters)) != len(letters) or any(x not in labels for x in letters):
+            raise ValueError("选项不存在或重复：%s" % letters)
+        if kind == 1:
+            if len(letters) != 1:
+                raise ValueError("单选题只能填一个选项")
+            value = letters
+        else:
+            value = list(letters)
+    elif kind == 3:
+        lowered = raw.lower()
+        if lowered in ("y", "yes", "true", "1", "对", "正确", "是"):
+            value = True
+        elif lowered in ("n", "no", "false", "0", "错", "错误", "否"):
+            value = False
+        else:
+            raise ValueError("判断题请输入 y 或 n")
+    elif kind in (4, 5):
+        value = [part.strip() for part in raw.split("|")]
+        if len(value) != q["blank_count"] or any(not x for x in value):
+            raise ValueError("需要填写 %d 个空，用 | 分隔" % q["blank_count"])
+    else:
+        value = raw
+    answer_record(q, value)
+    return value
+
+
 def model_question(q):
     return {**q, "options": [{"label": x["label"], "text": x["text"]} for x in q["options"]]}
 

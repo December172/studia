@@ -309,7 +309,9 @@ class Application:
                         ai_client = self.verify_ai(config)
                         api = api or ExamAPI(client)
                         runner = AnswerRunner(api, ai_client, auto_submit=auto_submit,
-                                              on_progress=self.view.on_progress, max_workers=max_workers)
+                                              on_progress=self.view.on_progress, max_workers=max_workers,
+                                              manual_answer=getattr(self.view, "manual_answer", None),
+                                              confirm_submit=getattr(self.view, "confirm_submit", None))
                     result = runner.run_paper(course, item, category)
                     results.append(result)
                 except TaskUnavailableError as exc:
@@ -326,8 +328,15 @@ class Application:
                 if status == "ai_error":
                     self.remember(lambda: self.store.save_ai_health(config, "error", result.get("message", "AI 服务失败")))
                 self.progress.result(name, status)
+                # A human pause ends the run locally: the queued papers are not
+                # started and the draft stays resumable on the next selection.
+                if status == "paused":
+                    logger.warning("已暂停补答：%s；其余试卷未执行，可稍后继续。", name)
+                    break
                 if result.get("stop_queue") or status in ("submission_unknown", "submitting", "ai_error"):
-                    logger.warning("队列停止：服务不可用或交卷结果待确认；其余试卷未执行。")
+                    # The message states why this run ended; do not guess a
+                    # service failure when a human stopped a submission.
+                    logger.warning("队列停止：%s；其余试卷未执行。", result.get("message") or "本次处理已停止")
                     break
         return results
 

@@ -51,10 +51,11 @@ class CompactSummaryTests(unittest.TestCase):
         self.assertIs(view.review_ai([], self.config(), {"auto_submit": False}), True)
         self.assertIn("答题并自动交卷", output.getvalue())
 
-    def test_no_confidence_or_manual_input_methods_remain(self):
+    def test_no_confidence_setting_remains_but_manual_completion_exists(self):
         view, output = make_view(["2"])
-        for removed in ("confidence", "manual_answer"):
-            self.assertFalse(hasattr(view, removed), removed)
+        self.assertFalse(hasattr(view, "confidence"))
+        self.assertTrue(callable(view.manual_answer))
+        self.assertTrue(callable(view.confirm_submit))
         # The legacy entry point keeps its name but only chooses the mode.
         self.assertIs(view.answer_settings(), True)
         self.assertNotIn("置信度", output.getvalue())

@@ -12,7 +12,7 @@ from reporting import Reporter, log_callback
 from ai.client import AIError, AIServiceError
 from ai.concurrency import ParallelAnswers, prepared_items
 from base.concurrency import validate_workers
-from ai.questions import answer_record, model_question
+from ai.questions import answer_record, model_question, question_fingerprint
 from task_capabilities import task_availability
 
 
@@ -75,14 +75,23 @@ def write_report(path, report):
     temp = path.with_suffix(".json.tmp")
     temp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(str(temp), str(path))
-    lines = ["# " + report["paper"], "", "状态：" + report["status"], "", "AI 生成答案，不是平台标准答案。", ""]
+    header = "AI 生成答案，不是平台标准答案。"
+    if any(item.get("source") == "manual" for item in report["answers"]):
+        header = "答案由 AI 生成或人工补答，不是平台标准答案。"
+    lines = ["# " + report["paper"], "", "状态：" + report["status"], "", header, ""]
     if report.get("message"):
         lines += [report["message"], ""]
     for index, item in enumerate(report["answers"], 1):
         lines += ["## %d. %s" % (item.get("question_number", index), item.get("title", "无法解析的题目")), ""]
         for opt in item.get("options", []):
             lines.append("%s. %s" % (opt["label"], opt["text"]))
-        lines += ["", "AI 答案：" + json.dumps(item.get("answer"), ensure_ascii=False),
+        if item.get("source") == "manual":
+            label = "人工答案："
+        elif item.get("answer") is not None:
+            label = "AI 答案："
+        else:
+            label = "待补答："
+        lines += ["", label + json.dumps(item.get("answer"), ensure_ascii=False),
                   "置信度：" + str(item.get("confidence", "")),
                   item.get("explanation", ""), item.get("error", ""), ""]
     path.with_suffix(".md").write_text("\n".join(lines), encoding="utf-8")
@@ -104,8 +113,79 @@ def attempt_not_draft(records, task_id):
                for record in records)
 
 
+def reuse_identity(report, exam_id, task_id, category=None):
+    """A previous report may supply answers only for this exact paper attempt."""
+    if not isinstance(report, dict) or not task_id:
+        return False
+    if str(report.get("exam_id") or "") != str(exam_id) or str(report.get("task_id")) != str(task_id):
+        return False
+    # Only an unchanged task type may reuse; a missing category on either side cannot be compared.
+    if category is None or report.get("category") is None:
+        return True
+    return str(report["category"]) == str(category)
+
+
+def reusable_row(row, q, paper_id):
+    """Return the validated answer of an unchanged question, or None."""
+    if not isinstance(row, dict) or row.get("error") or row.get("answer") is None:
+        return None
+    fingerprint = row.get("question_fingerprint")
+    if fingerprint:
+        if fingerprint != question_fingerprint(q):
+            return None
+    else:
+        # A plain row may speak only for its own plain choice question.
+        kind = q["type_id"]
+        if kind not in (1, 2) or q["paper_sub_id"] or q.get("context"):
+            return None
+        record = row.get("record")
+        if not isinstance(record, dict) or record.get("paperSubId"):
+            return None
+        if str(record.get("paperId") or "") != str(paper_id):
+            return None
+        if str(record.get("questionNo")) != str(q["number"]):
+            return None
+        if str(row.get("title") or "") != q["title"]:
+            return None
+        options = row.get("options")
+        fresh = [{"label": x["label"], "text": x["text"]} for x in q["options"]]
+        if not isinstance(options, list) or options != fresh:
+            return None
+        sort_order = record.get("optionSort")
+        # The platform may re-serialize whitespace: only the parsed value must match.
+        try:
+            saved_options = json.loads(sort_order) if isinstance(sort_order, str) else None
+        except ValueError:
+            return None
+        if saved_options != q["raw_options"]:
+            return None
+        # A single choice carries one label, a multiple choice carries a list.
+        label = row["answer"]
+        if kind == 1 and not isinstance(label, str):
+            return None
+        if kind == 2 and not isinstance(label, list):
+            return None
+    try:
+        answer_record(q, row["answer"])
+    except (ValueError, TypeError):
+        return None
+    return row["answer"]
+
+
+def pending_row(row, q):
+    """True for a previous attempt's own failed question: an answer is still missing."""
+    if not isinstance(row, dict):
+        return False
+    fingerprint = row.get("question_fingerprint")
+    if fingerprint:
+        return fingerprint == question_fingerprint(q) and bool(row.get("error") or row.get("answer") is None)
+    return (row.get("answer") is None and not row.get("record") and q["type_id"] in (1, 2)
+            and not q["paper_sub_id"] and not q.get("context") and row.get("title") == q["title"]
+            and row.get("options") == model_question(q)["options"])
+
+
 class AnswerRunner:
-    def __init__(self, api, ai, output_dir="ai_results", auto_submit=False, output=None, clock_factory=AttemptClock, *, on_log=None, on_progress=None, max_workers=1):
+    def __init__(self, api, ai, output_dir="ai_results", auto_submit=False, output=None, clock_factory=AttemptClock, *, on_log=None, on_progress=None, max_workers=1, manual_answer=None, confirm_submit=None):
         self.max_workers = validate_workers(max_workers)
         self.api, self.ai, self.output_dir = api, ai, output_dir
         self.auto_submit = auto_submit
@@ -114,6 +194,8 @@ class AnswerRunner:
         self.progress = Reporter(on_progress)
         self.reused = False
         self.service_cooldown_until = 0.0
+        self.manual_answer = manual_answer
+        self.confirm_submit = confirm_submit
 
     def wait_for_ai(self, clock, delay):
         """Keep deadlines responsive during provider cooldowns and retries."""
@@ -189,8 +271,6 @@ class AnswerRunner:
                 self.progress.questions("交卷结果待确认", 0)
                 self.output("跳过已有交卷记录：%s（%s）" % (paper_display_name(item), previous["status"]))
                 return previous
-            if previous.get("status") == "submitted":
-                archive_report(path, previous)
         submitted_task_ids = [str(value) for value in previous.get("submitted_task_ids", []) if value]
         if previous.get("status") == "submitted" and previous.get("task_id"):
             submitted_task_ids.append(str(previous["task_id"]))
@@ -202,8 +282,10 @@ class AnswerRunner:
                   "submitted_task_ids": submitted_task_ids}
         clock = None
         parallel = None
-        paper_opened = False
         completed, question_total = 0, None
+        # Nothing below may touch the on-disk report until the fresh checkpoint is
+        # fully prepared; the previous attempt stays readable for a later retry.
+        fresh_checkpoint_ready = False
         try:
             # The browser uses this same paper endpoint for '再次答题'. Older
             # submitted attempts must not prevent opening a fresh draft.
@@ -212,7 +294,6 @@ class AnswerRunner:
             if not availability.available:
                 raise TaskUnavailableError(availability.reason)
             paper = self.api.paper(exam_id)
-            paper_opened = True
             task = paper.get("taskExamRecord") or {}
             if str(paper.get("tjzt")) == "1" or str(task.get("status")) != "0":
                 raise ExamError("平台未提供新的可作答记录，本次无法再次作答；请检查剩余次数和开放状态")
@@ -239,25 +320,98 @@ class AnswerRunner:
                 if remaining <= 0:
                     raise ExamError("试卷已无剩余时间")
             report["task_id"] = str(task_id)
-            report["status"] = "answering"
-            write_report(path, report)
-            clock = self.clock_factory(self.api, course, exam_id, task_id, remaining, self.auto_submit).start()
             items = prepared_items(raw_questions)
+            report["status"] = "answering"
             entries, saved_answers = {}, {}
-            failures = 0
             question_total = len(items)
-            if self.max_workers > 1 and question_total > 1:
-                parallel = ParallelAnswers(self.ai, [q for _, q, _ in items], self.max_workers, clock)
-                parallel.cooldown_until = self.service_cooldown_until
-            self.progress.questions("AI 生成 · 等待答案", 0, question_total)
-            results = parallel.answers() if parallel is not None else ((i, None) for i in range(len(items)))
 
             def save_answer(position, item_report):
                 saved_answers[position] = item_report
                 report["answers"] = [saved_answers[i] for i in sorted(saved_answers)]
 
+            # A previous attempt of this same task may already hold valid answers.
+            # Every reusable row enters the report before the first clock or AI
+            # call, so a deadline or service failure cannot lose it.
+            reuse_count = 0
+            manual_used = 0
+            pending_positions = set()
+            reusing = reuse_identity(previous, exam_id, task_id, category)
+            previous_rows = previous.get("answers") if reusing else None
+            cached = {}
+            if isinstance(previous_rows, list):
+                for index, old in enumerate(previous_rows):
+                    if not isinstance(old, dict):
+                        continue
+                    # A legacy row may carry no number; its list index is then its position.
+                    number = old.get("question_number")
+                    position = number - 1 if isinstance(number, int) and not isinstance(number, bool) else index
+                    if not 0 <= position < question_total or position in cached:
+                        continue
+                    cached[position] = old
+            for position, (_, q, preparation_error) in enumerate(items):
+                if preparation_error is not None or position not in cached:
+                    continue
+                reused = reusable_row(cached[position], q, q["paper_id"])
+                if reused is None:
+                    # A failed question from this same attempt is not regenerated:
+                    # it is carried over as pending and handed to the human.
+                    if (self.auto_submit and self.manual_answer is not None
+                            and pending_row(cached[position], q)
+                            and (previous.get("status") != "ai_error"
+                                 or any(isinstance(row, dict) and row.get("question_number") == position + 1
+                                        and row.get("question_fingerprint") == question_fingerprint(q)
+                                        for row in previous.get("pending_manual") or []))):
+                        pending_positions.add(position)
+                        row = {**cached[position], "question_number": position + 1,
+                               "title": q["title"],
+                               "options": model_question(q)["options"],
+                               "question_fingerprint": question_fingerprint(q)}
+                        save_answer(position, row)
+                        # Provenance of an established human question survives a
+                        # later service failure, so a retry keeps it pending.
+                        report["pending_manual"] = [existing for existing in report.get("pending_manual", [])
+                                                    if existing["question_number"] != position + 1]
+                        report["pending_manual"].append(
+                            {"question_number": row["question_number"], "title": row["title"],
+                             "reason": row.get("error") or "AI 未提供答案",
+                             "question_fingerprint": row["question_fingerprint"]})
+                    continue
+                entry = answer_record(q, reused)
+                source = "manual" if cached[position].get("source") == "manual" else "ai"
+                entries[position] = entry
+                manual_used += 1 if source == "manual" else 0
+                item_report = {"title": q["title"], "question_number": position + 1,
+                               "options": model_question(q)["options"],
+                               "answer": reused, "confidence": cached[position].get("confidence"),
+                               "explanation": cached[position].get("explanation", ""),
+                               "record": entry, "source": source,
+                               "question_fingerprint": question_fingerprint(q)}
+                save_answer(position, item_report)
+                reuse_count += 1
+            completed = len(entries)
+            if reusing:
+                self.progress.detail("复用上一轮答案：" + report["paper"])
+                if reuse_count:
+                    self.output("复用上一轮已校验答案 %s 题" % reuse_count)
+            # A new valid paper task replaces the old draft: keep the previous
+            # completed attempt only now, when the fresh checkpoint is ready.
+            if previous:
+                archive_report(path, previous)
+            fresh_checkpoint_ready = True
+            write_report(path, report)
+            clock = self.clock_factory(self.api, course, exam_id, task_id, remaining, self.auto_submit).start()
+            if self.max_workers > 1 and question_total > 1:
+                parallel = ParallelAnswers(self.ai, [None if position in entries or position in pending_positions else q
+                                                     for position, (_, q, _) in enumerate(items)],
+                                           self.max_workers, clock)
+                parallel.cooldown_until = self.service_cooldown_until
+            self.progress.questions("AI 生成 · 等待答案", completed, question_total)
+            results = parallel.answers() if parallel is not None else ((i, None) for i in range(len(items)))
+
             for position, generated in results:
                 value, prepared, preparation_error = items[position]
+                if position in entries or position in pending_positions:
+                    continue
                 clock.check()
                 stage = "第 %s 题" % (position + 1)
                 self.progress.questions(stage + " · 解析题目", completed, question_total)
@@ -268,7 +422,8 @@ class AnswerRunner:
                     if preparation_error is not None:
                         raise preparation_error
                     q = prepared
-                    item_report.update(title=q["title"], options=model_question(q)["options"])
+                    item_report.update(title=q["title"], options=model_question(q)["options"],
+                                       question_fingerprint=question_fingerprint(q))
                     self.progress.detail(report["paper"])
                     self.progress.questions(stage + " · AI 生成", completed, question_total)
                     self.output("AI 作答 %s / %s：%s" % (position + 1, question_total, q["title"][:70]))
@@ -285,6 +440,8 @@ class AnswerRunner:
                     entry = answer_record(q, answer["answer"])
                     entries[position] = entry
                     item_report["record"] = entry
+                    item_report["source"] = "ai"
+                    item_report["question_fingerprint"] = question_fingerprint(q)
                 except (ValueError, TypeError, AIError) as exc:
                     item_report["error"] = str(exc)
                     if isinstance(exc, AIServiceError):
@@ -297,7 +454,6 @@ class AnswerRunner:
                         return report
                     # Unsupported or invalid questions are reported and kept in
                     # the local report; the paper is never submitted incomplete.
-                    failures += 1
                 save_answer(position, item_report)
                 write_report(path, report)
                 if position in entries:
@@ -308,13 +464,89 @@ class AnswerRunner:
                 else:
                     self.progress.questions("第 %s 题 · 答案未完成" % (position + 1), completed, question_total)
                 clock.check()
-            clock.stop()
             clock.check()
-            if failures or not entries:
+            if reuse_count:
+                pending_note = "，待人工补答 %s 题" % len(pending_positions) if pending_positions else ""
+                self.output("复用上一轮已校验答案 %s 题，AI 重新生成 %s 题%s"
+                            % (reuse_count, question_total - reuse_count - len(pending_positions), pending_note))
+            unresolved = [position for position in range(question_total)
+                          if position not in entries and items[position][2] is None]
+            if unresolved and self.auto_submit and self.manual_answer is not None:
+                for position in unresolved:
+                    value, q, _ = items[position]
+                    item_report = saved_answers[position]
+                    reason = item_report.get("error") or "AI 未提供答案"
+                    report["pending_manual"] = [{"question_number": row["question_number"], "title": row["title"],
+                                                 "reason": row.get("error") or "AI 未提供答案",
+                                                 "question_fingerprint": question_fingerprint(items[i][1])}
+                                                for i, row in sorted(saved_answers.items())
+                                                if i not in entries and items[i][2] is None]
+                    report.update(status="paused", message="等待人工补答第 %s 题；已保存本地报告，未交卷" % (position + 1))
+                    write_report(path, report)
+                    self.progress.detail("人工补答：" + q["title"][:70])
+                    clock.check()
+                    try:
+                        answer = self.manual_answer(q, reason)
+                    except (EOFError, KeyboardInterrupt):
+                        report.update(status="paused", message="已保存本地报告，未交卷；下次运行可继续补答")
+                        write_report(path, report)
+                        raise
+                    if answer is None:
+                        report.update(status="paused", message="已保存本地报告，未交卷；下次运行可继续补答")
+                        write_report(path, report)
+                        return report
+                    try:
+                        entry = answer_record(q, answer)
+                    except (ValueError, TypeError) as exc:
+                        item_report["error"] = str(exc)
+                        save_answer(position, item_report)
+                        write_report(path, report)
+                        continue
+                    item_report.pop("error", None)
+                    item_report.update(answer=answer, record=entry, source="manual",
+                                       question_fingerprint=question_fingerprint(q))
+                    entries[position] = entry
+                    completed += 1
+                    manual_used += 1
+                    save_answer(position, item_report)
+                    report["pending_manual"] = [row for row in report["pending_manual"]
+                                                if row["question_number"] != item_report["question_number"]]
+                    write_report(path, report)
+                    self.progress.questions("已处理题目", completed, question_total)
+                    self.output("人工答案 %s / %s：%s" % (position + 1, question_total, q["title"][:70]))
+                    # Persist the typed answer before a deadline that may have
+                    # passed while the human was answering can abort the paper.
+                    clock.check()
+                if len(entries) >= question_total:
+                    report.pop("pending_manual", None)
+            if len(entries) < question_total:
                 report.update(status="needs_review", message="存在未完成或不支持的题目，仅保存本地报告，未交卷")
             elif not self.auto_submit:
                 report.update(status="preview", message="答案已保存到本地，未向平台保存或提交答案")
             else:
+                if manual_used:
+                    # A whole-paper submission after human input is explicit only.
+                    # The attempt clock stays alive through the prompt, so time
+                    # spent waiting on the human still counts against the deadline.
+                    # Persist the finished draft before asking: even if the prompt
+                    # is cancelled or raises, the report is not left as paused or
+                    # answering with all answers already complete.
+                    report.update(status="preview", message="答案已补齐，等待确认交卷；未向平台提交")
+                    write_report(path, report)
+                    result = self.confirm_submit(report["paper"], completed, question_total) if self.confirm_submit else False
+                    if result is None:
+                        # The human cancelled the prompt: end the run instead of
+                        # starting the queued papers with the same state.
+                        report.update(status="preview", message="已取消交卷；答案已保存到本地，队列已停止，未向平台提交")
+                        report["stop_queue"] = True
+                    elif not result:
+                        report.update(status="preview", message="未确认交卷，答案已保存到本地，未向平台提交")
+                    if not result:
+                        return report
+                # The request below is the point of no return; every earlier
+                # deadline is still enforced against the confirmed answer.
+                clock.stop()
+                clock.check()
                 self.progress.questions("检查作答状态", completed, question_total)
                 # Recheck this attempt, not the entire history. A browser may
                 # have submitted this same draft while AI was still answering.
@@ -355,9 +587,9 @@ class AnswerRunner:
                 self.service_cooldown_until = max(self.service_cooldown_until, parallel.cooldown_until)
             if clock:
                 clock.stop()
-            # A deadline crossed during history lookup must not erase an old
-            # draft when no new paper was opened.
-            if report["status"] != "skipped" or paper_opened:
+            # A signal or history failure before the fresh checkpoint exists must
+            # leave a previous attempt's report untouched.
+            if fresh_checkpoint_ready or not previous:
                 write_report(path, report)
             stage = {"submitted": "已交卷", "preview": "答案已生成 · 未交卷",
                      "needs_review": "答案未完成", "skipped": "已跳过", "submission_unknown": "交卷结果待确认"}.get(

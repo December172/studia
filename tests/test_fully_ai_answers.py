@@ -47,7 +47,7 @@ class FullyAIAnswerTests(unittest.TestCase):
         self.assertEqual(self.ai.answer.call_count, 3)
         self.assertEqual(report["answers"][0]["answer"], "A")
         self.assertEqual(report["answers"][0]["confidence"], .2)
-        self.assertNotIn("source", report["answers"][0])
+        self.assertEqual(report["answers"][0]["source"], "ai")
         self.assertNotIn("error", report["answers"][0])
         entries = self.api.submit.call_args.args[0]["taskExamProblemRecordList"]
         self.assertEqual([entry["answer"] for entry in entries], ["3", "3", "3"])
@@ -149,38 +149,42 @@ class FullyAIAnswerTests(unittest.TestCase):
         self.assertEqual([call.args[0]["title"] for call in self.ai.answer.call_args_list], ["题0", "题1", "题2"])
         self.api.submit.assert_called_once()
 
-    def test_changed_options_and_questions_still_regenerate_every_answer(self):
+    def test_changed_options_and_questions_regenerate_only_those_answers(self):
         self.run_paper(False)
         self.ai.answer.reset_mock()
         options = json.loads(self.api.paper.return_value["questions"][0]["dataJson"])
         options[0]["Content"] = "新选项"
         self.api.paper.return_value["questions"][0]["dataJson"] = json.dumps(options)
         self.api.paper.return_value["questions"][1]["title"] = "改过的题干"
-        self.assertEqual(self.run_paper()["status"], "submitted")
-        self.assertEqual(self.ai.answer.call_count, 3)
-        self.assertEqual(self.ai.answer.call_args_list[1].args[0]["title"], "改过的题干")
+        report = self.run_paper()
+        self.assertEqual(report["status"], "submitted")
+        self.assertEqual(self.ai.answer.call_count, 2)
+        self.assertEqual(sorted(call.args[0]["title"] for call in self.ai.answer.call_args_list),
+                         ["改过的题干", "题0"])
+        self.assertEqual(report["answers"][2]["source"], "ai")
 
-    def test_new_attempt_does_not_reuse_previous_local_answers(self):
+    def test_new_attempt_regenerates_answers_instead_of_reusing_the_old_draft(self):
         self.assertEqual(self.run_paper(False)["status"], "preview")
         self.api.paper.return_value["taskExamRecord"]["id"] = "new-task"
         self.ai.answer.reset_mock()
         self.assertEqual(self.run_paper()["status"], "submitted")
         self.assertEqual(self.ai.answer.call_count, 3)
 
-    def test_legacy_preview_or_paused_report_cannot_supply_answers(self):
-        for status in ("preview", "paused"):
-            with self.subTest(status=status):
-                self.assertEqual(self.run_paper(False)["status"], "preview")
-                path = next(Path(self.temp.name).rglob("*.json"))
-                previous = json.loads(path.read_text(encoding="utf-8"))
-                previous["status"] = status
-                for answer in previous["answers"]:
-                    answer.pop("question_fingerprint", None)
-                path.write_text(json.dumps(previous), encoding="utf-8")
-                self.ai.answer.reset_mock()
-                self.assertEqual(self.run_paper()["status"], "submitted")
-                self.assertEqual(self.ai.answer.call_count, 3)
-                self.api.paper.return_value["taskExamRecord"]["id"] += "-next"
+    def test_a_legacy_draft_without_fingerprints_is_reused_when_paper_identity_matches(self):
+        # Reports written before fingerprints existed are verified by paper id and content.
+        self.assertEqual(self.run_paper(False)["status"], "preview")
+        path = next(Path(self.temp.name).rglob("*.json"))
+        previous = json.loads(path.read_text(encoding="utf-8"))
+        previous["status"] = "needs_review"
+        for answer in previous["answers"]:
+            answer.pop("question_fingerprint", None)
+        path.write_text(json.dumps(previous), encoding="utf-8")
+        self.ai.answer.reset_mock()
+        report = self.run_paper()
+        self.assertEqual(report["status"], "submitted")
+        self.assertEqual(self.ai.answer.call_count, 0)
+        self.api.submit.assert_called_once()
+        self.assertTrue(all(row["source"] == "ai" for row in report["answers"]))
 
     def test_fresh_ai_answers_after_history_read_failure(self):
         self.assertEqual(self.run_paper(False)["status"], "preview")
@@ -201,19 +205,22 @@ class FullyAIAnswerTests(unittest.TestCase):
         self.assertEqual(self.run_paper()["status"], "submitted")
         self.ai.answer.assert_called_once()
 
-    def test_preview_then_submit_uses_fresh_answers_even_for_unchanged_questions(self):
+    def test_preview_then_submit_reuses_the_validated_same_draft_answers(self):
         self.assertEqual(self.run_paper(False)["status"], "preview")
         self.ai.answer.reset_mock()
         self.ai.answer.return_value = dict(self.good, answer="B")
-        self.assertEqual(self.run_paper()["status"], "submitted")
-        self.assertEqual(self.ai.answer.call_count, 3)
+        report = self.run_paper()
+        self.assertEqual(report["status"], "submitted")
+        self.assertEqual(self.ai.answer.call_count, 0)
         entries = self.api.submit.call_args.args[0]["taskExamProblemRecordList"]
-        self.assertEqual([entry["answer"] for entry in entries], ["0", "0", "0"])
+        self.assertEqual([entry["answer"] for entry in entries], ["3", "3", "3"])
+        self.assertTrue(all(row["source"] == "ai" for row in report["answers"]))
 
-    def test_runner_exposes_no_manual_or_confidence_configuration(self):
+    def test_runner_takes_human_completion_callbacks_without_a_confidence_threshold(self):
         runner = AnswerRunner(self.api, self.ai, self.temp.name)
-        for removed in ("manual_answer", "min_confidence"):
-            self.assertFalse(hasattr(runner, removed), removed)
+        self.assertIsNone(runner.manual_answer)
+        self.assertIsNone(runner.confirm_submit)
+        self.assertFalse(hasattr(runner, "min_confidence"))
 
 
 class FullyAIApplicationTests(unittest.TestCase):
