@@ -27,20 +27,15 @@ from prompt_toolkit.filters import has_focus
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import TextArea
 
 from checklist import fit
 from name_animation import NameAnimation, terminal_color_depth
-from terminal_widgets import (CURSOR, ROW, ROW_DISABLED, ROW_SELECTED, STYLE_DICT,
+from terminal_widgets import (CURSOR, ROW, ROW_DISABLED, ROW_SELECTED, STYLE,
                               action_rows, cycle_focus, field, frame, frame_chrome,
                               name_fragments, responsive_actions, status_window,
                               wrap_help)
-
-STYLE = Style.from_dict(dict(STYLE_DICT, **{
-    'text-area': 'bg:#202b33 #ffffff', 'text-area focused': 'bg:#263b45 #ffffff',
-}))
 
 HELP_MENU = '↑↓ 选择 · Enter 确认 · Tab 按钮 · Esc 返回 · q 退出'
 HELP_PICKER = '↑↓ 选择 · / 搜索 · Enter 选择 · Tab 按钮 · Esc 返回 · q 退出'

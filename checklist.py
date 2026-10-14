@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from name_animation import NameAnimation, terminal_color_depth
+import theme
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.filters import has_focus
@@ -217,7 +218,7 @@ def choose_many(title, rows, *, selected=(), cursor=1, refresh=False, heading=''
         heading=heading or None, actions=responsive_actions(buttons),
         footer=Window(FormattedTextControl(footer), dont_extend_height=True, wrap_lines=True))
     app = Application(layout=Layout(layout, focused_element=body), key_bindings=keys, full_screen=True,
-        style=Style.from_dict(dict(STYLE_DICT, warning='ansiyellow')),
+        style=Style.from_dict(dict(STYLE_DICT, warning=theme.WARNING)),
         input=input, output=output, color_depth=terminal_color_depth(), refresh_interval=1 / 30 if account_name else None)
     try:
         return app.run()

@@ -13,15 +13,16 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea, Label
 
+import theme
 from ai.client import AIConfig
 from checklist import fit
 from terminal_widgets import STYLE_DICT, field, frame, responsive_actions, status_window
 
-# Shared palette plus the editor's text-area colors. Focused-button contrast is
-# defined once in terminal_widgets and must not be overridden here.
+# Shared palette (including the editor's text-area colors) plus the active-row
+# marker. Focused-button contrast is defined once in terminal_widgets and must
+# not be overridden here.
 STYLE = Style.from_dict(dict(STYLE_DICT, **{
-    'active': 'ansicyan bold',
-    'text-area': 'bg:#202b33 #ffffff', 'text-area focused': 'bg:#263b45 #ffffff',
+    'active': f'{theme.BRAND} bold',
 }))
 
 @dataclass

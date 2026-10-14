@@ -15,6 +15,7 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 
 from base.concurrency import MAX_WORKERS, validate_workers
+import theme
 from terminal_widgets import STYLE_DICT, field, frame, responsive_actions
 
 DEFAULT_COUNT = MAX_WORKERS
@@ -22,7 +23,7 @@ MIN_COUNT = 1
 FIELDS = (('ai', 'AI答题'), ('study', '自动学习'))
 INVALID_HINT = f'并发数只能为 {MIN_COUNT}–{MAX_WORKERS} 的整数，请重新输入'
 
-STYLE = Style.from_dict(dict(STYLE_DICT, hint='ansiyellow'))
+STYLE = Style.from_dict(dict(STYLE_DICT, hint=theme.WARNING))
 
 
 @dataclass

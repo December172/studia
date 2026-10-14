@@ -64,7 +64,7 @@ def main():
         with ui.session():
             ui.heading = '原生控件预览 · 合成数据'
             ui.account_name = '演示姓名'
-            ui.header('4.2.0')
+            ui.header('4.3.0')
             print('\n以下页面均为真实原生控件，只使用合成数据，不访问平台 / AI / 配置。\n')
 
             _page('回车预览【平台菜单】… ', lambda: ui.choose_platform(0))

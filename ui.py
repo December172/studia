@@ -49,7 +49,7 @@ def read_terminal_line(prompt, *, secret=False, input=None, output=None, above_p
 
     session = PromptSession(input=input, output=output, key_bindings=keys,
                             color_depth=terminal_color_depth(),
-                            is_password=secret, style=Style.from_dict({'input-prompt': 'ansicyan bold'}))
+                            is_password=secret, style=Style.from_dict({'input-prompt': f'{theme.BRAND} bold'}))
     def message():
         fragments = []
         if above_prompt:
@@ -259,7 +259,7 @@ class TerminalUI:
                 if index < log_rows - 1:
                     body.append("\n")
             panel = Panel(body, title=Text("运行日志 · 最近 8 行", style="muted"),
-                          box=theme.BORDER, border_style="border", height=log_rows + 2, padding=(0, 1))
+                          box=theme.BOX, border_style="border", height=log_rows + 2, padding=(0, 1))
             if self.screen.active:
                 return Group(Text(self.heading, style="title"), self.progress, *resource_details, panel)
             return Group(self.progress, *resource_details, panel)
@@ -311,7 +311,7 @@ class TerminalUI:
         self.heading = f"ICVE AI Assistant · {version}"
         self.console.print(Panel(Text.assemble(("ICVE AI Assistant", "title"),
                                               (f"  {version}\n智慧职教 AI 助手", "muted")),
-                                 box=theme.BORDER, border_style="border"))
+                                 box=theme.BOX, border_style="border"))
         self.note("Esc 返回 · q 退出")
 
     def note(self, message, level="muted"):
@@ -362,7 +362,7 @@ class TerminalUI:
             table.add_row(*(Text(safe_text(value), no_wrap=True, overflow="ellipsis") for value in row))
         help_text = safe_text(help_text)
         self.console.print(Panel(table, title=Text(safe_text(title), style="title"),
-                                 box=theme.BORDER, border_style="border", padding=(0, 1)))
+                                 box=theme.BOX, border_style="border", padding=(0, 1)))
         if help_text:
             self.shortcuts(help_text)
 

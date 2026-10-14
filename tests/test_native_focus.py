@@ -3,7 +3,7 @@
 The original defect: a focused button's label/arrow fragments carry
 ``class:button.focused class:button.text`` (and ``.arrow``). The flat
 ``button.focused`` rule sets the window background, but the later fragment
-inherits ``class:button``'s *foreground*, producing fg == bg == ansicyan and
+inherits ``class:button``'s *foreground*, producing fg == bg == #faf9f5 and
 invisible text. These tests read the actual rendered cells (character, style
 string and resolved attributes), not just the presence of a label in output.
 """
@@ -17,7 +17,10 @@ from prompt_toolkit.data_structures import Size
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
+import theme
+
 DOWN = '\x1b[B'
+FOCUS_BG = theme.TEXT.lstrip('#')  # prompt_toolkit reports bgcolor without '#'
 
 
 class SizedOutput(DummyOutput):
@@ -89,7 +92,7 @@ def run_frames(module, func, chunks, *args, columns=120, rows=30, timeout=6, out
 
 
 def _is_focused_button_cell(style, attrs):
-    return 'button.focused' in style and attrs is not None and attrs.bgcolor == 'ansicyan'
+    return 'button.focused' in style and attrs is not None and attrs.bgcolor == FOCUS_BG
 
 
 def visible_cells(line):
@@ -157,7 +160,7 @@ class FocusContrastTests(unittest.TestCase):
         for char, style, attrs in visible_cells(cells):
             if attrs is None:
                 continue
-            self.assertNotEqual(attrs.bgcolor or '', 'ansicyan',
+            self.assertNotEqual(attrs.bgcolor or '', FOCUS_BG,
                                 f'{label}: {char!r} ({style}) claims the focus background')
             checked += 1
         self.assertGreater(checked, 0, f'{label}: no rendered row cells')
@@ -218,7 +221,7 @@ class FocusContrastTests(unittest.TestCase):
         frame = button_focused_frame(frames, '使用此模型')
         self.assertIsNotNone(frame, 'no button-focused frame captured')
         list_row = next(line for line in frame if '供应商一' in ''.join(c for c, _, _ in line))
-        # The retained row keeps its cyan foreground but must not claim the
+        # The retained row keeps its primary foreground but must not claim the
         # focused button background while focus is on the actions.
         self.assert_row_has_no_focus_background(list_row, '模型行')
 
@@ -258,7 +261,7 @@ class FocusContrastTests(unittest.TestCase):
         self.assertEqual(result.action, 'back')
         rows = [line for lines in frames for line in lines
                 if any('class:cursor' in style and attrs is not None
-                       and attrs.bgcolor == 'ansicyan' and char.strip()
+                       and attrs.bgcolor == FOCUS_BG and char.strip()
                        for char, style, attrs in line)]
         self.assertTrue(rows, '任务行: no focused cursor row captured')
 
@@ -275,7 +278,7 @@ class FocusContrastTests(unittest.TestCase):
         for lines in button_frames:
             for line in lines:
                 self.assertFalse(
-                    any('class:cursor' in s and a is not None and a.bgcolor == 'ansicyan'
+                    any('class:cursor' in s and a is not None and a.bgcolor == FOCUS_BG
                         and c.strip() for c, s, a in line),
                     'a checklist row still claims the cursor background while a button is focused')
         # The highlighted row keeps its > marker and the checked task stays selected.

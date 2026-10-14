@@ -43,10 +43,12 @@ _PAGE = Template('''<!doctype html>
   <style>
     :root {
       color-scheme: light;
-      --background: #f5f8fa; --surface: #ffffff; --ink: #1f2937;
-      --secondary: #52616e; --accent: #087e8b; --accent-hover: #066773;
-      --accent-soft: #e8f5f6; --line: #d9e3e8;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --background: #f5f4ed; --surface: #ffffff; --ink: #141413;
+      --secondary: #3d3d3a;
+      --primary: #141413; --primary-hover: #3d3d3a;
+      --brand: #d97757; --brand-soft: #faf9f5;
+      --line: rgba(31, 30, 29, 0.15);
+      font-family: "Anthropic Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
     }
     * { box-sizing: border-box; }
     body {
@@ -54,19 +56,19 @@ _PAGE = Template('''<!doctype html>
       display: grid; place-items: center; background: var(--background); color: var(--ink);
     }
     main { width: 100%; max-width: 460px; }
-    .brand { margin: 0 0 20px; color: var(--accent); font-size: 14px; font-weight: 650; text-align: center; }
+    .brand { margin: 0 0 20px; color: var(--secondary); font-size: 14px; font-weight: 500; text-align: center; }
     .card { padding: 36px 32px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); }
     .icon { display: grid; place-items: center; width: 48px; height: 48px; margin-bottom: 24px;
-      border-radius: 12px; color: var(--accent); background: var(--accent-soft); }
+      border-radius: 12px; border: 1px solid var(--line); color: var(--brand); background: var(--brand-soft); }
     .icon svg { width: 32px; height: 32px; fill: none; stroke: currentColor;
       stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-    h1 { margin: 0 0 12px; font-size: 26px; line-height: 1.4; font-weight: 650; }
+    h1 { margin: 0 0 12px; font-size: 26px; line-height: 1.4; font-weight: 600; }
     .description { margin: 0; font-size: 16px; line-height: 1.75; }
     .detail { margin: 10px 0 28px; color: var(--secondary); font-size: 14px; line-height: 1.75; }
     button { width: 100%; min-height: 46px; padding: 12px 20px; border: 0; border-radius: 8px;
-      background: var(--accent); color: #fff; font: inherit; font-size: 15px; font-weight: 600; cursor: pointer; }
-    button:hover { background: var(--accent-hover); }
-    button:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
+      background: var(--primary); color: #ffffff; font: inherit; font-size: 15px; font-weight: 500; cursor: pointer; }
+    button:hover { background: var(--primary-hover); }
+    button:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
     .close-help { margin: 16px 0 0; color: var(--secondary); font-size: 14px; line-height: 1.75; }
     @media (max-width: 420px) {
       body { padding: 24px 16px; }

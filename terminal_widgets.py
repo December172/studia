@@ -14,25 +14,29 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Button, Label
 
+import theme
+
 # One palette for every native page (model picker/editor, concurrency, checklist).
 STYLE_DICT = {
-    'title': 'ansicyan bold',
-    'hint': 'ansiyellow',
-    'error': 'ansiyellow',
-    'status': 'ansiyellow',
+    'title': f'{theme.BRAND} bold',
+    'hint': theme.WARNING,
+    'error': theme.WARNING,
+    'status': theme.WARNING,
     'help': '',
-    'row': 'ansicyan',
-    'row.focused': 'ansicyan bold',      # highlighted row while focus is elsewhere
-    'row.selected': 'ansicyan bold',
-    'row.disabled': 'ansibrightblack',
-    'cursor': 'bg:ansicyan ansiblack bold',  # the control that owns focus
-    'checked': 'ansicyan bold',
-    'columns': 'bold',
-    'rule': 'ansibrightblack',
-    'button': 'ansicyan',
-    'button.focused': 'bg:ansicyan ansiblack bold',
-    'button.focused button.text': 'ansiblack bold',
-    'button.focused button.arrow': 'ansiblack bold',
+    'row': '',
+    'row.focused': f'{theme.TEXT} bold',  # highlighted row while focus is elsewhere
+    'row.selected': f'{theme.TEXT} bold',
+    'row.disabled': theme.TERTIARY,
+    'cursor': f'bg:{theme.TEXT} {theme.INK} bold',  # the control that owns focus
+    'checked': f'{theme.BRAND} bold',
+    'columns': f'{theme.SECONDARY} bold',
+    'rule': theme.BORDER,
+    'button': theme.SECONDARY,
+    'button.focused': f'bg:{theme.TEXT} {theme.INK} bold',
+    'button.focused button.text': f'{theme.INK} bold',
+    'button.focused button.arrow': f'{theme.INK} bold',
+    'text-area': f'bg:{theme.SURFACE} {theme.TEXT}',
+    'text-area focused': f'bg:{theme.SURFACE_RAISED} {theme.TEXT}',
 }
 STYLE = Style.from_dict(STYLE_DICT)
 
