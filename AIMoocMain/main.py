@@ -11,11 +11,12 @@ from base.study import run_resources, check_study_response
 from reporting import Reporter
 from MoocMain.log import Logger
 from AIMoocMain.api import AIMoocApi
+from AIMoocMain.activities import CourseActivities
 from base.util import parse_duration, get_mp3_duration
 
 
 class AIMoocHandler:
-    def __init__(self, jump_content: str = "", token: str = None, username: str = None, password: str = None, *, client=None, course_rows=None, on_progress=None, max_workers=1, cancel_event=None):
+    def __init__(self, jump_content: str = "", token: str = None, username: str = None, password: str = None, *, client=None, course_rows=None, on_progress=None, max_workers=1, cancel_event=None, activity_ai=None):
         """初始化 API 客户端和日志"""
         # 跳过课程列表
         self.max_workers = validate_workers(max_workers)
@@ -32,6 +33,11 @@ class AIMoocHandler:
 
         self.logging = Logger(__name__).get_log()
         self.progress = Reporter(on_progress)
+        self.activities = (
+            CourseActivities(self.client, activity_ai, cancel_event=self.cancel_event, log=self.logging,
+                             on_detail=self.progress.detail)
+            if activity_ai is not None else None
+        )
         try:
             self.start_courses()
         finally:
@@ -100,8 +106,33 @@ class AIMoocHandler:
                     cell_list = self.client.get_cell_list(course_info_id, course_id, parent_id)
                     yield from self.print_course_structure(cell_list, parent_id)
             run_resources(self, resources(), course_name)
+            self.run_activities(course)
         else:
             self.logging.warning(f" 课程 {course_name} 缺少 CourseInfoId，跳过")
+
+    def run_activities(self, course: Dict[str, Any]) -> None:
+        """参与课程主题讨论并提交五星课程评价（资源处理完成后独立执行）"""
+        if self.activities is None or self.cancel_event.is_set():
+            return
+        course_name = course.get("courseName", "未知课程")
+        try:
+            summary = self.activities.run_course(course)
+        except (AuthenticationExpired, RequestRateLimited):
+            self.cancel_event.set()
+            raise
+        except Exception as error:
+            self._course_failed = True
+            self.logging.error("课程讨论/评价处理失败: %s", error)
+            return
+        label = {"submitted": "已提交五星评价", "evaluated": "已评价，跳过",
+                 "failed": "失败", "skipped": "跳过"}.get(summary["evaluation"], summary["evaluation"])
+        self.logging.info(
+            "%s · 课程讨论 参与 %s · 跳过 %s · 失败 %s · 课程评价 %s",
+            course_name, summary["discussion_posted"], summary["discussion_skipped"],
+            summary["discussion_failed"], label,
+        )
+        self._course_processed |= summary["discussion_posted"] > 0 or summary["evaluation"] == "submitted"
+        self._course_failed |= summary["discussion_failed"] > 0 or summary["evaluation"] == "failed" or self.cancel_event.is_set()
 
     def print_course_structure(
         self, nodes: List[Dict[str, Any]], parent_id: str, indent: int = 0

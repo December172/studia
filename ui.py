@@ -647,11 +647,14 @@ class TerminalUI:
         self.table("课程任务", ["任务", "状态"], [("当前课程", "暂无作业、考试或测验")])
         self.ask("回车返回课程，q 退出")
 
-    def review_study(self, courses, max_workers=8):
+    def review_study(self, courses, max_workers=8, *, activities=False):
+        # MOOC learning also posts AI discussions and a 5-star evaluation; the
+        # resource library keeps its original summary and promises nothing extra.
+        activity_note = "讨论由AI生成，最多20字；课程评价五星，评语由AI生成" if activities else ""
         if self.native_enabled():
             from native_ui import action_page
             names = [safe_text(c.get("courseName", "未知课程")) for c in courses]
-            lines = lambda: [f"共 {len(names)} 门课程"] + names
+            lines = lambda: [f"共 {len(names)} 门课程"] + ([activity_note] if activities else []) + names
             while True:
                 result = action_page(
                     "自动学习", lines, {"start": "开始学习", "b": "返回"}, default="start",
@@ -665,6 +668,8 @@ class TerminalUI:
                 return None
         self.table("自动学习", ["课程", "操作"], [(c.get("courseName", "未知课程"), "完成课程学习任务") for c in courses],
                    "回车开始 · Esc 返回 · q 退出")
+        if activity_note:
+            self.note(activity_note)
         while self.ask("操作", "开始") != "开始":
             self.note("回车开始；Esc 返回，q 退出。")
 

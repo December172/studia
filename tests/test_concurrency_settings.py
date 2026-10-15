@@ -83,7 +83,10 @@ class ConcurrencySettingsTests(unittest.TestCase):
         app = Application(view, self.store)
         course = {'id': 'ci', 'courseId': 'c', 'courseName': 'course'}
         client = Mock()
-        with patch('app.AIMoocHandler') as mooc, patch('app.ZYKMoocHandler') as zyk:
+        # Offline: MOOC study now requires a verified AI client before it starts.
+        with patch('app.Application.ai_configuration', return_value=Mock()), \
+             patch('app.Application.verify_ai', return_value=Mock()), \
+             patch('app.AIMoocHandler') as mooc, patch('app.ZYKMoocHandler') as zyk:
             app.study(0, client, [course])
             app.study(1, client, [course])
         self.assertEqual(mooc.call_args.kwargs['max_workers'], 2)

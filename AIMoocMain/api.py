@@ -247,6 +247,58 @@ class AIMoocApi(BaseAPIClient):
         }
         return self.get(endpoint, params=params, origin_response=True)
 
+    def discussion_list(
+        self, course_id: str, course_info_id: str, page_num: int = 1, page_size: int = 20
+    ) -> Any:
+        """课程活动主题讨论列表（joinStatus=0 即平台未参与筛选）"""
+        endpoint = "/course/courseInfoDiscuss/list"
+        params = {
+            "courseId": course_id,
+            "courseInfoId": course_info_id,
+            "pageNum": page_num,
+            "pageSize": page_size,
+            "discussType": 4,
+            "queryUser": 2,
+            "joinStatus": 0,
+        }
+        return self.get(endpoint, params=params, origin_response=True)
+
+    def discussion_detail(self, discuss_id: str) -> Any:
+        """主题讨论详情"""
+        return self.get("/course/courseInfoDiscuss/" + str(discuss_id), origin_response=True)
+
+    def add_discussion_reply(
+        self, course_info_id: str, course_id: str, discuss_id: str, content: str
+    ) -> Any:
+        """参与主题讨论（顶层回复）"""
+        endpoint = "/course/courseInfoReply/add"
+        data = {
+            "courseInfoId": course_info_id,
+            "courseId": course_id,
+            "discussId": discuss_id,
+            "content": content,
+            "typeId": 1,
+        }
+        return self.post(endpoint, json=data, origin_response=True)
+
+    def course_evaluation(self, course_info_id: str) -> Any:
+        """读取课程评价（data 为 null 表示未评价）"""
+        endpoint = "/course/courseInfoEvaluation/getEvaluation"
+        return self.get(endpoint, params={"courseInfoId": course_info_id}, origin_response=True)
+
+    def submit_course_evaluation(
+        self, course_info_id: str, course_id: str, content: str, star: int = 5
+    ) -> Any:
+        """提交课程评价"""
+        endpoint = "/course/courseInfoEvaluation/add"
+        data = {
+            "courseInfoId": course_info_id,
+            "courseId": course_id,
+            "star": star,
+            "content": content,
+        }
+        return self.post(endpoint, json=data, origin_response=True)
+
     def upload_file_status(self, url_short: str) -> Dict[str, Any]:
         """获取单个课程详细信息"""
         endpoint = f"/{url_short}/status"

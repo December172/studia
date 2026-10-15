@@ -75,7 +75,9 @@ class CourseWorkspace:
                 return
             try:
                 if mode == 1:
-                    self.view.review_study(courses, max_workers=self.store.concurrency()['study'])
+                    self.view.review_study(
+                        courses, max_workers=self.store.concurrency()['study'],
+                        activities=self.platform != 1)
                     result = self.execute(lambda: self.app.study(self.platform, self.client, courses))
                 else:
                     result = self.tasks(courses, mode, task_state.setdefault(mode, {}))

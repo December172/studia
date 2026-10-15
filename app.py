@@ -183,15 +183,19 @@ class Application:
     def verify_ai(self, config, client=None):
         from dataclasses import replace
         previous_config = replace(config)
+        owns_client = client is None
         client = client or AIClient(config)
         try:
             with self.view.activity("测试 AI 连接"):
                 client.check_connection()
-        except AIError as exc:
-            self.remember(lambda: self.store.save_ai_health(config, "error", str(exc)))
+            self.remember(lambda: self.store.save_ai_health(config, "ok", previous_config=previous_config))
+            return client
+        except BaseException as exc:
+            if owns_client:
+                client.session.close()
+            if isinstance(exc, AIError):
+                self.remember(lambda: self.store.save_ai_health(config, "error", str(exc)))
             raise
-        self.remember(lambda: self.store.save_ai_health(config, "ok", previous_config=previous_config))
-        return client
 
     def test_ai_connection(self, config=None):
         try:
@@ -212,11 +216,26 @@ class Application:
             self.view.cancelled = True
             return
         max_workers = self.store.concurrency()['study']
-        self.view.plan("学习管理", selected)
-        self.view.note(f"自动学习：最多 {max_workers} 项同时处理，完成即更新进度")
-        with self.view.activity("处理课程"):
-            handler(client=client, course_rows=selected, on_progress=self.view.on_progress,
-                    max_workers=max_workers)
+        inject = {}
+        activity_ai = None
+        if version != 1:
+            # Only MOOC learning posts AI discussions and a 5-star evaluation; a
+            # failure to obtain a healthy AI client aborts instead of silently
+            # reporting a successful study run.
+            activity_ai = self.verify_ai(self.ai_configuration())
+            inject['activity_ai'] = activity_ai
+        try:
+            self.view.plan("学习管理", selected)
+            note = f"自动学习：最多 {max_workers} 项同时处理，完成即更新进度"
+            if inject:
+                note += "；并按主题自动参与课程讨论、提交五星课程评价，无需逐条确认"
+            self.view.note(note)
+            with self.view.activity("处理课程"):
+                handler(client=client, course_rows=selected, on_progress=self.view.on_progress,
+                        max_workers=max_workers, **inject)
+        finally:
+            if activity_ai is not None:
+                activity_ai.session.close()
 
     def export(self):
         client, selected = self.client_and_courses(AIMoocApi)
