@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from ai.questions import prepare_question
 from ai.runner import AnswerRunner
 from rich.console import Console
+import theme
 from tests.test_ai import FakeClock, question
 from ui import Back, TerminalUI
 
@@ -22,7 +23,7 @@ class ManualPromptTests(unittest.TestCase):
                 return next(inputs)
             except StopIteration:
                 raise EOFError()
-        view = TerminalUI(console=Console(file=output, width=100, highlight=False), input_fn=feed)
+        view = TerminalUI(console=Console(file=output, width=100, highlight=False, theme=theme.THEME), input_fn=feed)
         view.live = Mock()
         return view, output
 
@@ -93,7 +94,7 @@ class ConfirmSubmitTests(unittest.TestCase):
                 return next(inputs)
             except StopIteration:
                 raise EOFError()
-        view = TerminalUI(console=Console(file=output, width=100, highlight=False), input_fn=feed)
+        view = TerminalUI(console=Console(file=output, width=100, highlight=False, theme=theme.THEME), input_fn=feed)
         view.runtime_input = Mock()
         view.runtime_input.suspend.return_value = contextmanager(lambda: (yield))()
         return view, output

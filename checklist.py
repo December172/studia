@@ -5,15 +5,16 @@ from typing import Optional
 from name_animation import NameAnimation, terminal_color_depth
 import theme
 
-from prompt_toolkit.application import Application
+from prompt_toolkit.application import Application, get_app
 from prompt_toolkit.filters import has_focus
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
+from prompt_toolkit.widgets import TextArea
 
-from terminal_widgets import STYLE_DICT, cycle_focus, field, frame, responsive_actions
+from terminal_widgets import STYLE_DICT, cycle_focus, field, frame, responsive_actions, snappy
 
 
 @dataclass
@@ -45,11 +46,13 @@ def choose_many(title, rows, *, selected=(), cursor=1, refresh=False, heading=''
     checked = set(selected) & available
     cursor = min(max(0, cursor), len(rows))
     message = ''
+    query = ''
+    visible = list(range(len(rows)))
     animation = NameAnimation()
     keys = KeyBindings()
+    search_field = TextArea(multiline=False, prompt='/ ')
 
     def submit(action=None):
-        from prompt_toolkit.application import get_app
         get_app().exit(result=Selection(sorted(checked), cursor, action))
 
     def finish(event, action=None):
@@ -59,8 +62,13 @@ def choose_many(title, rows, *, selected=(), cursor=1, refresh=False, heading=''
         nonlocal message
         if checked:
             submit()
+        elif cursor - 1 in available:
+            # Nothing ticked: Enter takes the highlighted task, like a single picker.
+            get_app().exit(result=Selection([cursor - 1], cursor))
+        elif cursor - 1 in disabled:
+            message = row_hints[cursor - 1] if cursor - 1 < len(row_hints) else '该任务暂不可选，请在平台核对。'
         else:
-            message = '请先用空格选择任务。'
+            message = '移到任务上按 Enter，或用空格勾选多项。'
 
     buttons = [field('确认', confirm_action, width=10)]
     if refresh:
@@ -69,50 +77,69 @@ def choose_many(title, rows, *, selected=(), cursor=1, refresh=False, heading=''
     body = Window(FormattedTextControl(lambda: content(), focusable=True), wrap_lines=False,
                   always_hide_cursor=True, dont_extend_height=True)
 
-    @keys.add('escape')
-    @keys.add('b')
+    @keys.add('escape', filter=has_focus(search_field))
+    def leave_search(event):
+        apply_search()
+
+    @keys.add('escape', filter=~has_focus(search_field))
     def back(event):
         finish(event, 'back')
 
-    @keys.add('q')
+    @keys.add('q', filter=~has_focus(search_field))
     @keys.add('c-c')
     @keys.add('c-d')
     def quit(event):
         finish(event, 'quit')
 
     if refresh:
-        @keys.add('r')
+        @keys.add('r', filter=~has_focus(search_field))
         def reload(event):
             finish(event, 'r')
 
     @keys.add('tab')
     def next_focus(event):
-        cycle_focus(event.app, [body, *buttons], 1)
+        cycle_focus(event.app, [search_field, body, *buttons], 1)
 
     @keys.add('s-tab')
     def previous_focus(event):
-        cycle_focus(event.app, [body, *buttons], -1)
+        cycle_focus(event.app, [search_field, body, *buttons], -1)
+
+    @keys.add('/', filter=has_focus(body))
+    def start_search(event):
+        get_app().layout.focus(search_field)
+
+    @keys.add('enter', filter=has_focus(search_field))
+    def apply_filter(event):
+        apply_search()
 
     @keys.add('up', filter=has_focus(body))
     def up(event):
-        nonlocal cursor
-        cursor = max(0, cursor - 1)
+        move(-1)
 
     @keys.add('down', filter=has_focus(body))
     def down(event):
-        nonlocal cursor
-        cursor = min(len(rows), cursor + 1)
+        move(1)
+
+    @keys.add('pageup', filter=has_focus(body))
+    def pageup(event):
+        move(-10)
+
+    @keys.add('pagedown', filter=has_focus(body))
+    def pagedown(event):
+        move(10)
 
     @keys.add(' ', filter=has_focus(body))
     def toggle(event):
-        nonlocal message
+        nonlocal message, cursor
         message = ''
         if cursor == 0:
-            if checked == available:
-                checked.clear()
+            targets = [i for i in visible if i in available]
+            if targets and all(i in checked for i in targets):
+                checked.difference_update(targets)
             else:
-                checked.update(available)
-        elif cursor - 1 in disabled:
+                checked.update(targets)
+            return
+        if cursor - 1 in disabled:
             message = row_hints[cursor - 1] if cursor - 1 < len(row_hints) else '该任务暂不可选，请在平台核对。'
         elif cursor - 1 in checked:
             checked.remove(cursor - 1)
@@ -122,6 +149,30 @@ def choose_many(title, rows, *, selected=(), cursor=1, refresh=False, heading=''
     @keys.add('enter', filter=has_focus(body))
     def confirm(event):
         confirm_action()
+
+    def filter_rows(text):
+        needle = str(text).casefold()
+        if not needle:
+            return list(range(len(rows)))
+        return [i for i, row in enumerate(rows)
+                if needle in ' '.join(str(part) for part in row).casefold()]
+
+    def apply_search():
+        nonlocal query, visible, cursor
+        query = search_field.text
+        visible = filter_rows(query)
+        if visible and cursor and cursor - 1 not in visible:
+            cursor = visible[0] + 1
+        elif not visible:
+            cursor = 0
+        get_app().layout.focus(body)
+
+    def move(step):
+        nonlocal cursor
+        # The All row is always visible, so navigation walks it plus matches.
+        nav = [0] + [index + 1 for index in visible]
+        position = nav.index(cursor) if cursor in nav else 0
+        cursor = nav[max(0, min(len(nav) - 1, position + step))]
 
     def heading_text():
         unavailable = f' · {len(rows) - len(available)} 项暂不可选' if disabled else ''
@@ -165,38 +216,42 @@ def choose_many(title, rows, *, selected=(), cursor=1, refresh=False, heading=''
 
     def content():
         width, fields = columns()
-        all_mark = 'x' if available and checked == available else '-' if checked else ' '
-        all_label = 'All 取消全选' if available and checked == available else 'All 全选'
-        display = [(all_mark, all_label, '', '')]
-        display += [('-' if i in disabled else 'x' if i in checked else ' ', *row) for i, row in enumerate(rows)]
-        fragments = []
+        targets = [i for i in visible if i in available]
+        all_mark = 'x' if targets and all(i in checked for i in targets) else '-' if checked else ' '
+        all_label = 'All 取消全选' if targets and all(i in checked for i in targets) else 'All 全选'
+        display = [(0, (all_mark, all_label, '', ''))]
+        display += [(i + 1, ('-' if i in disabled else 'x' if i in checked else ' ', *rows[i]))
+                    for i in visible]
+        lines = []
         # Only the body owning focus may claim the cursor background; after Tab
         # moves focus to a button the highlighted row keeps its > marker and a
         # plain selected style, so exactly one control ever looks focused.
         body_focused = app.layout.has_focus(body)
-        for index, (mark, *values) in enumerate(display):
+        for index, (mark, *values) in display:
             highlighted = index == cursor
             focused = highlighted and body_focused
             disabled_row = index - 1 in disabled
             style = 'class:cursor' if focused else 'class:row.disabled' if disabled_row \
                 else 'class:row.selected' if highlighted or mark == 'x' else ''
+            if lines:
+                lines.append(('', '\n'))
             if highlighted:
                 # Anchor the window scroll to the highlighted row even when Tab
                 # moved focus to a button. The cursor itself only becomes visible
                 # for the focused window, so an unfocused body shows no cursor
                 # while the list stays scrolled to the selected row.
-                fragments.append(('[SetCursorPosition]', ''))
+                lines.append(('[SetCursorPosition]', ''))
             prefix = ('> ' if highlighted else '  ') + f'[{mark}] '
             line = prefix + '  '.join(
                 fit(values[column] if column < len(values) else '', size)
                 for _, column, size in fields)
-            fragments.append((style, fit(line, width)))
-            if index < len(display) - 1:
-                fragments.append(('', '\n'))
-        return fragments
+            lines.append((style, fit(line, width)))
+        if query and not visible:
+            lines.extend([('', '\n'), ('class:warning', fit('没有匹配的任务；Esc 清除或修改搜索。', width))])
+        return lines
 
     def footer():
-        hint = '↑↓ 移动 · 空格 勾选/取消 · Enter 确认'
+        hint = '↑↓ 移动 · 空格 勾选 · / 搜索 · Enter 确认（未勾选时选当前项）'
         width = app.output.get_size().columns
         available = width - get_cwidth(hint) - 2
         fragments = []
@@ -215,11 +270,11 @@ def choose_many(title, rows, *, selected=(), cursor=1, refresh=False, heading=''
     layout = frame(
         heading_text,
         HSplit([Window(FormattedTextControl(column_header), height=1, wrap_lines=False), body]),
-        heading=heading or None, actions=responsive_actions(buttons),
+        heading=heading or None, actions=responsive_actions(buttons), search=search_field,
         footer=Window(FormattedTextControl(footer), dont_extend_height=True, wrap_lines=True))
-    app = Application(layout=Layout(layout, focused_element=body), key_bindings=keys, full_screen=True,
+    app = snappy(Application(layout=Layout(layout, focused_element=body), key_bindings=keys, full_screen=True,
         style=Style.from_dict(dict(STYLE_DICT, warning=theme.WARNING)),
-        input=input, output=output, color_depth=terminal_color_depth(), refresh_interval=1 / 30 if account_name else None)
+        input=input, output=output, color_depth=terminal_color_depth(), refresh_interval=1 / theme.NAME_ANIMATION_FPS if account_name else None))
     try:
         return app.run()
     except EOFError:

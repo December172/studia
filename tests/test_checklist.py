@@ -33,8 +33,10 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(self.choose('\x1b[A \r', count=30).indexes, list(range(30)))
         self.assertEqual(self.choose('\x1b[A \x1b[B \r', selected=(0, 1, 2)).indexes, [0])
 
-    def test_enter_with_nothing_checked_does_not_confirm(self):
-        self.assertEqual(self.choose('\r \r').indexes, [0])
+    def test_enter_with_nothing_checked_takes_the_highlighted_task(self):
+        self.assertEqual(self.choose('\x1b[B\r').indexes, [1])
+        # On the All row with nothing ticked Enter waits for a real choice.
+        self.assertEqual(self.choose('\x1b[A\r\x1b[B \r').indexes, [0])
 
     def test_refresh_keeps_new_checkmarks_and_cursor_for_caller(self):
         result = self.choose(' \x1b[B r')
@@ -44,7 +46,6 @@ class ChecklistTests(unittest.TestCase):
 
     def test_back_and_quit_are_distinct(self):
         self.assertEqual(self.choose('\x1b').action, 'back')
-        self.assertEqual(self.choose('b').action, 'back')
         self.assertEqual(self.choose('q').action, 'quit')
         self.assertEqual(self.choose('\x03').action, 'quit')
 
@@ -57,11 +58,14 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(result.indexes, [0])
 
     def test_shift_tab_reaches_the_back_button(self):
-        self.assertEqual(self.choose('\x1b[Z\r').action, 'back')
+        # Search comes first in the focus order, so one Shift+Tab from the list
+        # lands there and the next wraps around to Back.
+        self.assertEqual(self.choose('\x1b[Z\x1b[Z\r').action, 'back')
 
     def test_space_is_inert_once_a_button_owns_focus(self):
-        # Tab moves focus off the list; Space must not toggle background rows.
-        result = self.choose('\t \x1b')
+        # Tab moves focus off the list (to Back here); Space presses that button
+        # and must not toggle the background row.
+        result = self.choose('\t\t\t ')
         self.assertEqual(result.action, 'back')
         self.assertEqual(result.indexes, [])
 
@@ -98,6 +102,20 @@ class ChecklistTests(unittest.TestCase):
                 with self.assertRaises(Cancelled):
                     CourseWorkspace(app).tasks([course], 3, state)
         self.assertEqual(state.get('selected'), updated)
+
+    def test_search_filters_the_list_and_enter_confirms_the_checked_task(self):
+        self.assertEqual(self.choose('/任务2\r \r').indexes, [2])
+
+    def test_letters_stay_literal_inside_the_search_field(self):
+        # q and r would quit/refresh from the list; typed into search they are
+        # ordinary text, and Esc in the field returns focus instead of leaving.
+        self.assertEqual(self.choose('/qr\x1b\x1b').action, 'back')
+
+    def test_all_selects_only_the_visible_rows_while_filtered(self):
+        self.assertEqual(self.choose('/任务1\r\x1b[A \r', count=12).indexes, [1, 10, 11])
+
+    def test_pagedown_moves_ten_visible_rows(self):
+        self.assertEqual(self.choose('\x1b[6~ \r', count=30).indexes, [10])
 
 
 if __name__ == '__main__':

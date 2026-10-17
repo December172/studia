@@ -363,7 +363,7 @@ class SharedFrameFillTests(unittest.TestCase):
         action = next(i for i, line in enumerate(lines) if '确认' in line)
         self.assertGreater(action, 24, 'checklist actions must sit at the bottom')
         self.assertLess(next(i for i, line in enumerate(lines) if '第一章' in line), 5)
-        self.assertIn('空格 勾选/取消', '\n'.join(lines[action:]))
+        self.assertIn('空格 勾选', '\n'.join(lines[action:]))
 
     def test_short_page_collapses_the_filler_at_16_rows(self):
         import model_ui

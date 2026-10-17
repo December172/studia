@@ -1,4 +1,6 @@
 """Application orchestration. Menus/rendering are provided by the view (ui.py)."""
+from concurrent.futures import ThreadPoolExecutor
+
 from MoocMain.log import Logger
 
 from AIMoocMain.api import AIMoocApi
@@ -12,6 +14,7 @@ from ai.client import AIClient, AIError
 from ai.runner import AnswerRunner
 from reporting import Reporter
 from base.auth import AuthenticationExpired, PlatformUnavailable
+from base.concurrency import INTERACTIVE_WORKERS
 from settings import SettingsStore, SettingsError
 from task_capabilities import task_availability
 
@@ -289,23 +292,24 @@ class Application:
 
     def task_catalog(self, client, courses):
         api = ExamAPI(client)
-        catalog = []
-        statuses = {}
-        with self.view.activity("读取课程任务"):
-            for course in courses:
-                for category in (1, 2, 3):
-                    for item in api.catalog(course, category):
-                        exam_id = paper_exam_id(item)
-                        if not task_availability(item, category).available:
-                            catalog.append((course, dict(item, _completion_status="unsupported"), category))
-                            continue
-                        if exam_id not in statuses:
-                            try:
-                                statuses[exam_id] = api.completion_status(exam_id)
-                            except ExamError:
-                                statuses[exam_id] = "unknown"
-                        catalog.append((course, dict(item, _completion_status=statuses[exam_id]), category))
-        return catalog
+
+        def status(exam_id):
+            try:
+                return api.completion_status(exam_id)
+            except ExamError:
+                return "unknown"
+
+        # Read-only GETs, so they run side by side; order still follows courses/categories.
+        with self.view.activity("读取课程任务"), ThreadPoolExecutor(INTERACTIVE_WORKERS) as pool:
+            pairs = [(course, category) for course in courses for category in (1, 2, 3)]
+            listed = [(course, item, category) for (course, category), items
+                      in zip(pairs, pool.map(lambda pair: api.catalog(*pair), pairs)) for item in items]
+            open_ids = list(dict.fromkeys(paper_exam_id(item) for _, item, category in listed
+                                          if task_availability(item, category).available))
+            statuses = dict(zip(open_ids, pool.map(status, open_ids)))
+        return [(course, dict(item, _completion_status=statuses[paper_exam_id(item)]
+                              if task_availability(item, category).available else "unsupported"), category)
+                for course, item, category in listed]
 
     def execute_ai(self, client, selected, config, auto_submit, api=None):
         max_workers = self.store.concurrency()['ai']

@@ -259,7 +259,7 @@ class RoutingTests(unittest.TestCase):
     def test_study_summary_backs_out_from_the_visible_back_button(self):
         import ui
         view = self.view()
-        with self.native(native_ui.PageResult('action', 'b')), \
+        with self.native(native_ui.PageResult('action', 'back')), \
              patch('sys.stdin.isatty', return_value=True):
             with self.assertRaises(ui.Back):
                 view.review_study([{'courseName': '课程'}])

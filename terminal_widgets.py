@@ -53,6 +53,17 @@ RULE_ROWS = 20   # the thin content/action rule needs this many terminal rows
 SPACING_ROWS = 24  # extra breathing room between groups needs this many
 
 
+def snappy(app):
+    """Answer a lone Esc in 50 ms instead of prompt_toolkit's 0.5 s/1 s wait.
+
+    Escape sequences from a local terminal arrive in one read, so a short
+    window still tells arrow keys apart from a real Esc.
+    """
+    app.ttimeoutlen = 0.05
+    app.timeoutlen = 0.05
+    return app
+
+
 def text_width(value):
     return get_cwidth(str(value))
 

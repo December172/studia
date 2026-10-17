@@ -30,11 +30,12 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import TextArea
 
+import theme
 from checklist import fit
 from name_animation import NameAnimation, terminal_color_depth
 from terminal_widgets import (CURSOR, ROW, ROW_DISABLED, ROW_SELECTED, STYLE,
                               action_rows, cycle_focus, field, frame, frame_chrome,
-                              name_fragments, responsive_actions, status_window,
+                              name_fragments, responsive_actions, snappy, status_window,
                               wrap_help)
 
 HELP_MENU = '↑↓ 选择 · Enter 确认 · Tab 按钮 · Esc 返回 · q 退出'
@@ -369,10 +370,10 @@ def _controls(title, state, *, buttons, listctl, search, heading, account_name, 
     layout = frame(title, content, responsive_actions(buttons), heading=heading,
                    search=search_field, status=message, help_text=help_text or '',
                    footer=footer)
-    app = Application(layout=Layout(layout, focused_element=body),
+    app = snappy(Application(layout=Layout(layout, focused_element=body),
                       key_bindings=keys, style=STYLE, full_screen=True,
                       input=input, output=output, color_depth=terminal_color_depth(),
-                      refresh_interval=1 / 30 if account_name else None)
+                      refresh_interval=1 / theme.NAME_ANIMATION_FPS if account_name else None))
     return app, body, search_field, keys, commit_search
 
 
@@ -420,18 +421,19 @@ def option_menu(title, choices, default=None, help_text=HELP_MENU, *, message=''
         keys.add(char, filter=has_focus(body))(make())
 
     def choose_key(value):
-        """Move the cursor to an explicitly keyed row without selecting it."""
+        """Select the row whose visible key was typed, like every other page."""
         def handler(event):
             for index, (key, _, _) in enumerate(choices):
                 if str(key) == value:
                     state['cursor'] = index
+                    choose()
                     return
         return handler
 
-    # Explicitly supplied keys (digits or letters such as r/s/t) move the
-    # highlight only; Enter still confirms, so a letter never exits the page.
-    # Page-level control keys win: escape/back, q/quit, movement and Tab are
-    # registered above and below, and reserved names are skipped here.
+    # A key printed in the left column selects its row at once, matching the
+    # action keys on pickers and summary pages. Page-level control keys win:
+    # escape/back, q/quit, movement and Tab are registered above and below,
+    # and reserved names are skipped here.
     reserved = {'q', 'b', 'escape', 'tab', 's-tab', 'enter', 'up', 'down', 'left', 'right',
                 'pageup', 'pagedown', 'c-c', 'c-d', ' '}
     for key in {str(key) for key, _, _ in choices}:
@@ -673,10 +675,10 @@ def action_page(title, lines, actions, *, default='start', status='', help_text=
     layout = frame(title, HSplit([body]), responsive_actions(buttons), heading=heading,
                    status=status_window(message, height=1),
                    help_text=help_text or '', footer=footer)
-    app = Application(layout=Layout(layout, focused_element=body),
+    app = snappy(Application(layout=Layout(layout, focused_element=body),
                       key_bindings=keys, style=STYLE, full_screen=True,
                       input=input, output=output, color_depth=terminal_color_depth(),
-                      refresh_interval=1 / 30 if account_name else None)
+                      refresh_interval=1 / theme.NAME_ANIMATION_FPS if account_name else None))
     return _run(app, input, output)
 
 

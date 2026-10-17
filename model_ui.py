@@ -16,7 +16,7 @@ from prompt_toolkit.widgets import TextArea, Label
 import theme
 from ai.client import AIConfig
 from checklist import fit
-from terminal_widgets import STYLE_DICT, field, frame, responsive_actions, status_window
+from terminal_widgets import STYLE_DICT, field, frame, responsive_actions, snappy, status_window
 
 # Shared palette (including the editor's text-area colors) plus the active-row
 # marker. Focused-button contrast is defined once in terminal_widgets and must
@@ -201,9 +201,9 @@ def choose_model(rows, active_id=None, *, cursor_id=None, message='', locked_ids
         button_row,
         status=lambda: state['message'], status_height=2,
         help_text=context_help)
-    app = Application(layout=Layout(layout, focused_element=body),
+    app = snappy(Application(layout=Layout(layout, focused_element=body),
                       key_bindings=keys, style=STYLE, full_screen=True,
-                      input=input, output=output)
+                      input=input, output=output))
     try:
         return app.run()
     except EOFError:
@@ -278,9 +278,9 @@ def edit_model(current=None, *, input=None, output=None):
         action_row,
         status=status_window(lambda: error, height=2, style='class:error'),
         help_text='Tab 下一项 · Shift+Tab 上一项 · Esc 返回')
-    app = Application(layout=Layout(layout, focused_element=provider),
+    app = snappy(Application(layout=Layout(layout, focused_element=provider),
                       key_bindings=keys, style=STYLE, full_screen=True,
-                      input=input, output=output)
+                      input=input, output=output))
     try:
         return app.run()
     except EOFError:

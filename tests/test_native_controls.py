@@ -172,8 +172,9 @@ class OptionMenuTests(unittest.TestCase):
         result, _ = menu(ENTER, [(1, '自动学习', ''), (0, '返回', '')], default=0)
         self.assertEqual(result.value, 0)
 
-    def test_typed_shortcut_jumps_then_enter_confirms(self):
-        result, _ = menu('3' + ENTER, [(1, 'A', ''), (2, 'B', ''), (3, 'C', '')])
+    def test_typed_shortcut_selects_its_row_at_once(self):
+        result, _ = menu('3', [(1, 'A', ''), (2, 'B', ''), (3, 'C', '')])
+        self.assertEqual(result.kind, 'select')
         self.assertEqual(result.value, 3)
 
     def test_escape_back_and_q_quit(self):
@@ -472,8 +473,8 @@ class StringOptionKeyTests(unittest.TestCase):
 
     CHOICES = [('r', '重试登录 / 读取课程', ''), ('s', '本机设置', ''), ('t', '切换平台', '')]
 
-    def test_string_choice_keys_move_the_highlight_and_enter_confirms(self):
-        for keys, expected in (('s' + ENTER, 's'), ('t' + ENTER, 't'), (DOWN + ENTER, 's')):
+    def test_string_choice_keys_select_at_once_and_enter_confirms_the_highlight(self):
+        for keys, expected in (('s', 's'), ('t', 't'), (DOWN + ENTER, 's')):
             with self.subTest(keys=keys):
                 result, _ = menu(keys, self.CHOICES)
                 self.assertEqual(result.kind, 'select')
@@ -488,8 +489,8 @@ class StringOptionKeyTests(unittest.TestCase):
         result, _ = menu('b' + ENTER, choices)
         self.assertEqual(result.kind, 'select')
         self.assertEqual(result.value, 'q')
-        # A digit key stays a real shortcut: it moves the highlight to its row.
-        result, _ = menu('1' + ENTER, choices)
+        # A digit key stays a real shortcut: it selects its row.
+        result, _ = menu('1', choices)
         self.assertEqual(result.value, '1')
 
     def test_letters_stay_literal_inside_the_search_field(self):
@@ -503,8 +504,8 @@ class ConnectionProblemRouteTests(unittest.TestCase):
     """The real TerminalUI route keeps the r/s/t contract on a TTY."""
 
     def test_typed_letter_returns_that_specific_option(self):
-        # s+Enter / t+Enter pick that row instead of falling back to the first.
-        for keys, expected in (('s' + ENTER, 's'), ('t' + ENTER, 't'), (ENTER, 'r')):
+        # s / t pick that row instead of falling back to the first.
+        for keys, expected in (('s', 's'), ('t', 't'), (ENTER, 'r')):
             with self.subTest(keys=keys):
                 value, _ = route(keys, call=lambda view: view.connection_problem('登录已过期'))
                 self.assertEqual(value, expected)

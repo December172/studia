@@ -63,7 +63,9 @@ def read_terminal_line(prompt, *, secret=False, input=None, output=None, above_p
         fragments.append(('class:input-prompt', prompt))
         return fragments
 
-    return session.prompt(message, refresh_interval=1 / 30 if above_prompt else None)
+    from terminal_widgets import snappy
+    snappy(session.app)
+    return session.prompt(message, refresh_interval=1 / theme.NAME_ANIMATION_FPS if above_prompt else None)
 
 
 def safe_text(value):
@@ -282,7 +284,9 @@ class TerminalUI:
                                      refresh_per_second=theme.REFRESH_PER_SECOND, vertical_overflow='crop',
                                      auto_refresh=self.console.is_terminal, redirect_stdout=False, redirect_stderr=False)
                     stack.callback(self.live.stop)
-                    self.live.start()
+                    # Paint the spinner now; the first auto-refresh tick would
+                    # otherwise leave the just-cleared page blank for 1/8 s.
+                    self.live.start(refresh=True)
                 yield
         finally:
             self.depth -= 1
@@ -637,7 +641,7 @@ class TerminalUI:
             result = action_page(
                 "课程任务", lambda: ["当前课程 · 暂无作业、考试或测验",
                                      "可在平台或稍后刷新查看。"],
-                {"b": "返回课程"}, default="b",
+                {"back": "返回课程"}, default="back",
                 help_text="Enter 返回 · q 退出",
                 heading=self.heading, status="没有可执行的任务。",
                 account_name=self.account_name, output=self.terminal_output())
@@ -657,11 +661,11 @@ class TerminalUI:
             lines = lambda: [f"共 {len(names)} 门课程"] + ([activity_note] if activities else []) + names
             while True:
                 result = action_page(
-                    "自动学习", lines, {"start": "开始学习", "b": "返回"}, default="start",
+                    "自动学习", lines, {"start": "开始学习", "back": "返回"}, default="start",
                     help_text="Enter 开始 · Esc 返回 · q 退出",
                     heading=self.heading, account_name=self.account_name,
                     output=self.terminal_output())
-                if result.kind == "back" or result.action == "b":
+                if result.kind == "back" or result.action == "back":
                     raise Back()
                 if result.kind == "quit":
                     raise Cancelled()
@@ -719,11 +723,17 @@ class TerminalUI:
 
     def confirm_submit(self, paper, completed, total):
         """Whole-paper confirmation: True submits, False declines, None cancels the run."""
+        # Three named outcomes instead of a yes/no whose Esc silently meant "stop all".
         try:
             with self.prompt_region():
-                return self.confirm("%s %s/%s 题已完成，交卷提交整份试卷？" % (paper, completed, total), default=False)
+                choice = self.choice("%s %s/%s 题已完成，交卷提交整份试卷？" % (paper, completed, total),
+                                     [("y", "交卷", "提交整份试卷"),
+                                      ("n", "不交卷", "保留本地答案，继续下一份"),
+                                      ("p", "暂停全部", "保存进度，其余试卷不执行，可稍后继续")],
+                                     default="n", help_text="y 交卷 · n 不交卷 · p 或 Esc 暂停全部 · q 退出")
         except (Back, Cancelled, EOFError, KeyboardInterrupt):
             return None
+        return {"y": True, "n": False}.get(choice)
 
     @staticmethod
     def course_details(course):
@@ -1017,13 +1027,13 @@ class TerminalUI:
 
             while True:
                 result = action_page(
-                    f"导出 {len(selected)} 份题目", lines, {"start": "开始导出", "s": "修改设置", "b": "返回"},
+                    f"导出 {len(selected)} 份题目", lines, {"start": "开始导出", "s": "修改设置", "back": "返回"},
                     default="start", help_text="Enter 开始 · s 修改设置 · Esc 返回 · q 退出",
                     heading=self.heading, account_name=self.account_name,
                     output=self.terminal_output())
                 if result.kind == "quit":
                     raise Cancelled()
-                if result.kind == "back" or result.action == "b":
+                if result.kind == "back" or result.action == "back":
                     raise Back()
                 if result.action == "start":
                     return options
@@ -1097,7 +1107,7 @@ class TerminalUI:
                 actions["m"] = "模型配置"
             if check_connection:
                 actions["t"] = "测试连接"
-            actions["b"] = "返回"
+            actions["back"] = "返回"
             while True:
                 result = action_page(
                     f"AI 答题 · {len(selected)} 份任务", lines, actions, default="start",
@@ -1107,7 +1117,7 @@ class TerminalUI:
                     output=self.terminal_output())
                 if result.kind == "quit":
                     raise Cancelled()
-                if result.kind == "back" or result.action == "b":
+                if result.kind == "back" or result.action == "back":
                     raise Back()
                 if result.action == "s":
                     self.edit_answer_options(options)

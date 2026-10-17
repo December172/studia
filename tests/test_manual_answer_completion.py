@@ -3,6 +3,8 @@ import io
 import json
 import tempfile
 import unittest
+
+import theme
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -485,7 +487,7 @@ class ConfirmCancelTests(unittest.TestCase):
             if isinstance(value, BaseException):
                 raise value
             return value
-        view = TerminalUI(console=Console(file=io.StringIO(), width=100, highlight=False), input_fn=feed)
+        view = TerminalUI(console=Console(file=io.StringIO(), width=100, highlight=False, theme=theme.THEME), input_fn=feed)
         view.begin_operation()
         return view
 

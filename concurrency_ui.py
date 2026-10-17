@@ -16,7 +16,7 @@ from prompt_toolkit.styles import Style
 
 from base.concurrency import MAX_WORKERS, validate_workers
 import theme
-from terminal_widgets import STYLE_DICT, field, frame, responsive_actions
+from terminal_widgets import STYLE_DICT, field, frame, responsive_actions, snappy
 
 DEFAULT_COUNT = MAX_WORKERS
 MIN_COUNT = 1
@@ -148,9 +148,9 @@ def edit_concurrency(current=None, *, input=None, output=None, message=''):
         '并发设置', body, responsive_buttons,
         status=lambda: draft.hint or message or '保存后下次运行生效',
         help_text=help_text)
-    app = Application(layout=Layout(layout, focused_element=body),
+    app = snappy(Application(layout=Layout(layout, focused_element=body),
                       key_bindings=keys, style=STYLE, full_screen=True,
-                      input=input, output=output)
+                      input=input, output=output))
     try:
         return app.run()
     except EOFError:
