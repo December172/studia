@@ -48,7 +48,7 @@ class Logger:
         if not any(isinstance(h, logging.FileHandler) for h in self.logger.handlers):
             formatter = logging.Formatter(
                 '[%(asctime)s][%(thread)d][%(filename)s][line: %(lineno)d][%(levelname)s] :: %(message)s')
-            file_name = './mooc-work-answer-log_{t}.log'.format(t=datetime.datetime.now().strftime('%Y-%m-%d'))
+            file_name = './icve-ai-assistant-log_{t}.log'.format(t=datetime.datetime.now().strftime('%Y-%m-%d'))
             fh = logging.FileHandler(file_name, encoding='utf-8')
             fh.setLevel(logging.DEBUG)
             fh.setFormatter(formatter)

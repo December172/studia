@@ -24,20 +24,19 @@
 | `ai/` | AI 服务配置、题型处理、答题与交卷流程 |
 | `ZYKMoocMain/` | 资源库平台接口与学习管理 |
 | `base/` | 共用 API 客户端与工具 |
-| `NewMoocMain/` | 当前仍在使用的 OAuth 登录，以及兼容代码 |
+| `NewMoocMain/` | 浏览器 OAuth 登录与试卷 HTML 解析 |
 | `NewMoocMain/oauth_pages.py` | 浏览器登录回调的成功、等待、失败与 404 页面；纯内联资源，不接收令牌 |
-| `MoocMain/` | 共用日志模块，以及保留的旧平台代码 |
+| `MoocMain/` | 共用日志模块 |
 | `tools/` | 开发、排查用的辅助脚本 |
 | `tools/ui_demo.py` | 离线界面预览：编号输入静态样例、HTML 快照，或转交原生预览 |
 | `tools/native_demo.py` | 真实终端中的原生键盘控件预览，只用合成数据，不访问平台 / AI / 配置 |
 | `tests/` | 离线自动化测试 |
 | `assets/` | 应用图标 |
 | `docs/` | 当前使用指南、开发说明与接口说明 |
-| `docs/legacy/` | 上游旧教程及截图，仅供历史参考 |
 | `.github/` | 测试、打包、发布工作流与脚本 |
 | `StartWorkLite.spec` | Windows PyInstaller 打包配置，从仓库根目录调用 |
 
-`MoocMain/`、`NewMoocMain/` 仍被当前入口引用，不能仅凭名称删除。运行命令均从仓库根目录执行。
+`MoocMain/`、`NewMoocMain/` 只剩当前入口在用的模块，不能仅凭名称删除。运行命令均从仓库根目录执行。
 
 版本变更需同步 `pyproject.toml` 与 `uv.lock` 中项目自身的版本（当前 4.3.0）。`StartWork.py` 源码模式从前者读取版本，不检查打包发布更新；发布构建显示 CI 注入的标签。修改源码本身不会自动增加版本号，源码用户按 README 的 Git 更新步骤更新。
 

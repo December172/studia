@@ -88,13 +88,9 @@ AI 已内置项目提供的**默认供应商**，固定显示在模型列表顶�
 
 导出功能不调用 AI。“我的答案”来自当前账号的已有作答记录。具体操作、自动交卷条件及异常恢复方式见 [使用指南](docs/USAGE.md)。这些本地结果、日志和密钥文件已由 Git 忽略。
 
-## 来源与致谢
+## 来源
 
-基于 [11273/mooc-work-answer](https://github.com/11273/mooc-work-answer) 继续开发，由 **yijunjie07** 维护。感谢原作者及贡献者，以及 **tooplick** 的[题目导出贡献](https://github.com/11273/mooc-work-answer/pull/198)。
-
-本仓库重建过提交历史，保留原作者署名；旧教程见 [docs/legacy](docs/legacy/)。
-
-上游未发现明确的许可证，使用或再分发前请确认授权。
+部分早期代码源自 [11273/mooc-work-answer](https://github.com/11273/mooc-work-answer)（含 tooplick 的题目导出贡献）；上游未声明许可证，再分发前请确认授权。
 
 ## 友情链接
 - [LINUX DO](https://linux.do) - 真诚、友善、团结、专业，共建你我引以为荣之社区
