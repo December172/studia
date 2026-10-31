@@ -387,6 +387,15 @@ class CatalogSharedTest(unittest.TestCase):
         self.assertEqual((by_id["shw-3-13"]["frequency"], by_id["shw-3-13"]["answerCount"]),
                          (2, 0))
 
+    def test_exam_list_skips_papers_already_listed_as_homework(self):
+        client = self.make_client()
+        client.homework_rows = [{"id": 1, "examId": 11, "examName": "第一章单元测试",
+                                 "state": 4, "score": 8, "courseId": 3}]
+        client.exam_rows = [{"id": "1", "examId": "11", "examName": "第一章单元测试", "state": 4},
+                            {"id": 2, "examId": 22, "examName": "期末考试", "state": 4}]
+        ids = [item["id"] for _, item, _ in catalog(client, COURSE)]
+        self.assertEqual(ids, ["shw-1-11", "sex-2-22"])
+
     def test_homework_skips_bad_rows(self):
         client = self.make_client()
         client.homework_rows = [

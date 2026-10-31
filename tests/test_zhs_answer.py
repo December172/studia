@@ -491,3 +491,28 @@ class CatalogTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImageQuestionTest(unittest.TestCase):
+    def test_images_become_named_placeholders_only_when_allowed(self):
+        raw = raw_question(1, content='看图<img src="https://x.test/a/fig1.png?v=2">选择')
+        with self.assertRaises(ValueError):
+            prepare(raw)
+        prepared = prepare(raw, allow_images=True)
+        self.assertIn("[图片:fig1.png]", prepared["public"]["title"])
+        options = [{"id": 1, "content": '<img src="/p/one.png">'}, {"id": 2, "content": '<img src="/p/two.png">'}]
+        texts = [o["text"] for o in prepare(raw_question(2, options=options), allow_images=True)["public"]["options"]]
+        self.assertEqual(texts, ["[图片:one.png]", "[图片:two.png]"])
+
+    def test_audio_is_still_rejected(self):
+        with self.assertRaises(ValueError):
+            prepare(raw_question(1, content='<audio src="a.mp3"></audio>听'), allow_images=True)
+
+    def test_ai_homework_answers_image_questions_but_exam_does_not(self):
+        raw = raw_question(1, content='看图<img src="/fig.png">')
+        client = FakeClient({1: raw})
+        result = runner(client, FakeAI(["B"])).run_paper(COURSE, homework_item(), 1)
+        self.assertEqual(result["status"], "submitted", result)
+        client = FakeClient({1: raw})
+        result = runner(client, FakeAI(["B"])).run_paper(COURSE, exam_item(), 2)
+        self.assertEqual(result["status"], "error")

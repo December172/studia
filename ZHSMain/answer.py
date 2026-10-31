@@ -22,6 +22,7 @@ FILL_HOMEWORK = "#@#"
 FILL_EXAM = "/"
 OPTION_TYPES = {1, 2, 14}
 MEDIA = re.compile(r"<(img|audio|video|iframe)\b", re.I)
+IMAGE = re.compile(r"<img\b[^>]*?\bsrc\s*=\s*['\"]?([^'\" >]+)[^>]*>", re.I)
 
 
 def _kind(raw):
@@ -34,21 +35,25 @@ def _kind(raw):
         raise ValueError("暂不支持该题型") from None
 
 
-def _text(raw):
-    value = raw.get("content") or ""
-    if MEDIA.search(str(value)):
+def _text(raw, allow_images=False):
+    value = str(raw.get("content") or "")
+    if allow_images:
+        # The model cannot see the picture; a stable named placeholder keeps the
+        # question answerable and keeps memory keys distinct per image.
+        value = IMAGE.sub(lambda m: " [图片:%s] " % m.group(1).rsplit("/", 1)[-1].split("?")[0], value)
+    if MEDIA.search(value):
         raise ValueError("包含图片或音视频，需要人工处理")
     return clean_html_text(value)
 
 
-def prepare(raw):
+def prepare(raw, allow_images=False):
     """Turn a platform question into the public AI payload plus answer mappings."""
     if not isinstance(raw, dict):
         raise ValueError("题目数据格式异常")
     kind = _kind(raw)
     if kind not in OPTION_TYPES and kind != 3:
         raise ValueError("暂不支持该题型")
-    title = _text(raw)
+    title = _text(raw, allow_images)
     if not title:
         raise ValueError("题干为空")
     options = [option for option in (raw.get("optionVos") or []) if isinstance(option, dict)]
@@ -68,7 +73,7 @@ def prepare(raw):
         if option.get("id") in (None, ""):
             raise ValueError("选项缺少平台 ID")
         ids[label] = option.get("id")
-        texts.append({"label": label, "text": _text(option)})
+        texts.append({"label": label, "text": _text(option, allow_images)})
     public["type"] = "多选题" if kind == 2 else "单选题"
     public["options"] = texts
     return {"qid": raw.get("id"), "kind": kind, "public": public,
@@ -327,8 +332,11 @@ class ZHSAnswerRunner:
             return {"paper": name, "status": "submitted", "correct": correct,
                     "total": len(sheet), "message": "答对 %d/%d 题" % (correct, len(sheet))}
 
+        # Mastery keeps the best score and the platform reveals correct options after
+        # submission, so image questions are attempted here and learned for next time.
         return self._run(name, test_id, paper_id, sheet, fill_sep=FILL_HOMEWORK,
-                         save_one=save_one, submit=submit, after_submit=after_submit)
+                         save_one=save_one, submit=submit, after_submit=after_submit,
+                         allow_images=True)
 
     def _exam(self, z, cz, name):
         course_id = z.get("courseId", cz.get("courseId"))
@@ -486,7 +494,7 @@ class ZHSAnswerRunner:
 
     def _run(self, name, test_id, paper_id, sheet, *, fill_sep, save_one=None,
              item_of=None, flush=None, submit=None, after_submit=None,
-             heartbeat=True, fetch=None):
+             heartbeat=True, fetch=None, allow_images=False):
         if not isinstance(sheet, list):
             return self._result(name, "error", "答题卡格式异常")
         total = len(sheet)
@@ -513,7 +521,7 @@ class ZHSAnswerRunner:
                         raw = self.client.exam_question(
                             test_id, paper_id, entry["questionId"], entry["version"])
                         fetched = True
-                    prepared = prepare_shared(raw) if fetch is not None else prepare(raw)
+                    prepared = prepare_shared(raw) if fetch is not None else prepare(raw, allow_images)
                 except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
                     raise
                 except Exception as exc:
@@ -899,7 +907,7 @@ def catalog_ai(client, course):
                 continue
             score = info.get("highMasteryScore")
             try:
-                done = float(score) >= 100
+                done = float(score) > 0
             except (TypeError, ValueError):
                 done = False
             entries.append({
@@ -1029,10 +1037,11 @@ def _shared_homework_items(client, recruit_id, course_id):
     return items
 
 
-def _shared_exam_items(client, recruit_id, course_id):
+def _shared_exam_items(client, recruit_id, course_id, seen=()):
     rows = client.shared_exam_list(recruit_id, course_id, 1)
     rows += client.shared_exam_list(recruit_id, course_id, 0)
-    items, seen = [], set()
+    # flag=0 also returns the chapter tests already listed as homework (same ids).
+    items, seen = [], set(seen)
     for row in rows or []:
         if not isinstance(row, dict):
             continue
@@ -1098,7 +1107,8 @@ def catalog_shared(client, course):
         logger.warning("读取共享课作业目录失败：%s", exc)
 
     try:
-        entries.extend(_shared_exam_items(client, recruit_id, course_id))
+        listed = {(str(e["zhs"]["stuExamId"]), str(e["zhs"]["examId"])) for e in entries}
+        entries.extend(_shared_exam_items(client, recruit_id, course_id, listed))
     except (CaptchaRequired, AuthenticationExpired):
         raise
     except Exception as exc:
