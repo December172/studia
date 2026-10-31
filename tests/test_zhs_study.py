@@ -234,6 +234,41 @@ class SharedStudyTest(unittest.TestCase):
         self.assertEqual(saved[0]["payload"]["courseId"], 9)
 
 
+class SharedReviewTest(unittest.TestCase):
+    def test_review_rewatches_finished_videos_from_start_until_budget(self):
+        client = FakeClient()
+        client.videos = two_video_course()
+        client.lesson = {"100": {"watchState": 1, "studyTotalTime": 30}}
+        client.lv = {"11": {"watchState": 1, "studyTotalTime": 12}}
+        client.question_points = [{"timeSec": 5}]
+        events = []
+        ZHSHandler(client=client, course_rows=[shared_row(), ai_row()],
+                   on_progress=events.append, sleep=lambda seconds: None,
+                   rng=FixedRng(), review_minutes=1)
+
+        fields = [decode_ev(call["payload"]["sdsew"]).split(";")
+                  for call in client.args_of("shared_save_progress")]
+        self.assertEqual(sum(int(f[6]) for f in fields), 60)
+        for f in fields:
+            start, length = (30, "0:00:30") if f[2] == "0" else (12, "0:00:10")
+            self.assertGreaterEqual(int(f[7]), start)
+            self.assertLessEqual(f[8], length)
+        self.assertIn("0:00:00", [f[8] for f in fields])
+        self.assertNotIn("shared_popup_question", client.names())
+        self.assertNotIn("ai_resources", client.names())
+        results = [(event.name, event.status) for event in events if event.kind == "result"]
+        self.assertEqual(results, [("共享课", "success"), ("智慧课", "skipped")])
+
+    def test_review_without_finished_videos_is_skipped(self):
+        client = FakeClient()
+        client.videos = two_video_course()
+        client.lesson = {"100": {"watchState": 0, "studyTotalTime": 0}}
+        client.lv = {"11": {"watchState": 0, "studyTotalTime": 0}}
+        ZHSHandler(client=client, course_rows=[shared_row()], sleep=lambda seconds: None,
+                   rng=FixedRng(), review_minutes=1)
+        self.assertEqual(client.args_of("shared_save_progress"), [])
+
+
 class StudyLogTest(unittest.TestCase):
     def test_shared_play_logs(self):
         client = FakeClient()

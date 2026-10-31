@@ -239,7 +239,7 @@ class Application:
             self.view.note(str(exc), "error")
         return self.ai_status_text(config)
 
-    def study(self, version, client=None, selected=None):
+    def study(self, version, client=None, selected=None, review_minutes=0):
         api_class, handler = {1: (ZYKMoocApi, ZYKMoocHandler),
                               2: (ZHSApi, ZHSHandler)}.get(version, (AIMoocApi, AIMoocHandler))
         if client is None:
@@ -258,7 +258,9 @@ class Application:
             inject['activity_ai'] = activity_ai
         try:
             self.view.plan("学习管理", selected)
-            if version == 2:
+            if version == 2 and review_minutes:
+                note = "智慧树每日复习：共享课 1 倍速重看已学视频 %d 分钟。" % review_minutes
+            elif version == 2:
                 note = ("智慧树学习：逐个视频实时播放（约 1.5 倍速），同一账号不能同时观看多个视频；"
                         "遇到验证码或当日学习时长上限会停止。")
             else:
@@ -267,6 +269,8 @@ class Application:
                 note += "；并按主题自动参与课程讨论、提交五星课程评价，无需逐条确认"
             self.view.note(note)
             with self.view.activity("处理课程"):
+                if review_minutes:
+                    inject['review_minutes'] = review_minutes
                 handler(client=client, course_rows=selected, on_progress=self.view.on_progress,
                         max_workers=max_workers, **inject)
         finally:

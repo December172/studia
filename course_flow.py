@@ -5,6 +5,8 @@ from AIMoocMain.export_questions import QuizExportHandler, paper_exam_id
 from ai.runner import report_path
 from ui import Back, Cancelled
 
+REVIEW_MINUTES = 30
+
 
 def task_identity(task):
     course, item, category = task
@@ -85,6 +87,13 @@ class CourseWorkspace:
                         notice=("逐个视频实时播放，耗时约为视频时长的三分之二；"
                                 "平台限制同一账号同时只能看一个视频。") if self.platform == 2 else "")
                     result = self.execute(lambda: self.app.study(self.platform, self.client, courses))
+                elif mode == 3 and self.platform == 2:
+                    self.view.review_study(
+                        courses, title="每日复习",
+                        notice=("共享课从已看完的视频里按日期轮换，1 倍速实时重看 %d 分钟；"
+                                "智慧课程会跳过。每天运行一次。" % REVIEW_MINUTES))
+                    result = self.execute(lambda: self.app.study(
+                        self.platform, self.client, courses, review_minutes=REVIEW_MINUTES))
                 else:
                     result = self.tasks(courses, mode, task_state.setdefault(mode, {}))
                 if result == 2:

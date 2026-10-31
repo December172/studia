@@ -622,7 +622,8 @@ class TerminalUI:
         if platform == 0:
             choices += [(2, "AI 答题", "AI 作答并自动交卷"), (3, "导出题目", "保存题目和已有答案")]
         elif platform == 2:
-            choices += [(2, "AI 答题", "AI 作答，可选自动交卷")]
+            choices += [(2, "AI 答题", "AI 作答，可选自动交卷"),
+                        (3, "每日复习", "共享课重看已学视频 30 分钟，攒学习习惯")]
         return self.choice(title, choices, help_text="Esc 返回课程列表 · q 退出")
 
     def choose_platform(self, current):
@@ -654,7 +655,7 @@ class TerminalUI:
         self.table("课程任务", ["任务", "状态"], [("当前课程", "暂无作业、考试或测验")])
         self.ask("回车返回课程，q 退出")
 
-    def review_study(self, courses, max_workers=8, *, activities=False, notice=""):
+    def review_study(self, courses, max_workers=8, *, activities=False, notice="", title="自动学习"):
         # MOOC learning also posts AI discussions and a 5-star evaluation; the
         # resource library keeps its original summary and promises nothing extra.
         activity_note = "讨论由AI生成，最多20字；课程评价五星，评语由AI生成" if activities else ""
@@ -665,7 +666,7 @@ class TerminalUI:
                              + ([activity_note] if activities else []) + names)
             while True:
                 result = action_page(
-                    "自动学习", lines, {"start": "开始学习", "back": "返回"}, default="start",
+                    title, lines, {"start": "开始学习", "back": "返回"}, default="start",
                     help_text="Enter 开始 · Esc 返回 · q 退出",
                     heading=self.heading, account_name=self.account_name,
                     output=self.terminal_output())
@@ -674,7 +675,7 @@ class TerminalUI:
                 if result.kind == "quit":
                     raise Cancelled()
                 return None
-        self.table("自动学习", ["课程", "操作"], [(c.get("courseName", "未知课程"), "完成课程学习任务") for c in courses],
+        self.table(title, ["课程", "操作"], [(c.get("courseName", "未知课程"), "完成课程学习任务") for c in courses],
                    "回车开始 · Esc 返回 · q 退出")
         if notice:
             self.note(notice)

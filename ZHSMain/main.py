@@ -3,7 +3,7 @@ import base64
 import random
 import threading
 import time
-from datetime import timedelta
+from datetime import date, timedelta
 
 from base.auth import AuthenticationExpired, PlatformUnavailable
 from MoocMain.log import Logger
@@ -33,8 +33,9 @@ def _nonneg_int(value):
 
 class ZHSHandler:
     def __init__(self, *, client, course_rows, on_progress=None, max_workers=1,
-                 cancel_event=None, sleep=time.sleep, rng=None):
+                 cancel_event=None, sleep=time.sleep, rng=None, review_minutes=0):
         self.client = client
+        self.review_seconds = int(review_minutes) * 60
         self.course_rows = course_rows or []
         self.progress = Reporter(on_progress)
         # 仅为与其他平台签名一致：智慧树同一账号同时看多个视频会被判定为多窗口，
@@ -59,7 +60,9 @@ class ZHSHandler:
             self.progress.detail(name)
             try:
                 kind = (row.get("zhs") or {}).get("kind")
-                if kind == "shared":
+                if self.review_seconds:
+                    status = self.review_shared(row) if kind == "shared" else "skipped"
+                elif kind == "shared":
                     status = self.study_shared(row)
                 elif kind == "ai":
                     status = self.study_ai(row)
@@ -80,38 +83,13 @@ class ZHSHandler:
     # ---------------------------------------------------------------- 共享课
 
     def study_shared(self, row):
-        course = row.get("courseName") or "未知课程"
-        z = row["zhs"]
-        secret = z["secret"]
-        self.client.shared_gologin(secret)
-        info = self.client.shared_course(secret) or {}
-        recruit_id = info["recruitId"]
-        report_course_id = (info.get("courseInfo") or {}).get("courseId")
-        data = self.client.shared_videos(secret) or {}
-        cc_course_id = data["courseId"]
-        videos = self._shared_videos(data)
-        if not videos:
-            self.log.warning("%s：没有可学习的视频", course)
+        prepared = self._shared_context(row)
+        if prepared is None:
             return "skipped"
-
-        lesson_ids = [video["lessonId"] for video in videos]
-        video_ids = [video["id"] for video in videos if video["id"]]
-        states = self.client.shared_study_info(lesson_ids, video_ids, recruit_id) or {}
-        self.client.shared_last_video(recruit_id)
-
-        for video in videos:
-            watch, played = self._shared_state(states, video)
-            video["watchState"] = watch
-            video["studyTotalTime"] = played
+        ctx, videos, lesson_ids, video_ids = prepared
+        course, recruit_id = ctx["course"], ctx["recruit_id"]
         done = sum(1 for video in videos if video["watchState"] == 1)
         self.log.info("%s：共 %d 个视频（已完成 %d）", course, len(videos), done)
-
-        ctx = {
-            "course": course,
-            "recruit_id": recruit_id,
-            "cc_course_id": cc_course_id,
-            "report_course_id": report_course_id,
-        }
         total = len(videos)
         success = skipped = failed = 0
         self.progress.resources(f"{course} · 读取资源 · 成功 0 · 跳过 0 · 失败 0", 0, total)
@@ -140,6 +118,78 @@ class ZHSHandler:
         ready = sum(1 for video in videos if self._shared_state(states, video)[0] == 1)
         self.log.info("%s：服务端确认 %d/%d 个视频已完成", course, ready, total)
         return "success" if ready == total and not failed else "error"
+
+    def review_shared(self, row):
+        """Rewatch finished videos in real time until the daily review budget is spent."""
+        prepared = self._shared_context(row)
+        if prepared is None:
+            return "skipped"
+        ctx, videos, _, _ = prepared
+        course = ctx["course"]
+        watched = [video for video in videos if video["watchState"] == 1]
+        if not watched:
+            self.log.warning("%s：还没有看完的视频，请先自动学习", course)
+            return "skipped"
+        # Rotate by date so each day starts on a different lesson.
+        start = date.today().toordinal() % len(watched)
+        order = watched[start:] + watched[:start]
+        budget = self.review_seconds
+        reviewed = 0
+        self.log.info("%s：每日复习 %d 分钟", course, budget // 60)
+        index = 0
+        pass_start = 0
+        while reviewed < budget:
+            if self.cancel_event.is_set():
+                raise KeyboardInterrupt
+            if index and index % len(order) == 0:
+                if reviewed == pass_start:
+                    break
+                pass_start = reviewed
+            video = order[index % len(order)]
+            index += 1
+            try:
+                reviewed += self.play_shared(ctx, video, review=budget - reviewed)
+            except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
+                raise
+            except Exception as error:
+                self.log.error("%s · %s：复习失败：%s", course, video["name"], error)
+            self.progress.resources(
+                f"{course} · 每日复习 · {reviewed // 60}/{budget // 60} 分钟",
+                min(reviewed, budget), budget)
+        self.log.info("%s：今日复习 %d 分钟", course, reviewed // 60)
+        return "success" if reviewed >= budget else "error"
+
+    def _shared_context(self, row):
+        course = row.get("courseName") or "未知课程"
+        z = row["zhs"]
+        secret = z["secret"]
+        self.client.shared_gologin(secret)
+        info = self.client.shared_course(secret) or {}
+        recruit_id = info["recruitId"]
+        report_course_id = (info.get("courseInfo") or {}).get("courseId")
+        data = self.client.shared_videos(secret) or {}
+        cc_course_id = data["courseId"]
+        videos = self._shared_videos(data)
+        if not videos:
+            self.log.warning("%s：没有可学习的视频", course)
+            return None
+
+        lesson_ids = [video["lessonId"] for video in videos]
+        video_ids = [video["id"] for video in videos if video["id"]]
+        states = self.client.shared_study_info(lesson_ids, video_ids, recruit_id) or {}
+        self.client.shared_last_video(recruit_id)
+
+        for video in videos:
+            watch, played = self._shared_state(states, video)
+            video["watchState"] = watch
+            video["studyTotalTime"] = played
+        ctx = {
+            "course": course,
+            "recruit_id": recruit_id,
+            "cc_course_id": cc_course_id,
+            "report_course_id": report_course_id,
+        }
+        return ctx, videos, lesson_ids, video_ids
 
     @staticmethod
     def _shared_videos(data):
@@ -179,7 +229,9 @@ class ZHSHandler:
             watch = None
         return watch, _nonneg_int(item.get("studyTotalTime"))
 
-    def play_shared(self, ctx, video):
+    def play_shared(self, ctx, video, review=0):
+        """Play one video; with review > 0, rewatch it from 0:00 at 1x for at most that
+        many seconds and return the seconds added to its study time."""
         course = ctx["course"]
         recruit_id = ctx["recruit_id"]
         cc_course_id = ctx["cc_course_id"]
@@ -210,7 +262,10 @@ class ZHSHandler:
             "last_submit": 0,
         }
         state["last_submit"] = state["played"]
-        wp = WatchPoints(int(state["played"]))
+        start = state["played"]
+        # The playhead equals the study time on a first watch; a review restarts it.
+        state["head"] = 0 if review else state["played"]
+        wp = WatchPoints(int(state["head"]))
 
         data = self.client.shared_question_points({
             "lessonId": lesson_id,
@@ -218,7 +273,7 @@ class ZHSHandler:
             "recruitId": recruit_id,
             "courseId": cc_course_id,
         }) or {}
-        points = [
+        points = [] if review else [
             point for point in (data.get("questionPoint") or [])
             if _to_int(point.get("timeSec")) > state["played"]
         ]
@@ -227,11 +282,11 @@ class ZHSHandler:
             end = max(end, _to_int(points[-1].get("timeSec")))
 
         def build_payload(played, last_submit, token_value):
-            wp.add(played)
+            wp.add(state["head"])
             ev = encode_ev([
                 recruit_id, lesson_id, video_id, play_id, video["chapterId"],
                 "0", int(played - last_submit), int(played),
-                str(timedelta(seconds=min(video_sec, int(played)))),
+                str(timedelta(seconds=min(video_sec, int(state["head"])))),
                 (self.client.uuid or "") + "zhs",
             ])
             return {"ewssw": wp.text(), "sdsew": ev, "zwsds": token_value}
@@ -264,6 +319,8 @@ class ZHSHandler:
                     state["token"] = token
                     if server_time > state["played"]:
                         state["played"] = server_time
+                        if not review:
+                            state["head"] = server_time
                         sent_payload = build_payload(
                             state["played"], state["last_submit"], token
                         )
@@ -285,21 +342,25 @@ class ZHSHandler:
                     self.log.warning("%s · %s：进度上报失败：%s", course, video["name"], retry)
                     return False
             state["last_submit"] = state["played"]
-            wp.reset(int(state["played"]))
+            wp.reset(int(state["head"]))
             return True
 
         # 预检：delta=0 的上报会提前暴露验证码和时长上限。
         report()
-        if state["played"] >= end:
-            return
+        if not review and state["played"] >= end:
+            return 0
 
         threading.Thread(
             target=self.client.open_video, kwargs={"video_id": play_id}, daemon=True
         ).start()
         self.client.shared_courseware(play_id)
-        self.log.info("%s · 开始播放：%s（%s）", course, video["name"], self._mmss(end))
+        self.log.info("%s · %s：%s（%s）", course, "开始复习" if review else "开始播放",
+                      video["name"], self._mmss(end))
 
-        speed = 1.5 + self.rng.uniform(-0.15, 0.15)
+        def pace():
+            return 1.0 if review else 1.5 + self.rng.uniform(-0.15, 0.15)
+
+        speed = pace()
         interval = 30 + self.rng.randint(-5, 5)
         elapsed = 0
         paused_until = 0
@@ -313,34 +374,43 @@ class ZHSHandler:
             if elapsed % 5 == 0:
                 self.progress.detail(
                     f"{course} · {video['name']} · "
-                    f"{self._mmss(state['played'])}/{self._mmss(end)}"
+                    f"{self._mmss(state['head'])}/{self._mmss(end)}"
                 )
             if elapsed <= paused_until:
                 continue
             if self.rng.random() < 0.0025:
                 paused_until = elapsed + 60
                 continue
-            state["played"] = min(state["played"] + speed, end)
+            if review:
+                if state["head"] < end and state["played"] - start < review:
+                    state["played"] += speed
+                    state["head"] = min(state["head"] + speed, end)
+                finished = state["head"] >= end or state["played"] - start >= review
+            else:
+                state["played"] = min(state["played"] + speed, end)
+                state["head"] = state["played"]
+                finished = state["played"] >= end
             if elapsed % 2 == 0:
-                wp.add(state["played"])
+                wp.add(state["head"])
             while points and state["played"] >= _to_int(points[0].get("timeSec")):
                 self._answer_popup(ctx, video, points.pop(0))
                 paused_until = elapsed + 2
                 force = True
-            if elapsed % interval == 0 or state["played"] >= end or force:
+            if elapsed % interval == 0 or finished or force:
                 if report():
                     failures = 0
                     force = False
-                    speed = 1.5 + self.rng.uniform(-0.15, 0.15)
+                    speed = pace()
                     interval = 30 + self.rng.randint(-5, 5)
                 else:
                     failures += 1
                     if failures >= 5:
                         raise ZHSError("连续 5 次进度上报失败，停止学习")
-            if state["played"] >= end and state["last_submit"] >= end and not force:
+            if finished and state["last_submit"] >= state["played"] and not force:
                 break
-        self.log.info("%s · 播放完成：%s", course, video["name"])
+        self.log.info("%s · %s：%s", course, "复习结束" if review else "播放完成", video["name"])
         self.sleep(1 + self.rng.random())
+        return int(state["played"] - start)
 
     def _answer_popup(self, ctx, video, point):
         try:
