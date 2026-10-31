@@ -1,4 +1,4 @@
-# ICVE AI Assistant · 智慧职教 AI 助手
+# Studia · 课程学习与 AI 答题助手
 
 智慧职教和智慧树的终端工具：自动学习课程、AI 答题并交卷、导出题目与答案。
 
@@ -24,8 +24,8 @@
 先安装 [Git](https://git-scm.com/downloads) 和 [uv](https://docs.astral.sh/uv/getting-started/installation/)，重新打开终端（Windows 用 PowerShell），然后执行：
 
 ```bash
-git clone https://github.com/yijunjie07/icve-ai-assistant.git
-cd icve-ai-assistant
+git clone https://github.com/yijunjie07/studia.git
+cd studia
 uv sync --locked --python 3.12
 uv run StartWork.py
 ```

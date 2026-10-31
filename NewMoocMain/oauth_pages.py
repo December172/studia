@@ -35,7 +35,7 @@ _PAGE = Template('''<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>${title} · ICVE AI Assistant</title>
+  <title>${title} · Studia</title>
   <script>
     // The callback query belongs to the local handler, never to the rendered UI.
     try { history.replaceState(null, '', location.pathname); } catch (_) {}
@@ -79,7 +79,7 @@ _PAGE = Template('''<!doctype html>
 </head>
 <body>
   <main>
-    <p class="brand">ICVE AI Assistant · 智慧职教助手</p>
+    <p class="brand">Studia · 课程学习与 AI 答题助手</p>
     <section class="card" aria-labelledby="heading">
       <div class="icon" aria-hidden="true"><svg viewBox="0 0 32 32">${icon}</svg></div>
       <h1 id="heading">${title}</h1>

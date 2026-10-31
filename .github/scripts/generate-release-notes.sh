@@ -5,7 +5,7 @@ set -euo pipefail
 TAG_NAME="${1:?用法: generate-release-notes.sh <tag> [输出文件] [上一版本tag]}"
 OUTPUT_PATH="${2:-changelog.txt}"
 PREV_TAG="${3:-}"
-REPOSITORY="${GITHUB_REPOSITORY:-yijunjie07/icve-ai-assistant}"
+REPOSITORY="${GITHUB_REPOSITORY:-yijunjie07/studia}"
 
 if [[ -z "${PREV_TAG}" ]]; then
   PREV_TAG="$(git describe --tags --abbrev=0 "${TAG_NAME}^" 2>/dev/null || true)"

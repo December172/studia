@@ -150,7 +150,7 @@ class TerminalUI:
         self.handler = None
         self.pending_error = ""
         self.cancelled = False
-        self.heading = "ICVE AI Assistant"
+        self.heading = "Studia"
         self.account_name = ""
         self.name_animation = NameAnimation()
         self._prompt_rows = []
@@ -312,9 +312,9 @@ class TerminalUI:
                     pass
 
     def header(self, version):
-        self.heading = f"ICVE AI Assistant · {version}"
-        self.console.print(Panel(Text.assemble(("ICVE AI Assistant", "title"),
-                                              (f"  {version}\n智慧职教 AI 助手", "muted")),
+        self.heading = f"Studia · {version}"
+        self.console.print(Panel(Text.assemble(("Studia", "title"),
+                                              (f"  {version}\n课程学习与 AI 答题助手", "muted")),
                                  box=theme.BOX, border_style="border"))
         self.note("Esc 返回 · q 退出")
 

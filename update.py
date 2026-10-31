@@ -7,7 +7,7 @@ from MoocMain.log import Logger
 logger = Logger(__name__).get_log()
 
 # 配置
-REPO = "yijunjie07/icve-ai-assistant"
+REPO = "yijunjie07/studia"
 
 
 def version_greater_than(v1, v2):
