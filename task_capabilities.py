@@ -46,6 +46,9 @@ def task_availability(item, category, *, now=None):
     """
     if is_attachment_task(item, category):
         return TaskAvailability(False, "暂不支持", "附件作业暂不支持，请在平台完成。")
+    unavailable = item.get("_unavailable")
+    if unavailable:
+        return TaskAvailability(False, unavailable[0], unavailable[1])
     server_label = {"-1": "未开始", "-2": "已截止"}.get(str(item.get("status")))
     if server_label:
         return TaskAvailability(False, server_label,

@@ -9,6 +9,11 @@ from AIMoocMain.exam_api import ExamAPI, ExamError, ExamServiceError, TaskUnavai
 from AIMoocMain.export_questions import QuizExportHandler, collect_quiz_catalog, paper_display_name, paper_exam_id
 from ZYKMoocMain.api import ZYKMoocApi
 from ZYKMoocMain.main import ZYKMoocHandler
+from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi
+from ZHSMain.main import ZHSHandler
+import ZHSMain.answer
+from ZHSMain.answer import ZHSAnswerRunner
+from ZHSMain.login import qr_login
 from NewMoocMain.oauth_login import oauth_login
 from ai.client import AIClient, AIError
 from ai.runner import AnswerRunner
@@ -55,9 +60,28 @@ class Application:
                 from ui import Cancelled
                 raise Cancelled()
 
+    def zhs_login(self):
+        from ui import Cancelled
+        while True:
+            self.view.note("请用智慧树 App 扫描浏览器中打开的二维码。")
+            client = None
+            try:
+                with self.view.activity("等待智慧树扫码"):
+                    client = ZHSApi()
+                    if qr_login(client, on_status=lambda message: self.view.note(message)):
+                        return "", "", client.access_token
+                self.view.note("扫码未完成或已超时。", "warning")
+            except Exception as exc:
+                logger.exception("智慧树扫码登录异常")
+                self.view.note(f"登录失败：{exc}", "error")
+            if client is not None:
+                client.close()
+            if not self.view.confirm("重试扫码登录", default=True):
+                raise Cancelled()
+
     def client_and_courses(self, api_class, login=None, *, choose=True):
         self.view.set_user()
-        platform = "zyk" if api_class is ZYKMoocApi else "mooc"
+        platform = {ZYKMoocApi: "zyk", ZHSApi: "zhs"}.get(api_class, "mooc")
         saved = self.store.session(platform) if login is None else None
         if saved:
             try:
@@ -70,6 +94,8 @@ class Application:
             except AuthenticationExpired:
                 self.store.clear_session(platform)
                 self.view.note("保存的登录已过期，请重新登录；成功后自动保存。", "warning")
+        if login is None and platform == "zhs":
+            login = self.zhs_login
         username, password, token = (login or self.login)()
         with self.view.activity("读取课程列表"):
             client = api_class(token=token, username=username, password=password)
@@ -212,7 +238,8 @@ class Application:
         return self.ai_status_text(config)
 
     def study(self, version, client=None, selected=None):
-        api_class, handler = (ZYKMoocApi, ZYKMoocHandler) if version == 1 else (AIMoocApi, AIMoocHandler)
+        api_class, handler = {1: (ZYKMoocApi, ZYKMoocHandler),
+                              2: (ZHSApi, ZHSHandler)}.get(version, (AIMoocApi, AIMoocHandler))
         if client is None:
             client, selected = self.client_and_courses(api_class)
         if not selected:
@@ -221,7 +248,7 @@ class Application:
         max_workers = self.store.concurrency()['study']
         inject = {}
         activity_ai = None
-        if version != 1:
+        if version == 0:
             # Only MOOC learning posts AI discussions and a 5-star evaluation; a
             # failure to obtain a healthy AI client aborts instead of silently
             # reporting a successful study run.
@@ -229,7 +256,11 @@ class Application:
             inject['activity_ai'] = activity_ai
         try:
             self.view.plan("学习管理", selected)
-            note = f"自动学习：最多 {max_workers} 项同时处理，完成即更新进度"
+            if version == 2:
+                note = ("智慧树学习：逐个视频实时播放（约 1.5 倍速），同一账号不能同时观看多个视频；"
+                        "遇到验证码或当日学习时长上限会停止。")
+            else:
+                note = f"自动学习：最多 {max_workers} 项同时处理，完成即更新进度"
             if inject:
                 note += "；并按主题自动参与课程讨论、提交五星课程评价，无需逐条确认"
             self.view.note(note)
@@ -363,6 +394,47 @@ class Application:
                     break
         return results
 
+    def zhs_task_catalog(self, client, courses):
+        catalog = []
+        with self.view.activity("读取课程任务"):
+            for course in courses:
+                catalog.extend(ZHSMain.answer.catalog(client, course))
+        return catalog
+
+    def execute_zhs_ai(self, client, selected, config, auto_submit):
+        results = []
+        ai_client = None
+        with self.view.activity("AI 答题"):
+            self.progress.begin("AI 答题", len(selected), "份试卷")
+            try:
+                for course, item, category in selected:
+                    name = paper_display_name(item)
+                    if ai_client is None:
+                        ai_client = self.verify_ai(config)
+                        runner = ZHSAnswerRunner(client, ai_client, auto_submit=auto_submit,
+                                                 on_progress=self.view.on_progress)
+                    try:
+                        result = runner.run_paper(course, item, category)
+                        results.append(result)
+                    except (CaptchaRequired, StudyTimeLimit) as exc:
+                        results.append({"paper": name, "status": "error", "message": str(exc)})
+                        self.progress.result(name, "error")
+                        logger.warning("队列停止：%s；其余试卷未执行。", exc)
+                        break
+                    status = result["status"]
+                    if status == "ai_error":
+                        self.remember(lambda: self.store.save_ai_health(
+                            config, "error", result.get("message", "AI 服务失败")))
+                    self.progress.result(name, status)
+                    if status in ("ai_error", "submission_unknown"):
+                        logger.warning("队列停止：%s；其余试卷未执行。",
+                                       result.get("message") or "本次处理已停止")
+                        break
+            finally:
+                if ai_client is not None:
+                    ai_client.session.close()
+        return results
+
     def run(self):
         from course_flow import CourseWorkspace
         self.remember(self.store.ensure_default_model)
@@ -402,11 +474,12 @@ class Application:
             elif action == 2:
                 if self.manage_concurrency():
                     message = '并发设置已保存，下次运行生效。'
-            elif action in (3, 4):
-                platform = "mooc" if action == 3 else "zyk"
+            elif action in (3, 4, 5):
+                platform = {3: "mooc", 4: "zyk", 5: "zhs"}[action]
                 if self.remember(lambda: self.store.clear_session(platform)):
-                    self.browser_logout_pending = True
-                    label = "MOOC" if platform == "mooc" else "资源库"
+                    if platform != "zhs":
+                        self.browser_logout_pending = True
+                    label = {"mooc": "MOOC", "zyk": "资源库", "zhs": "智慧树"}[platform]
                     if platform == current_platform:
                         self.view.set_user()
                         self.view.note(f"已退出{label}登录，正在打开浏览器重新登录。", "success")

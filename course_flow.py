@@ -8,6 +8,10 @@ from ui import Back, Cancelled
 
 def task_identity(task):
     course, item, category = task
+    zhs = course.get("zhs")
+    if zhs is not None:
+        return (str(zhs.get("courseId")), str(zhs.get("classId", "")),
+                paper_exam_id(item), category)
     return (str(course.get("id") or course.get("courseInfoId") or ""),
             str(course.get("courseId") or ""), paper_exam_id(item), category)
 
@@ -25,14 +29,14 @@ class CourseWorkspace:
     def run(self):
         # Import here so the legacy entry points and dependency injection share
         # the same client factories.
-        from app import AIMoocApi, ZYKMoocApi
+        from app import AIMoocApi, ZYKMoocApi, ZHSApi
 
         self.view.workspace = True
         while True:
             try:
                 if self.client is None:
                     try:
-                        cls = ZYKMoocApi if self.platform == 1 else AIMoocApi
+                        cls = {1: ZYKMoocApi, 2: ZHSApi}.get(self.platform, AIMoocApi)
                         self.client, self.rows = self.app.client_and_courses(cls, choose=False)
                     except Cancelled:
                         raise
@@ -51,7 +55,7 @@ class CourseWorkspace:
 
     def root_action(self, action):
         if action == "s":
-            if self.app.manage_settings(current_platform="zyk" if self.platform == 1 else "mooc"):
+            if self.app.manage_settings(current_platform={1: "zyk", 2: "zhs"}.get(self.platform, "mooc")):
                 self.view.set_user()
                 self.client, self.rows = None, []
                 self.library_state.clear()
@@ -77,7 +81,9 @@ class CourseWorkspace:
                 if mode == 1:
                     self.view.review_study(
                         courses, max_workers=self.store.concurrency()['study'],
-                        activities=self.platform != 1)
+                        activities=self.platform == 0,
+                        notice=("逐个视频实时播放，耗时约为视频时长的三分之二；"
+                                "平台限制同一账号同时只能看一个视频。") if self.platform == 2 else "")
                     result = self.execute(lambda: self.app.study(self.platform, self.client, courses))
                 else:
                     result = self.tasks(courses, mode, task_state.setdefault(mode, {}))
@@ -93,9 +99,14 @@ class CourseWorkspace:
                 if self.view.operation_result() == 2:
                     return
 
+    def catalog_for(self, courses):
+        if self.platform == 2:
+            return self.app.zhs_task_catalog(self.client, courses)
+        return self.app.task_catalog(self.client, courses)
+
     def tasks(self, courses, mode, state):
         try:
-            catalog = self.app.task_catalog(self.client, courses)
+            catalog = self.catalog_for(courses)
         except Exception as exc:
             self.view.begin_operation()
             self.view.pending_error = str(exc)
@@ -117,7 +128,7 @@ class CourseWorkspace:
             if choice == "r":
                 selected = state.get("selected", selected)
                 try:
-                    catalog = self.app.task_catalog(self.client, courses)
+                    catalog = self.catalog_for(courses)
                 except Exception as exc:
                     self.view.begin_operation()
                     self.view.pending_error = str(exc)
@@ -150,6 +161,10 @@ class CourseWorkspace:
                         connection_status=self.app.ai_status_text)
                     config = answer_options["config"]
                     def answer():
+                        if self.platform == 2:
+                            # 智慧树没有本地报告文件，执行器已记录结果与错误。
+                            self.app.execute_zhs_ai(self.client, selected, config, auto_submit)
+                            return []
                         results = self.app.execute_ai(self.client, selected, config, auto_submit)
                         for report in results:
                             if report.get("status") in ("submitted", "preview"):
