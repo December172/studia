@@ -6,7 +6,8 @@ from AIMoocMain.export_questions import paper_exam_id
 from ai.client import AIError, AITransientServiceError
 from base.auth import PlatformUnavailable
 from course_flow import task_identity
-from ZHSMain.answer import ZHSAnswerRunner, catalog, encode, prepare
+from unittest.mock import Mock
+from ZHSMain.answer import ZHSAnswerRunner, catalog, download_images, encode, prepare
 from ZHSMain.api import CaptchaRequired
 
 
@@ -174,6 +175,24 @@ def runner(client, ai, auto_submit=True, **kwargs):
 
 
 class PrepareTest(unittest.TestCase):
+    def test_image_urls_are_kept_for_the_model(self):
+        raw = raw_question(1, content='概率为<img src="https://oss.example/p/q.png">',
+                           options=[{"id": 1, "content": '<img src="https://oss.example/p/a.png?x=1">'},
+                                    {"id": 2, "content": '<img src="http://oss.example/p/b.png">'}])
+        prepared = prepare(raw, True)
+        self.assertEqual(prepared["images"], {"q.png": "https://oss.example/p/q.png",
+                                              "a.png": "https://oss.example/p/a.png?x=1"})
+        self.assertIn("[图片:q.png]", prepared["public"]["title"])
+
+    def test_download_images_rejects_non_images(self):
+        def get(url, **kwargs):
+            ok = url.endswith("ok.png")
+            return Mock(status_code=200, content=b"x",
+                        headers={"Content-Type": "image/png" if ok else "text/html"})
+        self.assertEqual(download_images({"ok.png": "https://h/ok.png"}, get=get),
+                         [("ok.png", "image/png", b"x")])
+        self.assertIsNone(download_images({"ok.png": "https://h/ok.png", "bad": "https://h/bad"}, get=get))
+
     def test_single_choice(self):
         prepared = prepare(raw_question(1))
         self.assertEqual(prepared["public"]["type"], "单选题")
@@ -326,10 +345,10 @@ class HomeworkFlowTest(unittest.TestCase):
 
     def test_bad_answer_stops_without_saving_or_submit(self):
         client = FakeClient({1: raw_question(1), 2: raw_question(2), 3: raw_question(3)})
-        ai = FakeAI(["B", "Z", "B"])
+        ai = FakeAI(["Z"] * 9)
         result = runner(client, ai).run_paper(COURSE, homework_item(), 1)
         self.assertEqual(result["status"], "error")
-        self.assertIn("第 2 题", result["message"])
+        self.assertIn("格式不符", result["message"])
         self.assertNotIn("exam_submit", client.names())
         self.assertEqual(len(client.call("exam_question")), 3)
         self.assertEqual(client.call("exam_save_answer"), [])

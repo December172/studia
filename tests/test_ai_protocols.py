@@ -29,6 +29,19 @@ class ProtocolTests(unittest.TestCase):
         return AIClient(AIConfig('https://example.org/v1', 'model', 'synthetic-key',
                                  api_format=api_format), session), session
 
+    def test_images_are_sent_after_their_placeholder_in_both_formats(self):
+        chat = {'choices': [{'finish_reason': 'stop', 'message': {'content': ANSWER}}]}
+        for api_format, payload in [('chat_completions', chat), ('responses', response_payload())]:
+            client, session = self.client(payload, api_format)
+            client.answer(question(), images=[('a.png', 'image/png', b'\x89PNG')])
+            body = session.post.call_args.kwargs['json']
+            parts = (body['messages'][1]['content'] if api_format == 'chat_completions'
+                     else body['input'][0]['content'])
+            self.assertIn('[图片:a.png]', parts[1]['text'])
+            image = parts[2]['image_url']
+            url = image['url'] if api_format == 'chat_completions' else image
+            self.assertEqual(url, 'data:image/png;base64,iVBORw==')
+
     def test_endpoint_accepts_base_or_matching_full_path_and_rejects_mismatch(self):
         for api_format, path in [('chat_completions', '/chat/completions'), ('responses', '/responses')]:
             for url in ['https://example.org/v1/', 'https://example.org/v1' + path]:

@@ -197,9 +197,9 @@ class SharedHomeworkFlowTest(unittest.TestCase):
     def test_bad_answer_stops_without_saving_or_submit(self):
         client = FakeSharedClient([shared_question("e1"), shared_question("e2"),
                                    shared_question("e3")])
-        result = runner(client, FakeAI(["B", "Z", "B"])).run_paper(COURSE, homework_item(), 1)
+        result = runner(client, FakeAI(["Z"] * 9)).run_paper(COURSE, homework_item(), 1)
         self.assertEqual(result["status"], "error")
-        self.assertIn("第 2 题", result["message"])
+        self.assertIn("格式不符", result["message"])
         self.assertEqual(client.call("shared_save_answer"), [])
         self.assertNotIn("shared_submit_homework", client.names())
 

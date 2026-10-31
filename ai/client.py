@@ -1,4 +1,5 @@
 """Chat Completions and Responses clients for compatible providers."""
+import base64
 import json
 import math
 import re
@@ -125,19 +126,30 @@ class AIClient:
         if result["answer"] != "A":
             raise AIError("连接已响应，但模型未通过答案格式测试；请检查模型和接口兼容性")
 
-    def answer(self, question):
+    def answer(self, question, images=None):
+        """images: [(name, mime, bytes)] shown to the model after the [图片:name] placeholders."""
         public_question = {k: question[k] for k in ("type", "title", "options", "blank_count", "context") if k in question}
+        text = json.dumps(public_question, ensure_ascii=False)
+        responses = self.config.api_format == "responses"
+        user = text
+        if images:
+            user = [{"type": "input_text" if responses else "text", "text": text}]
+            for name, mime, data in images:
+                url = "data:%s;base64,%s" % (mime, base64.b64encode(data).decode("ascii"))
+                user.append({"type": "input_text" if responses else "text", "text": "[图片:%s] 的内容：" % name})
+                user.append({"type": "input_image", "image_url": url} if responses
+                            else {"type": "image_url", "image_url": {"url": url}})
         body = {
             "model": self.config.model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(public_question, ensure_ascii=False)},
+                {"role": "user", "content": user},
             ],
             "stream": False,
         }
-        if self.config.api_format == "responses":
+        if responses:
             body = {"model": self.config.model, "instructions": SYSTEM_PROMPT,
-                    "input": json.dumps(public_question, ensure_ascii=False),
+                    "input": user if not images else [{"role": "user", "content": user}],
                     "stream": False, "store": False}
         try:
             response = self.session.post(

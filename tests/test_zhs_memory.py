@@ -88,6 +88,29 @@ class MemoryStoreTest(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / "zhs-answers.json"
 
+    def test_shared_answers_fill_in_and_local_rejection_wins(self):
+        shared = Path(self.directory.name) / "shared.json"
+        question = prepared(1)
+        source = AnswerMemory(Path(self.directory.name) / "source.json", shared=shared)
+        source.remember(question, ["2"], True)
+        source.remember(prepared(2, content="2+2=?"), ["3"], False)
+        self.assertEqual(source.export_shared(), 1)
+        self.assertNotIn("wrong", shared.read_text(encoding="utf-8"))
+
+        memory = AnswerMemory(self.path, shared=shared)
+        self.assertEqual(memory.lookup(question)["correct"], ["2"])
+        memory.remember(question, ["2"], False)
+        self.assertIsNone(memory.lookup(question)["correct"])
+        self.assertIsNone(AnswerMemory(self.path).lookup(prepared(3, content="?"))["correct"])
+
+    def test_broken_shared_file_is_ignored(self):
+        shared = Path(self.directory.name) / "shared.json"
+        shared.write_text("{", encoding="utf-8")
+        memory = AnswerMemory(self.path, shared=shared)
+        memory.remember(prepared(1), ["2"], True)
+        self.assertEqual(memory.lookup(prepared(1))["correct"], ["2"])
+        self.assertIsNone(memory.lookup(prepared(2, content="?"))["correct"])
+
     def test_key_ignores_option_order_and_matches_by_text(self):
         forward = prepare(raw_question(1, options=[
             {"id": 1, "content": "甲"}, {"id": 2, "content": "乙"}]))
@@ -213,13 +236,38 @@ class ReuseFlowTest(unittest.TestCase):
         options = [{"id": 1, "content": "甲"}, {"id": 2, "content": "乙"},
                    {"id": 3, "content": "丙"}]
         memory.remember(prepared(1, options=options), ["甲"], False)
-        ai = FakeAI(["A"])
+        ai = FakeAI(["A", "A", "A"])
         client = FakeClient({1: raw_question(1, options=options)})
         result = runner(client, ai, memory).run_paper(COURSE, HOME, 1)
         self.assertEqual(result["status"], "error")
         self.assertIn("格式不符", result["message"])
+        self.assertEqual(len(ai.asked), 3)
         self.assertEqual(client.call("exam_save_answer"), [])
         self.assertNotIn("exam_submit", client.names())
+
+    def test_ai_retried_after_repeating_known_wrong_answer(self):
+        memory = AnswerMemory(self.path)
+        options = [{"id": 1, "content": "甲"}, {"id": 2, "content": "乙"},
+                   {"id": 3, "content": "丙"}]
+        memory.remember(prepared(1, options=options), ["甲"], False)
+        ai = FakeAI(["A", "B"])
+        client = FakeClient({1: raw_question(1, options=options)})
+        runner(client, ai, memory, auto_submit=False).run_paper(COURSE, HOME, 1)
+        self.assertEqual(len(ai.asked), 2)
+        self.assertIn("2", str(client.call("exam_save_answer")[0]))
+
+    def test_image_only_single_choice_guesses_untried_option(self):
+        memory = AnswerMemory(self.path)
+        options = [{"id": i, "content": '<img src="x/%s.png">' % i} for i in (1, 2, 3, 4)]
+        raw = raw_question(1, options=options)
+        memory.remember(prepare(raw, True), ["[图片:1.png]"], False)
+        for seed in range(6):
+            client = FakeClient({1: raw})
+            ai = FakeAI([None, None, None])
+            ZHSAnswerRunner(client, ai, auto_submit=False, memory=memory, heartbeat_interval=3600,
+                            sleep=lambda _: None, rng=random.Random(seed)).run_paper(COURSE, HOME, 1)
+            self.assertEqual(len(ai.asked), 3)
+            self.assertIn(client.call("exam_save_answer")[0]["answer"], {"2", "3", "4"})
 
     def test_homework_after_submit_updates_memory(self):
         memory = AnswerMemory(self.path)
@@ -245,6 +293,21 @@ class ReuseFlowTest(unittest.TestCase):
             2, content="2+2=?", options=[{"id": 201, "content": "3"},
                                           {"id": 202, "content": "4", "isCorrect": 1}]))["correct"], ["4"])
         save.assert_called()
+
+    def test_failed_blank_learns_revealed_standard_answer(self):
+        memory = AnswerMemory(self.path)
+        raw = raw_question(1, kind=3, content="波特率指 ___，单位为 ___。", options=[
+            {"id": 2, "content": "Baud", "isCorrect": 1, "sort": 2},
+            {"id": 1, "content": "<p>码元数</p>", "isCorrect": 1, "sort": 1}])
+        client = FakeClient({1: raw}, correct={1: False})
+        runner(client, FakeAI([["码元", "波特"]]), memory).run_paper(COURSE, HOME, 1)
+        self.assertEqual(memory.lookup(prepare(raw))["correct"], ["码元数", "Baud"])
+
+        again = FakeClient({1: raw})
+        ai = FakeAI([])
+        runner(again, ai, memory, auto_submit=False).run_paper(COURSE, HOME, 1)
+        self.assertEqual(ai.asked, [])
+        self.assertEqual(again.call("exam_save_answer")[0]["answer"], "码元数#@#Baud")
 
     def test_passing_answer_is_remembered_when_options_are_unmarked(self):
         # Live judgement questions mark no option isCorrect; only the verdict proves it.

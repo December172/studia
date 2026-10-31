@@ -13,13 +13,17 @@ from MoocMain.log import Logger
 logger = Logger(__name__).get_log()
 
 MAX_WRONG = 20
+# Platform-confirmed answers shipped with the repo; read-only, local memory wins.
+SHARED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared_answers.json")
 
 
 class AnswerMemory:
-    def __init__(self, path):
+    def __init__(self, path, shared=None):
         self.path = None if path is None else _path(path)
+        self.shared = None if shared is None else _path(shared)
         self._lock = threading.RLock()
         self._items = {}
+        self._shared_items = None
         self._loaded = False
         self._dirty = False
 
@@ -44,14 +48,27 @@ class AnswerMemory:
             self._load()
             item = self._items.get(key)
             if not isinstance(item, dict):
-                return {"correct": None, "wrong": []}
+                item = {}
             wrong = [list(combo) for combo in item.get("wrong") or []]
-            correct = item.get("correct")
-            if correct:
-                canonical = _canonical(prepared, correct)
-                if any(_canonical(prepared, combo) == canonical for combo in wrong):
-                    correct = None
-            return {"correct": list(correct) if correct else None, "wrong": wrong}
+            for correct in (item.get("correct"), self._shared_correct(key)):
+                if correct and not any(_canonical(prepared, combo) == _canonical(prepared, correct)
+                                       for combo in wrong):
+                    return {"correct": list(correct), "wrong": wrong}
+            return {"correct": None, "wrong": wrong}
+
+    def export_shared(self):
+        """Merge every locally confirmed answer into the shared file; returns its size."""
+        with self._lock:
+            self._load()
+            items = {key: {"correct": item["correct"]}
+                     for key, item in _read_items(self.shared).items() if item["correct"]}
+            items.update((key, {"correct": item["correct"]})
+                         for key, item in self._items.items() if item.get("correct"))
+            self.shared.write_text(json.dumps(
+                {"version": 1, "items": dict(sorted(items.items()))},
+                ensure_ascii=False, indent=0) + "\n", encoding="utf-8")
+            self._shared_items = None
+            return len(items)
 
     def remember(self, prepared, answer_texts, correct):
         if self.path is None:
@@ -95,35 +112,23 @@ class AnswerMemory:
 
     # ---------------------------------------------------------------- 内部
 
+    def _shared_correct(self, key):
+        if self.shared is None:
+            return None
+        if self._shared_items is None:
+            try:
+                self._shared_items = _read_items(self.shared)
+            except (OSError, ValueError, TypeError) as exc:
+                logger.warning("读取共享答案失败，本次不使用共享答案：%s", exc)
+                self._shared_items = {}
+        return (self._shared_items.get(key) or {}).get("correct")
+
     def _load(self):
         if self._loaded or self.path is None:
             return
         self._loaded = True
         try:
-            if not self.path.exists():
-                return
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or data.get("version", 1) != 1:
-                raise ValueError("记忆文件版本不符")
-            items = data.get("items")
-            if not isinstance(items, dict):
-                raise ValueError("记忆文件格式不符")
-            cleaned = {}
-            for key, item in items.items():
-                if not isinstance(key, str) or not isinstance(item, dict):
-                    continue
-                correct = item.get("correct")
-                if not isinstance(correct, list) or not all(
-                        isinstance(text, str) for text in correct):
-                    correct = None
-                wrong = item.get("wrong")
-                wrong = [[str(text) for text in combo]
-                         for combo in wrong if isinstance(combo, list)] \
-                    if isinstance(wrong, list) else []
-                cleaned[key] = {"correct": correct or None,
-                                "wrong": wrong[-MAX_WRONG:],
-                                "updated": item.get("updated")}
-            self._items = cleaned
+            self._items = _read_items(self.path)
         except (OSError, ValueError, TypeError) as exc:
             logger.warning("读取本机答案记忆失败，本次不使用记忆：%s", exc)
             self._items = {}
@@ -149,6 +154,30 @@ class AnswerMemory:
                 os.unlink(temporary)
 
 
+def _read_items(path):
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("version", 1) != 1:
+        raise ValueError("记忆文件版本不符")
+    items = data.get("items")
+    if not isinstance(items, dict):
+        raise ValueError("记忆文件格式不符")
+    cleaned = {}
+    for key, item in items.items():
+        if not isinstance(key, str) or not isinstance(item, dict):
+            continue
+        correct = item.get("correct")
+        if not isinstance(correct, list) or not all(isinstance(text, str) for text in correct):
+            correct = None
+        wrong = item.get("wrong")
+        wrong = [[str(text) for text in combo] for combo in wrong if isinstance(combo, list)] \
+            if isinstance(wrong, list) else []
+        cleaned[key] = {"correct": correct or None, "wrong": wrong[-MAX_WRONG:],
+                        "updated": item.get("updated")}
+    return cleaned
+
+
 def _path(path):
     from pathlib import Path
     return Path(path)
@@ -159,3 +188,13 @@ def _canonical(prepared, texts):
     if prepared.get("kind") == 3:
         return tuple(values)
     return tuple(sorted(set(values)))
+
+
+if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from settings import SettingsStore
+    local = Path(SettingsStore().path).parent / "zhs-answers.json"
+    count = AnswerMemory(local, shared=SHARED).export_shared()
+    print("共享答案已更新：%s（%d 题）" % (SHARED, count))

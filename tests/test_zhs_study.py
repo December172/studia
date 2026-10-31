@@ -1,6 +1,7 @@
 import random
 import threading
 import unittest
+from unittest.mock import patch
 
 from base.auth import AuthenticationExpired
 from reporting import ProgressEvent
@@ -414,8 +415,24 @@ class AiStudyTest(unittest.TestCase):
                                              client.args_of("ai_video_length")[0]["file_id"] == "f2"])
         positions = [args["position"] for args in client.args_of("ai_report")]
         self.assertEqual(positions, [13, 16, 19, 20])
+        names = client.names()
+        self.assertLess(names.index("ai_complete"), names.index("ai_report"))
         results = [(event.name, event.status) for event in events if event.kind == "result"]
         self.assertEqual(results, [("智慧课", "success")])
+
+    def test_ai_video_progress_follows_real_time_with_stall_cap(self):
+        client = FakeClient()
+        client.basic = self.course()
+        client.ai_lengths = {"f1": 20}
+        item = {"studyStatus": 0, "schedule": 0, "resourcesDetail": {
+            "resourcesType": 1, "resourcesDistributeType": 3,
+            "resourcesFileId": "f1", "resourcesName": "video"}}
+        client.ai_resources_queue = {1: [[item], [dict(item, studyStatus=1)]]}
+        clock = iter([0, 2.5, 102.5, 104.5, 106.5, 108.5])
+        with patch("ZHSMain.main.time.monotonic", lambda: next(clock)):
+            run(client, [ai_row()], [])
+        positions = [args["position"] for args in client.args_of("ai_report")]
+        self.assertEqual(positions, [3, 11, 14, 17, 20])
 
     def test_video_failure_continues_course(self):
         client = FakeClient()

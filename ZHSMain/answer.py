@@ -7,6 +7,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import requests
+
 from AIMoocMain.export_questions import clean_html_text
 from ai.client import AIError, AITransientServiceError
 from base.auth import AuthenticationExpired, PlatformUnavailable
@@ -35,12 +37,18 @@ def _kind(raw):
         raise ValueError("暂不支持该题型") from None
 
 
-def _text(raw, allow_images=False):
+def _text(raw, allow_images=False, images=None):
     value = str(raw.get("content") or "")
     if allow_images:
-        # The model cannot see the picture; a stable named placeholder keeps the
-        # question answerable and keeps memory keys distinct per image.
-        value = IMAGE.sub(lambda m: " [图片:%s] " % m.group(1).rsplit("/", 1)[-1].split("?")[0], value)
+        # A stable named placeholder keeps memory keys distinct per image; the
+        # picture itself is sent alongside under the same name when it downloads.
+        def placeholder(match):
+            url = match.group(1)
+            name = url.rsplit("/", 1)[-1].split("?")[0]
+            if images is not None and url.startswith("https://") and name not in images:
+                images[name] = url
+            return " [图片:%s] " % name
+        value = IMAGE.sub(placeholder, value)
     if MEDIA.search(value):
         raise ValueError("包含图片或音视频，需要人工处理")
     return clean_html_text(value)
@@ -53,7 +61,8 @@ def prepare(raw, allow_images=False):
     kind = _kind(raw)
     if kind not in OPTION_TYPES and kind != 3:
         raise ValueError("暂不支持该题型")
-    title = _text(raw, allow_images)
+    images = {}
+    title = _text(raw, allow_images, images)
     if not title:
         raise ValueError("题干为空")
     options = [option for option in (raw.get("optionVos") or []) if isinstance(option, dict)]
@@ -63,7 +72,7 @@ def prepare(raw, allow_images=False):
         blank_count = max(1, len(options))
         public.update({"type": "填空题", "blank_count": blank_count})
         return {"qid": raw.get("id"), "kind": kind, "public": public,
-                "ids": ids, "blank_count": blank_count}
+                "ids": ids, "blank_count": blank_count, "images": images}
 
     if len(options) < 2:
         raise ValueError("题目选项不足")
@@ -73,11 +82,32 @@ def prepare(raw, allow_images=False):
         if option.get("id") in (None, ""):
             raise ValueError("选项缺少平台 ID")
         ids[label] = option.get("id")
-        texts.append({"label": label, "text": _text(option, allow_images)})
+        texts.append({"label": label, "text": _text(option, allow_images, images)})
     public["type"] = "多选题" if kind == 2 else "单选题"
     public["options"] = texts
     return {"qid": raw.get("id"), "kind": kind, "public": public,
-            "ids": ids, "blank_count": 0}
+            "ids": ids, "blank_count": 0, "images": images}
+
+
+IMAGE_LIMIT = 2 * 1024 * 1024
+
+
+def download_images(images, get=requests.get):
+    """[(name, mime, bytes)] for a question's pictures, or None if any is unusable."""
+    result = []
+    for name, url in images.items():
+        try:
+            response = get(url, timeout=(5, 15), allow_redirects=False)
+        except requests.RequestException as exc:
+            logger.warning("下载题目图片失败 %s：%s", name, exc)
+            return None
+        mime = (response.headers.get("Content-Type") or "").split(";")[0].strip()
+        if (response.status_code != 200 or not mime.startswith("image/")
+                or len(response.content) > IMAGE_LIMIT):
+            logger.warning("题目图片不可用 %s：HTTP %s %s", name, response.status_code, mime)
+            return None
+        result.append((name, mime, response.content))
+    return result
 
 
 def prepare_shared(raw):
@@ -181,21 +211,32 @@ def _reuse(prepared, texts, fill_sep):
         return None
 
 
-def _exclude_single(prepared, wrong, fill_sep):
-    """For single choice / judgement, pick the only option not known wrong."""
-    if prepared["kind"] not in (1, 14):
-        return None
+def _untried_single(prepared, wrong):
+    """Single choice / judgement options not yet known to be wrong."""
     excluded = set()
     for combo in wrong:
         labels = _labels_for_texts(prepared, combo)
         if labels and len(labels) == 1:
             excluded.add(labels[0])
-    remaining = [option["label"] for option in prepared["public"].get("options") or []
-                 if option["label"] not in excluded]
+    return [option for option in prepared["public"].get("options") or []
+            if option["label"] not in excluded]
+
+
+def _exclude_single(prepared, wrong, fill_sep):
+    """For single choice / judgement, pick the only option not known wrong."""
+    if prepared["kind"] not in (1, 14):
+        return None
+    remaining = _untried_single(prepared, wrong)
     if len(remaining) != 1:
         return None
-    return _reuse(prepared, [next(option["text"] for option in prepared["public"]["options"]
-                                  if option["label"] == remaining[0])], fill_sep)
+    return _reuse(prepared, [remaining[0]["text"]], fill_sep)
+
+
+def _image_only(prepared):
+    """Whether the model cannot read the question: images stand in for its content."""
+    public = prepared["public"]
+    return "[图片:" in public.get("title", "") or any(
+        "[图片:" in str(option["text"]) for option in public.get("options") or [])
 
 
 def _wrong_hint(prepared, wrong):
@@ -688,13 +729,31 @@ class ZHSAnswerRunner:
             public = dict(public)
             public["context"] = (public["context"] + "\n" + hint
                                  if public.get("context") else hint)
-        reply = self._ask(public)
-        encoded = encode(prepared, reply.get("answer"), fill_sep=fill_sep)
-        if hint:
-            texts = _answer_texts(prepared, reply.get("answer"))
-            if texts and any(_same_answer(prepared, texts, combo) for combo in wrong):
-                raise ValueError("AI 返回的答案格式不符")
-        return encoded
+        images = download_images(prepared["images"]) if prepared.get("images") else None
+        for _ in range(3):
+            if self.cancel_event.is_set():
+                raise KeyboardInterrupt
+            if stop.is_set():
+                raise _Skipped()
+            answer = self._ask(public, images).get("answer")
+            try:
+                encoded = encode(prepared, answer, fill_sep=fill_sep)
+            except ValueError:
+                continue
+            texts = _answer_texts(prepared, answer)
+            if wrong and texts and any(_same_answer(prepared, texts, combo) for combo in wrong):
+                continue
+            return encoded
+        # The model cannot see image-only choices; a random untried option plus the
+        # memory of wrong ones converges over redos instead of blocking the paper.
+        if prepared["kind"] in (1, 14) and _image_only(prepared):
+            remaining = _untried_single(prepared, wrong)
+            if remaining:
+                choice = self.rng.choice(remaining)
+                logger.info("图片题 AI 无法作答，随机选择未试过的选项 %s：%s",
+                            choice["label"], prepared["public"]["title"][:40])
+                return encode(prepared, choice["label"], fill_sep=fill_sep)
+        raise ValueError("AI 返回的答案格式不符")
 
     def _wrong(self, prepared):
         if self.memory is None:
@@ -705,11 +764,12 @@ class ZHSAnswerRunner:
             logger.warning("读取本机答案记忆失败：%s", exc)
             return []
 
-    def _ask(self, public):
+    def _ask(self, public, images=None):
         attempts = 0
         while True:
             try:
-                reply = self.ai_client.answer(public)
+                reply = (self.ai_client.answer(public, images=images) if images
+                         else self.ai_client.answer(public))
             except AITransientServiceError:
                 if attempts >= 2:
                     raise
@@ -755,6 +815,14 @@ class ZHSAnswerRunner:
         if prepared["kind"] == 3:
             if submitted:
                 self.memory.remember(prepared, submitted, passed)
+                changed = True
+            # After submission the platform reveals each blank's standard answer.
+            blanks = sorted((option for option in raw.get("optionVos") or []
+                             if isinstance(option, dict)), key=lambda option: option.get("sort") or 0)
+            right = [clean_html_text(option.get("content") or "") for option in blanks]
+            if (not passed and len(right) == prepared["blank_count"] and all(right)
+                    and all(option.get("isCorrect") == 1 for option in blanks)):
+                self.memory.remember_correct(prepared, right)
                 changed = True
             return changed
         right = [clean_html_text(option.get("content") or "")

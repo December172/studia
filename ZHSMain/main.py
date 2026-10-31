@@ -404,41 +404,43 @@ class ZHSHandler:
 
         self.progress.resources(f"{course} · 读取资源 · 成功 0 · 跳过 0 · 失败 0", 0, total)
         success = skipped = failed = 0
-        for point, items in groups:
-            for item in items:
-                if self.cancel_event.is_set():
-                    raise KeyboardInterrupt
-                detail = item.get("resourcesDetail") or {}
-                name = detail.get("resourcesName") or item.get("resourcesName") or "资源"
-                self.progress.detail(f"{course} · {name}")
-                if _to_int(item.get("studyStatus")) == 1:
-                    skipped += 1
-                else:
-                    self.sleep(self.rng.uniform(0.2, 2))
-                    try:
-                        if self._is_video(detail, item):
-                            self.play_ai(
-                                course_id, class_id, point["knowledgeId"],
-                                detail["resourcesFileId"], _to_int(item.get("schedule")),
-                                course, name,
-                            )
-                        else:
-                            self.client.ai_complete(
-                                course_id, class_id, point["knowledgeId"],
-                                detail["resourcesUid"],
-                            )
-                            self.log.info("%s · 已完成：%s", course, name)
-                        success += 1
-                    except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
-                        raise
-                    except Exception as error:
-                        failed += 1
-                        self.log.error("%s · %s：学习失败：%s", course, name, error)
-                completed = success + skipped + failed
-                self.progress.resources(
-                    f"{course} · {name} · 成功 {success} · 跳过 {skipped} · 失败 {failed}",
-                    completed, total,
-                )
+        # Instant resources first so visible progress is not stuck behind long videos.
+        ordered = sorted(((point, item) for point, items in groups for item in items),
+                         key=lambda pair: self._is_video(pair[1].get("resourcesDetail") or {}, pair[1]))
+        for point, item in ordered:
+            if self.cancel_event.is_set():
+                raise KeyboardInterrupt
+            detail = item.get("resourcesDetail") or {}
+            name = detail.get("resourcesName") or item.get("resourcesName") or "资源"
+            self.progress.detail(f"{course} · {name}")
+            if _to_int(item.get("studyStatus")) == 1:
+                skipped += 1
+            else:
+                self.sleep(self.rng.uniform(0.2, 2))
+                try:
+                    if self._is_video(detail, item):
+                        self.play_ai(
+                            course_id, class_id, point["knowledgeId"],
+                            detail["resourcesFileId"], _to_int(item.get("schedule")),
+                            course, name,
+                        )
+                    else:
+                        self.client.ai_complete(
+                            course_id, class_id, point["knowledgeId"],
+                            detail["resourcesUid"],
+                        )
+                        self.log.info("%s · 已完成：%s", course, name)
+                    success += 1
+                except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
+                    raise
+                except Exception as error:
+                    failed += 1
+                    self.log.error("%s · %s：学习失败：%s", course, name, error)
+            completed = success + skipped + failed
+            self.progress.resources(
+                f"{course} · {name} · 成功 {success} · 跳过 {skipped} · 失败 {failed}",
+                completed, total,
+            )
 
         ready = 0
         all_total = 0
@@ -471,10 +473,17 @@ class ZHSHandler:
             self.client.ai_report(course_id, class_id, file_id, knowledge_id, length)
             self.log.info("%s · 播放完成：%s", course, name)
             return
+        # 1.5x of the time that really passed, so request latency is not lost; a
+        # long stall (sleep, network) is capped instead of turning into a jump.
+        played = float(position)
+        last = time.monotonic()
         while True:
             if self.cancel_event.is_set():
                 raise KeyboardInterrupt
-            position = min(int(round(position + 1.5 * 2)), length)
+            now = time.monotonic()
+            played = min(played + 1.5 * min(max(now - last, 2), 5), length)
+            last = now
+            position = int(played)
             attempts = 0
             while True:
                 try:
