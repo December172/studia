@@ -3,6 +3,7 @@ import unittest
 import urllib.parse
 from unittest.mock import Mock, patch
 
+import requests
 from base.auth import AuthenticationExpired, PlatformUnavailable
 from ZHSMain import api
 from ZHSMain.api import (
@@ -105,6 +106,19 @@ class SecureTest(unittest.TestCase):
 
 
 class CookieTest(unittest.TestCase):
+    def test_restored_expired_exam_cookie_is_not_sent(self):
+        client = make_api()
+        client.session.cookies.set("o_session_id", "expired", domain=".zhihuishu.com",
+                                   path="/", expires=1, secure=True)
+        restored = ZHSApi(access_token=client.access_token)
+        self.addCleanup(restored.close)
+        cookie = next(c for c in restored.session.cookies if c.name == "o_session_id")
+        self.assertEqual(cookie.expires, 1)
+        self.assertTrue(cookie.secure)
+        prepared = restored.session.prepare_request(requests.Request(
+            "GET", "https://studentexam-api.zhihuishu.com/"))
+        self.assertNotIn("o_session_id=", prepared.headers.get("Cookie", ""))
+
     def test_access_token_roundtrip(self):
         client = make_api()
         saved = json.dumps([
@@ -300,6 +314,18 @@ class ExamApiTest(unittest.TestCase):
 
 
 class SharedExamApiTest(unittest.TestCase):
+    def test_exam_origin_does_not_change_following_study_request(self):
+        client = ZHSApi()
+        self.addCleanup(client.close)
+        with patch.object(client.session, "send", return_value=json_response({"status": "200", "code": 0})) as send:
+            client.exam_form(api.HOMEWORK_GATEWAY + "/student/getStudentHomework", {})
+            client.secure(api.STUDY_GATEWAY + "/learning/queryCourse", {})
+        exam_headers, study_headers = [call.args[0].headers for call in send.call_args_list]
+        self.assertEqual(exam_headers["Origin"], "https://onlineexamh5new.zhihuishu.com")
+        self.assertEqual(exam_headers["Referer"], "https://onlineexamh5new.zhihuishu.com/")
+        self.assertEqual(study_headers["Origin"], "https://studyh5.zhihuishu.com")
+        self.assertEqual(study_headers["Referer"], "https://studyh5.zhihuishu.com/")
+
     def test_exam_form_has_no_date_formate(self):
         client = make_api()
         client.session.request.return_value = json_response({"status": "200", "rt": {"ok": 1}})

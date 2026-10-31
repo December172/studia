@@ -6,7 +6,7 @@ import time
 import webbrowser
 from pathlib import Path
 
-from base.auth import PlatformUnavailable
+from base.auth import AuthenticationExpired, PlatformUnavailable
 from ZHSMain.api import ZHSError
 
 _HEAD = """<!doctype html>
@@ -69,6 +69,11 @@ def qr_login(client, *, open_page=webbrowser.open, sleep=time.sleep, timeout=300
                 continue
             if status == 1:
                 client.finish_qr_login(result.get("oncePassword", ""))
+                try:
+                    client.shared_exam_sso()
+                except (AuthenticationExpired, PlatformUnavailable, ZHSError):
+                    if on_status:
+                        on_status("考试会话初始化失败，进入共享课试卷时将重新尝试")
                 message = "登录成功，可以关闭此页面并回到终端。"
                 return True
             if status == 2:

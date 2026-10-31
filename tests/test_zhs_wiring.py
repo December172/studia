@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 from urllib.parse import unquote, urlparse
 
+import requests
 from rich.console import Console
 
 import theme
@@ -111,6 +112,35 @@ class QrLoginTests(unittest.TestCase):
         self.client.login_qr_status.side_effect = status
         self.assertTrue(qr_login(self.client, open_page=lambda uri: self.opened.append(uri),
                                  sleep=lambda _: None, timeout=5))
+
+    def test_confirmed_login_saves_exam_gateway_cookie(self):
+        client = ZHSApi()
+        self.addCleanup(client.close)
+        client.login_qr = Mock(return_value=("qr", b"image"))
+        client.login_qr_status = Mock(return_value={"status": 1, "oncePassword": "once"})
+
+        def request(method, url, **kwargs):
+            if url.endswith("/cas/login"):
+                return Mock(status_code=302, headers={"Location": "https://studentexam-api.zhihuishu.com/landing?ticket=test"})
+            if "studentexam-api.zhihuishu.com/landing" in url:
+                client.session.cookies.set("o_session_id", "ticket", domain=".zhihuishu.com", path="/")
+            else:
+                client.session.cookies.set("CASLOGC", "login", domain=".zhihuishu.com", path="/")
+            return Mock(status_code=200)
+
+        client.session.request = request
+        self.assertTrue(qr_login(client, open_page=lambda _: None, sleep=lambda _: None, timeout=1))
+        restored = ZHSApi(access_token=client.access_token)
+        self.addCleanup(restored.close)
+        prepared = restored.session.prepare_request(requests.Request(
+            "GET", "https://studentexam-api.zhihuishu.com/"))
+        self.assertIn("o_session_id=ticket", prepared.headers.get("Cookie", ""))
+
+    def test_exam_sso_unavailable_does_not_block_course_login(self):
+        self.client.shared_exam_sso.side_effect = PlatformUnavailable("offline")
+        messages = []
+        self.assertTrue(self.run_login([{"status": 1, "oncePassword": "once"}], on_status=messages.append))
+        self.assertTrue(any("考试" in message for message in messages))
 
     def test_qr_is_cleared_after_failure(self):
         self.assertFalse(self.run_login([{"status": 3}]))

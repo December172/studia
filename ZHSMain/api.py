@@ -31,6 +31,8 @@ EXAM = "https://studentexamtest.zhihuishu.com"
 NEWBASE = "https://newbase.zhihuishu.com"
 HOMEWORK = "https://studentexam-api.zhihuishu.com"
 TAURUS = "https://taurusexam-api.zhihuishu.com"
+# 共享课试卷请求使用答题页的来源信息。
+EXAM_PAGE = "https://onlineexamh5new.zhihuishu.com"
 
 HOMEWORK_GATEWAY = HOMEWORK + "/studentExam/gateway/t/v1"
 TAURUS_GATEWAY = TAURUS + "/taurusExam/gateway/t/v1"
@@ -130,7 +132,9 @@ class ZHSApi:
     @property
     def access_token(self):
         cookies = [
-            {"name": cookie.name, "value": cookie.value, "domain": cookie.domain, "path": cookie.path}
+            {"name": cookie.name, "value": cookie.value, "domain": cookie.domain, "path": cookie.path,
+             **({"expires": cookie.expires} if cookie.expires is not None else {}),
+             **({"secure": True} if cookie.secure else {})}
             for cookie in self.session.cookies
         ]
         return json.dumps(cookies, ensure_ascii=False) if cookies else ""
@@ -144,6 +148,8 @@ class ZHSApi:
                     cookie["value"],
                     domain=cookie.get("domain") or "",
                     path=cookie.get("path") or "/",
+                    expires=cookie.get("expires"),
+                    secure=cookie.get("secure", False),
                 )
         except (ValueError, TypeError, KeyError):
             raise AuthenticationExpired("保存的智慧树登录无效，请重新扫码") from None
@@ -166,7 +172,10 @@ class ZHSApi:
         self.session.close()
 
     def _request(self, method, url, *, params=None, data=None, json_body=None,
-                 allow_redirects=True, expect_json=True):
+                 allow_redirects=True, expect_json=True, origin=None):
+        headers = None
+        if origin:
+            headers = {"Origin": origin, "Referer": origin + "/"}
         try:
             response = self.session.request(
                 method,
@@ -174,6 +183,7 @@ class ZHSApi:
                 params=params,
                 data=data,
                 json=json_body,
+                headers=headers,
                 timeout=(10, 30),
                 allow_redirects=allow_redirects,
             )
@@ -691,15 +701,19 @@ class ZHSApi:
     # ------------------------------------------------------------ 共享课试卷
 
     def exam_form(self, url, payload, *, extra=None):
-        """Shared-course exam endpoints: no dateFormate, plain status "200"."""
+        """Shared-course exam endpoints: no dateFormate, plain status "200".
+
+        Use the answering page's origin without changing the study session headers.
+        """
         form = {"secretStr": encrypt(json.dumps(dict(payload or {})), KEYS["exam"])}
         if extra:
             form.update(extra)
-        result = self._request("POST", url, data=form)
+        result = self._request("POST", url, data=form, origin=EXAM_PAGE)
         if str(result.get("status")) != "200":
             message = result.get("msg") or result.get("message") or ""
             if "滑块" in message or "验证" in message:
-                raise CaptchaRequired("智慧树要求滑块验证，请到网页打开该试卷完成验证后重试")
+                raise CaptchaRequired(
+                    "智慧树拒绝了本次作答请求（%s），请到网页打开该试卷完成验证后重试" % message)
             raise ZHSApiError(result.get("status"), message)
         return result
 
