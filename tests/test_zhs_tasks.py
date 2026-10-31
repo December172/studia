@@ -1,6 +1,8 @@
 """智慧课程 AI 答题接入课程任务流程（离线）。"""
 import io
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from rich.console import Console
@@ -62,7 +64,10 @@ class ExecuteTest(unittest.TestCase):
         view, _ = make_view()
         self.events = []
         view.on_progress = self.events.append
-        self.app = Application(view, store=Mock())
+        self.store = Mock()
+        self.store.path = Path(tempfile.mkdtemp()) / "settings.json"
+        self.store.concurrency.return_value = {"ai": 5, "study": 1}
+        self.app = Application(view, store=self.store)
         self.ai_session = Mock()
         self.ai_client = Mock(session=self.ai_session)
         self.app.verify_ai = Mock(return_value=self.ai_client)
@@ -75,6 +80,11 @@ class ExecuteTest(unittest.TestCase):
         self.runner = runner
         self.factory = factory
         return results
+
+    def test_passes_ai_concurrency_to_runner(self):
+        self.run_execute([{"paper": "一", "status": "submitted", "message": "ok"},
+                          {"paper": "二", "status": "submitted", "message": "ok"}])
+        self.assertEqual(self.factory.call_args.kwargs["max_workers"], 5)
 
     def test_two_papers_and_single_verification(self):
         results = self.run_execute([

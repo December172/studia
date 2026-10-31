@@ -1,4 +1,5 @@
 import random
+import threading
 import unittest
 
 from AIMoocMain.export_questions import paper_exam_id
@@ -97,6 +98,55 @@ class FakeAI:
         return {"answer": result, "explanation": ""}
 
 
+class ConcurrentFakeAI:
+    """Answers every question with 'B' while recording peak in-flight calls."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.in_flight = 0
+        self.peak = 0
+        self.overlap = threading.Event()
+        self.asked = []
+
+    def answer(self, question):
+        with self.lock:
+            self.asked.append(question)
+            self.in_flight += 1
+            self.peak = max(self.peak, self.in_flight)
+            if self.in_flight >= 2:
+                self.overlap.set()
+        self.overlap.wait(0.2)
+        with self.lock:
+            self.in_flight -= 1
+        # Keep the task alive briefly so later questions are still queued.
+        threading.Event().wait(0.01)
+        return {"answer": "B", "explanation": ""}
+
+
+class MapFakeAI:
+    """Answers by question title so concurrent order does not matter."""
+
+    def __init__(self, by_title):
+        self.by_title = by_title
+        self.lock = threading.Lock()
+
+    def answer(self, question):
+        with self.lock:
+            result = self.by_title[question["title"]]
+        if isinstance(result, Exception):
+            raise result
+        return {"answer": result, "explanation": ""}
+
+
+def numbered_questions(count):
+    questions = {}
+    sheet = []
+    for qid in range(1, count + 1):
+        questions[qid] = raw_question(qid, content="Q%d" % qid)
+        sheet.append({"questionId": qid, "version": 1})
+    return questions, sheet
+
+
 def homework_item():
     return {
         "name": "知识点 · 作业",
@@ -172,6 +222,81 @@ class PrepareTest(unittest.TestCase):
             encode(multi, [], fill_sep="#@#")
 
 
+class ConcurrencyTest(unittest.TestCase):
+    def test_ai_runs_concurrently_and_saves_in_order(self):
+        questions, sheet = numbered_questions(6)
+        client = FakeClient(questions, sheet=sheet)
+        ai = ConcurrentFakeAI()
+        result = runner(client, ai, max_workers=4).run_paper(COURSE, homework_item(), 1)
+        self.assertEqual(result["status"], "submitted", result)
+        self.assertGreater(ai.peak, 1)
+        names = client.names()
+        self.assertLessEqual(names.index("exam_save_answer"), names.index("exam_submit"))
+        self.assertEqual(names.count("exam_save_answer"), 6)
+        saved = client.call("exam_save_answer")
+        self.assertEqual([item["questionId"] for item in saved], [1, 2, 3, 4, 5, 6])
+
+    def test_one_failure_saves_nothing(self):
+        questions, sheet = numbered_questions(4)
+        client = FakeClient(questions, sheet=sheet)
+        ai = MapFakeAI({"Q1": "B", "Q2": "B", "Q3": AIError("down"), "Q4": "B"})
+        result = runner(client, ai, max_workers=4).run_paper(COURSE, homework_item(), 1)
+        self.assertEqual(result["status"], "ai_error")
+        self.assertIn("第 3 题", result["message"])
+        self.assertEqual(client.call("exam_save_answer"), [])
+        self.assertNotIn("exam_submit", client.names())
+
+    def test_earliest_failure_is_reported(self):
+        questions, sheet = numbered_questions(4)
+        client = FakeClient(questions, sheet=sheet)
+        ai = MapFakeAI({"Q1": "B", "Q2": AIError("two"), "Q3": ValueError("three"), "Q4": "B"})
+        result = runner(client, ai, max_workers=4).run_paper(COURSE, homework_item(), 1)
+        self.assertEqual(result["status"], "ai_error")
+        self.assertIn("第 2 题", result["message"])
+        self.assertEqual(client.call("exam_save_answer"), [])
+
+    def test_cancel_event_raises_keyboard_interrupt(self):
+        questions, sheet = numbered_questions(4)
+        client = FakeClient(questions, sheet=sheet)
+        cancel = threading.Event()
+
+        class CancellingAI:
+            def answer(self, question):
+                cancel.set()
+                return {"answer": "B", "explanation": ""}
+
+        with self.assertRaises(KeyboardInterrupt):
+            runner(client, CancellingAI(), max_workers=2,
+                   cancel_event=cancel).run_paper(COURSE, homework_item(), 1)
+        self.assertNotIn("exam_submit", client.names())
+
+
+class PacingTest(unittest.TestCase):
+    def test_fetch_and_save_sleeps(self):
+        questions, sheet = numbered_questions(4)
+        client = FakeClient(questions, sheet=sheet)
+        sleeps = []
+        rng = random.Random(0)
+        result = runner(client, ConcurrentFakeAI(), max_workers=2,
+                        sleep=sleeps.append, rng=rng).run_paper(
+            COURSE, homework_item(), 1)
+        self.assertEqual(result["status"], "submitted", result)
+        # 4 题之间 3 次拿题 + 4 次保存之间 3 次
+        self.assertEqual(len(sleeps), 6)
+        self.assertTrue(all(0.5 <= value <= 1 for value in sleeps[:3]))
+        self.assertTrue(all(1 <= value <= 2 for value in sleeps[3:]))
+
+
+class LogTest(unittest.TestCase):
+    def test_answer_logs_progress(self):
+        client = FakeClient({1: raw_question(1)})
+        with self.assertLogs("ZHSMain.answer", "INFO") as captured:
+            runner(client, FakeAI(["B"])).run_paper(COURSE, homework_item(), 1)
+        text = "\n".join(captured.output)
+        self.assertIn("AI 作答 1/", text)
+        self.assertIn("已保存", text)
+
+
 class HomeworkFlowTest(unittest.TestCase):
     def test_full_flow(self):
         client = FakeClient({1: raw_question(1), 2: raw_question(2, kind=2)})
@@ -199,14 +324,15 @@ class HomeworkFlowTest(unittest.TestCase):
         self.assertEqual(result["status"], "preview")
         self.assertNotIn("exam_submit", client.names())
 
-    def test_bad_answer_stops_without_submit(self):
+    def test_bad_answer_stops_without_saving_or_submit(self):
         client = FakeClient({1: raw_question(1), 2: raw_question(2), 3: raw_question(3)})
-        ai = FakeAI(["B", "Z"])
+        ai = FakeAI(["B", "Z", "B"])
         result = runner(client, ai).run_paper(COURSE, homework_item(), 1)
         self.assertEqual(result["status"], "error")
         self.assertIn("第 2 题", result["message"])
         self.assertNotIn("exam_submit", client.names())
-        self.assertEqual(len(client.call("exam_question")), 2)
+        self.assertEqual(len(client.call("exam_question")), 3)
+        self.assertEqual(client.call("exam_save_answer"), [])
 
     def test_ai_error(self):
         client = FakeClient({1: raw_question(1)})

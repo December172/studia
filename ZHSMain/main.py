@@ -103,6 +103,8 @@ class ZHSHandler:
             watch, played = self._shared_state(states, video)
             video["watchState"] = watch
             video["studyTotalTime"] = played
+        done = sum(1 for video in videos if video["watchState"] == 1)
+        self.log.info("%s：共 %d 个视频（已完成 %d）", course, len(videos), done)
 
         ctx = {
             "course": course,
@@ -295,6 +297,7 @@ class ZHSHandler:
             target=self.client.open_video, kwargs={"video_id": play_id}, daemon=True
         ).start()
         self.client.shared_courseware(play_id)
+        self.log.info("%s · 开始播放：%s（%s）", course, video["name"], self._mmss(end))
 
         speed = 1.5 + self.rng.uniform(-0.15, 0.15)
         interval = 30 + self.rng.randint(-5, 5)
@@ -336,6 +339,7 @@ class ZHSHandler:
                         raise ZHSError("连续 5 次进度上报失败，停止学习")
             if state["played"] >= end and state["last_submit"] >= end and not force:
                 break
+        self.log.info("%s · 播放完成：%s", course, video["name"])
         self.sleep(1 + self.rng.random())
 
     def _answer_popup(self, ctx, video, point):
@@ -362,6 +366,7 @@ class ZHSHandler:
                 "answer": answer,
                 "testType": 0,
             })
+            self.log.info("%s · 已回答视频弹题", ctx["course"])
         except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
             raise
         except Exception as error:
@@ -393,6 +398,9 @@ class ZHSHandler:
         if total == 0:
             self.log.warning("%s：没有可学习的资源", course)
             return "skipped"
+        done = sum(1 for _, items in groups for item in items
+                   if _to_int(item.get("studyStatus")) == 1)
+        self.log.info("%s：共 %d 项资源（已完成 %d）", course, total, done)
 
         self.progress.resources(f"{course} · 读取资源 · 成功 0 · 跳过 0 · 失败 0", 0, total)
         success = skipped = failed = 0
@@ -419,6 +427,7 @@ class ZHSHandler:
                                 course_id, class_id, point["knowledgeId"],
                                 detail["resourcesUid"],
                             )
+                            self.log.info("%s · 已完成：%s", course, name)
                         success += 1
                     except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
                         raise
@@ -457,8 +466,10 @@ class ZHSHandler:
         threading.Thread(
             target=self.client.open_video, kwargs={"file_id": file_id}, daemon=True
         ).start()
+        self.log.info("%s · 开始播放：%s", course, name)
         if position >= length:
             self.client.ai_report(course_id, class_id, file_id, knowledge_id, length)
+            self.log.info("%s · 播放完成：%s", course, name)
             return
         while True:
             if self.cancel_event.is_set():
@@ -480,3 +491,4 @@ class ZHSHandler:
             self.progress.detail(f"{course} · {name} · {position}/{length}")
             if position == length:
                 break
+        self.log.info("%s · 播放完成：%s", course, name)

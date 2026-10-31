@@ -5,12 +5,14 @@ import random
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from AIMoocMain.export_questions import clean_html_text
 from ai.client import AIError, AITransientServiceError
 from base.auth import AuthenticationExpired, PlatformUnavailable
 from MoocMain.log import Logger
 from reporting import Reporter
+from task_metrics import nonnegative_number
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit
 
 logger = Logger(__name__).get_log()
@@ -108,6 +110,128 @@ def encode(prepared, answer, *, fill_sep):
     raise invalid
 
 
+def _answer_texts(prepared, answer):
+    """Option labels or blank texts from an AI answer, or None when malformed."""
+    kind = prepared["kind"]
+    options = {option["label"]: option["text"]
+               for option in prepared["public"].get("options") or []}
+    if kind in (1, 14):
+        if not isinstance(answer, str) or answer not in options:
+            return None
+        return [options[answer]]
+    if kind == 2:
+        if not isinstance(answer, list):
+            return None
+        texts = []
+        for label in answer:
+            if not isinstance(label, str) or label not in options:
+                return None
+            texts.append(options[label])
+        return texts
+    if kind == 3:
+        blanks = [answer] if isinstance(answer, str) else answer
+        if not isinstance(blanks, list) or any(not isinstance(text, str) for text in blanks):
+            return None
+        return [text.strip() for text in blanks]
+    return None
+
+
+def _labels_for_texts(prepared, texts):
+    """Map stored answer texts back to option labels or blank texts."""
+    kind = prepared["kind"]
+    texts = [str(text).strip() for text in texts or []]
+    if kind == 3:
+        return texts if len(texts) == prepared["blank_count"] else None
+    by_text = {}
+    for option in prepared["public"].get("options") or []:
+        by_text.setdefault(str(option["text"]).strip(), []).append(option["label"])
+    labels = []
+    for text in texts:
+        matches = by_text.get(text)
+        if not matches:
+            return None
+        labels.append(matches[0])
+    if len(set(labels)) != len(labels):
+        return None
+    if kind in (1, 14) and len(labels) != 1:
+        return None
+    return labels
+
+
+def _same_answer(prepared, first, second):
+    if prepared["kind"] == 3:
+        return ([text.strip() for text in first]
+                == [text.strip() for text in second])
+    return {text.strip() for text in first} == {text.strip() for text in second}
+
+
+def _reuse(prepared, texts, fill_sep):
+    labels = _labels_for_texts(prepared, texts)
+    if labels is None:
+        return None
+    answer = labels[0] if prepared["kind"] in (1, 14) else labels
+    try:
+        return encode(prepared, answer, fill_sep=fill_sep)
+    except ValueError:
+        return None
+
+
+def _exclude_single(prepared, wrong, fill_sep):
+    """For single choice / judgement, pick the only option not known wrong."""
+    if prepared["kind"] not in (1, 14):
+        return None
+    excluded = set()
+    for combo in wrong:
+        labels = _labels_for_texts(prepared, combo)
+        if labels and len(labels) == 1:
+            excluded.add(labels[0])
+    remaining = [option["label"] for option in prepared["public"].get("options") or []
+                 if option["label"] not in excluded]
+    if len(remaining) != 1:
+        return None
+    return _reuse(prepared, [next(option["text"] for option in prepared["public"]["options"]
+                                  if option["label"] == remaining[0])], fill_sep)
+
+
+def _wrong_hint(prepared, wrong):
+    parts = []
+    for combo in wrong:
+        labels = _labels_for_texts(prepared, combo)
+        parts.append("、".join(labels if labels is not None else [str(text) for text in combo]))
+    return "以下答案已被平台判定为错误，不要再选：" + "；".join(parts)
+
+
+def _submitted_texts(prepared, encoded, fill_sep):
+    if not encoded:
+        return None
+    if prepared["kind"] == 3:
+        return [text for text in str(encoded[0]).split(fill_sep)]
+    by_id = {str(pid): label for label, pid in prepared["ids"].items()}
+    labels = [by_id.get(str(part)) for part in encoded]
+    if any(label is None for label in labels):
+        return None
+    texts = {option["label"]: option["text"]
+             for option in prepared["public"].get("options") or []}
+    return [texts[label] for label in labels]
+
+
+def _shared_texts(prepared, entry, options):
+    """Answer texts from a shared-course answer-info entry."""
+    answer = entry.get("answer")
+    if answer in (None, ""):
+        return None
+    if prepared["kind"] == 3:
+        return [text.strip() for text in str(answer).split("/") if text.strip()]
+    by_id = {}
+    for option in options:
+        if isinstance(option, dict) and option.get("id") not in (None, ""):
+            by_id[str(option["id"])] = clean_html_text(option.get("content") or "")
+    texts = [by_id.get(str(part).strip()) for part in str(answer).split(",")]
+    if any(not text for text in texts):
+        return None
+    return texts
+
+
 def _positive_int(value):
     if isinstance(value, bool):
         return 0
@@ -118,17 +242,25 @@ def _positive_int(value):
     return number if number > 0 else 0
 
 
+class _Skipped(Exception):
+    """A queued question skipped after another one already failed."""
+
+
 class ZHSAnswerRunner:
     def __init__(self, client, ai_client, *, auto_submit, on_progress=None, sleep=time.sleep,
-                 rng=None, heartbeat_interval=10, batch_size=5, cancel_event=None):
+                 rng=None, heartbeat_interval=10, batch_size=5, max_workers=8,
+                 cancel_event=None, memory=None):
         self.client = client
         self.ai_client = ai_client
         self.auto_submit = auto_submit
+        self.memory = memory
+        self.reused = 0
         self.reporter = Reporter(on_progress)
         self.sleep = sleep
         self.rng = rng or random.Random()
         self.heartbeat_interval = heartbeat_interval
         self.batch_size = max(1, int(batch_size))
+        self.max_workers = max(1, int(max_workers))
         self.cancel_event = cancel_event if cancel_event is not None else threading.Event()
         self._heartbeat_stop = None
         self._heartbeat_thread = None
@@ -189,8 +321,9 @@ class ZHSAnswerRunner:
                 "aiKnlowledgeId": knowledge_id,
             })
 
-        def after_submit():
-            correct = self._count_correct(test_id, paper_id, sheet)
+        def after_submit(questions, answers, outcome):
+            correct = self._count_correct(test_id, paper_id, sheet, questions, answers,
+                                          fill_sep=FILL_HOMEWORK, name=name)
             return {"paper": name, "status": "submitted", "correct": correct,
                     "total": len(sheet), "message": "答对 %d/%d 题" % (correct, len(sheet))}
 
@@ -233,7 +366,7 @@ class ZHSAnswerRunner:
                 expect_body=False,
             )
 
-        def after_submit():
+        def after_submit(questions, answers, outcome):
             try:
                 detail = self.client.ai_exam_detail({
                     "classId": class_id,
@@ -251,7 +384,8 @@ class ZHSAnswerRunner:
                 logger.warning("%s：读取考试详情失败：%s", name, exc)
                 detail = {}
             if detail.get("isLookAnswer") == 1 or detail.get("isAllowShowDetail") == 1:
-                correct = self._count_correct(test_id, paper_id, sheet)
+                correct = self._count_correct(test_id, paper_id, sheet, questions, answers,
+                                              fill_sep=FILL_EXAM, name=name)
                 return {"paper": name, "status": "submitted", "correct": correct,
                         "total": len(sheet),
                         "message": "答对 %d/%d 题" % (correct, len(sheet))}
@@ -280,6 +414,15 @@ class ZHSAnswerRunner:
 
         self.client.shared_exam_sso()
         school = self.client.shared_school_id()
+        redo = bool(current.get("_redo")) and not is_exam
+        if redo:
+            try:
+                self.client.shared_redo_homework(recruit_id, exam_id, course_id)
+            except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
+                raise
+            except Exception as exc:
+                return self._result(name, "error", "申请重做失败：%s" % exc)
+            logger.info("%s：已申请重做（剩余 %s 次）", name, current.get("answerCount"))
         opener = self.client.shared_do_exam if is_exam else self.client.shared_do_homework
         rt = opener(recruit_id, exam_id, stu_exam_id, school, course_id)
         try:
@@ -326,9 +469,18 @@ class ZHSAnswerRunner:
                 message = "已交卷，得分 %s/%s" % (score, total_score)
             return {"paper": name, "status": "submitted", "message": message}
 
-        return self._run(name, exam_id, stu_exam_id, sheet, fill_sep="/",
-                         save_one=save_one, submit=submit, heartbeat=False,
-                         fetch=lambda entry: entry)
+        def after_submit(questions, answers, outcome):
+            if not is_exam:
+                self._remember_shared(recruit_id, stu_exam_id, exam_id, school, course_id,
+                                      questions, answers, name)
+            return outcome
+
+        result = self._run(name, exam_id, stu_exam_id, sheet, fill_sep="/",
+                           save_one=save_one, submit=submit, heartbeat=False,
+                           fetch=lambda entry: entry, after_submit=after_submit)
+        if redo and result.get("status") in ("error", "ai_error"):
+            result["message"] = "%s（已消耗一次重做机会，未交卷；该作业已重置，再次选择它作答不会再消耗重做次数）" % result.get("message", "")
+        return result
 
     # ------------------------------------------------------------------ 流程
 
@@ -341,67 +493,209 @@ class ZHSAnswerRunner:
         if total == 0:
             return self._result(name, "error", "答题卡为空")
         self.reporter.questions(name, 0, total)
+        logger.info("开始：%s（%d 题）", name, total)
         if heartbeat:
             self._start_heartbeat(test_id, paper_id)
         try:
-            batch = []
+            # 1. 拿题：顺序请求平台，题目全部就绪后才开始作答与保存。
+            questions = []
+            fetched = False
             for index, entry in enumerate(sheet, 1):
                 if self.cancel_event.is_set():
                     raise KeyboardInterrupt
                 self._raise_heartbeat_error()
-                self.reporter.detail("%s · 第 %d/%d 题" % (name, index, total))
-                self.sleep(self.rng.uniform(3, 5))
                 try:
                     if fetch is not None:
                         raw = fetch(entry)
                     else:
+                        if fetched:
+                            self.sleep(self.rng.uniform(0.5, 1))
                         raw = self.client.exam_question(
                             test_id, paper_id, entry["questionId"], entry["version"])
+                        fetched = True
                     prepared = prepare_shared(raw) if fetch is not None else prepare(raw)
-                    reply = self._ask(prepared["public"])
-                    encoded = encode(prepared, reply.get("answer"), fill_sep=fill_sep)
                 except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
                     raise
-                except AIError as exc:
-                    return self._result(name, "ai_error", "第 %d 题：%s" % (index, exc))
                 except Exception as exc:
                     return self._result(name, "error", "第 %d 题：%s" % (index, exc))
+                questions.append((entry, prepared))
+
+            # 2. AI 作答：不碰平台，可并发；任何一题失败都不保存、不提交。
+            answers, failure = self._ask_all(name, questions, fill_sep)
+            if failure is not None:
+                return failure
+
+            # 3. 保存：顺序执行平台请求。
+            batch = []
+            saved_any = False
+            for index, (entry, prepared) in enumerate(questions, 1):
+                if self.cancel_event.is_set():
+                    raise KeyboardInterrupt
+                self._raise_heartbeat_error()
+                self.reporter.detail("%s · 保存答案 %d/%d" % (name, index, total))
                 try:
                     if save_one is not None:
-                        save_one(entry, prepared, encoded)
+                        if saved_any:
+                            self.sleep(self.rng.uniform(1, 2))
+                        save_one(entry, prepared, answers[index - 1])
+                        saved_any = True
                     else:
-                        batch.append(item_of(entry, prepared, encoded))
+                        batch.append(item_of(entry, prepared, answers[index - 1]))
                         if len(batch) >= self.batch_size:
+                            if saved_any:
+                                self.sleep(self.rng.uniform(1, 2))
                             flush(batch)
                             batch = []
+                            saved_any = True
                 except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
                     raise
                 except Exception as exc:
                     return self._result(name, "error", "第 %d 题保存失败：%s" % (index, exc))
-                self.reporter.questions(name, index, total)
             if batch:
                 try:
+                    if saved_any:
+                        self.sleep(self.rng.uniform(1, 2))
                     flush(batch)
                 except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
                     raise
                 except Exception as exc:
                     return self._result(name, "error", "保存答案失败：%s" % exc)
+            logger.info("%s：已保存 %d 题答案", name, total)
+
             if not self.auto_submit:
-                return self._result(name, "preview", "答案已保存，未交卷")
-            try:
-                outcome = submit()
-            except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
-                raise
-            except Exception:
-                # Never resubmit: a duplicate attempt is worse than an unknown result.
-                self.reporter.detail("%s · 提交请求失败" % name)
-                return self._result(name, "submission_unknown",
-                                    "提交结果未知，请到平台核对；未重试")
-            if after_submit is not None:
-                return after_submit()
-            return outcome or self._result(name, "submitted", "已交卷")
+                result = self._result(name, "preview", "答案已保存，未交卷")
+            else:
+                try:
+                    outcome = submit()
+                except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
+                    raise
+                except Exception:
+                    # Never resubmit: a duplicate attempt is worse than an unknown result.
+                    self.reporter.detail("%s · 提交请求失败" % name)
+                    return self._result(name, "submission_unknown",
+                                        "提交结果未知，请到平台核对；未重试")
+                if after_submit is not None:
+                    result = after_submit(questions, answers, outcome)
+                else:
+                    result = outcome or self._result(name, "submitted", "已交卷")
+            if self.reused and result.get("status") in ("submitted", "preview"):
+                result["message"] = "%s（复用已确认答案 %d 题）" % (
+                    result.get("message", ""), self.reused)
+            logger.info("%s：%s", name, result.get("message", ""))
+            return result
         finally:
             self._stop_heartbeat()
+
+    def _ask_all(self, name, questions, fill_sep):
+        """Answer prepared questions concurrently; keep results in question order."""
+        total = len(questions)
+        answers = [None] * total
+        failures = {}
+        reused = 0
+
+        def solve(index, prepared, stop):
+            if self.cancel_event.is_set():
+                raise KeyboardInterrupt
+            if stop.is_set():
+                raise _Skipped()
+            encoded, from_memory = self._recall(prepared, fill_sep)
+            if encoded is not None:
+                logger.info("%s · 复用已确认答案 %d/%d", name, index + 1, total)
+                return encoded, from_memory
+            return self._solve(prepared, fill_sep, stop), False
+
+        # Queued work is skipped through this flag rather than Future.cancel():
+        # as_completed never wakes for futures cancelled by executor.shutdown.
+        stop = threading.Event()
+        control_error = None
+        with ThreadPoolExecutor(max_workers=min(self.max_workers, total)) as executor:
+            futures = {
+                executor.submit(solve, index, prepared, stop): index
+                for index, (_, prepared) in enumerate(questions)
+            }
+            completed = 0
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    encoded, from_memory = future.result()
+                except _Skipped:
+                    continue
+                except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt) as exc:
+                    control_error = control_error or exc
+                    stop.set()
+                    continue
+                except Exception as exc:
+                    failures[index] = exc
+                    stop.set()
+                    continue
+                if self.cancel_event.is_set() or self._heartbeat_error is not None:
+                    stop.set()
+                answers[index] = encoded
+                completed += 1
+                if from_memory:
+                    reused += 1
+                self.reporter.questions(name, completed, total)
+                if not from_memory:
+                    logger.info("%s · AI 作答 %d/%d：%s", name, index + 1, total,
+                                questions[index][1]["public"]["title"][:40])
+        self.reused = reused
+        if self._heartbeat_error is not None:
+            control_error, self._heartbeat_error = self._heartbeat_error, None
+        if control_error is None and self.cancel_event.is_set():
+            control_error = KeyboardInterrupt()
+        if control_error is not None:
+            raise control_error
+        if failures:
+            index = min(failures)
+            exc = failures[index]
+            status = "ai_error" if isinstance(exc, AIError) else "error"
+            return answers, self._result(name, status, "第 %d 题：%s" % (index + 1, exc))
+        return answers, None
+
+    def _recall(self, prepared, fill_sep):
+        """(encoded answer, whether it came from a confirmed-correct entry)."""
+        if self.memory is None:
+            return None, False
+        try:
+            remembered = self.memory.lookup(prepared)
+        except Exception as exc:
+            logger.warning("读取本机答案记忆失败：%s", exc)
+            return None, False
+        if remembered.get("correct"):
+            encoded = _reuse(prepared, remembered["correct"], fill_sep)
+            if encoded is not None:
+                return encoded, True
+        encoded = _exclude_single(prepared, remembered.get("wrong") or [], fill_sep)
+        return encoded, False
+
+    def _solve(self, prepared, fill_sep, stop):
+        if self.cancel_event.is_set():
+            raise KeyboardInterrupt
+        if stop.is_set():
+            raise _Skipped()
+        public = prepared["public"]
+        wrong = self._wrong(prepared)
+        hint = _wrong_hint(prepared, wrong) if wrong else ""
+        if hint:
+            public = dict(public)
+            public["context"] = (public["context"] + "\n" + hint
+                                 if public.get("context") else hint)
+        reply = self._ask(public)
+        encoded = encode(prepared, reply.get("answer"), fill_sep=fill_sep)
+        if hint:
+            texts = _answer_texts(prepared, reply.get("answer"))
+            if texts and any(_same_answer(prepared, texts, combo) for combo in wrong):
+                raise ValueError("AI 返回的答案格式不符")
+        return encoded
+
+    def _wrong(self, prepared):
+        if self.memory is None:
+            return []
+        try:
+            return self.memory.lookup(prepared).get("wrong") or []
+        except Exception as exc:
+            logger.warning("读取本机答案记忆失败：%s", exc)
+            return []
 
     def _ask(self, public):
         attempts = 0
@@ -418,9 +712,10 @@ class ZHSAnswerRunner:
                 raise ValueError("AI 返回的答案格式不符")
             return reply
 
-    def _count_correct(self, test_id, paper_id, sheet):
+    def _count_correct(self, test_id, paper_id, sheet, questions, answers, *, fill_sep, name):
         correct = 0
-        for entry in sheet:
+        changed = False
+        for index, entry in enumerate(sheet):
             try:
                 raw = self.client.exam_question(
                     test_id, paper_id, entry["questionId"], entry["version"])
@@ -429,10 +724,95 @@ class ZHSAnswerRunner:
             except Exception as exc:
                 logger.warning("回查第 %s 题失败：%s", entry.get("questionId"), exc)
                 continue
-            answers = (raw or {}).get("userAnswerVo") or []
-            if answers and isinstance(answers[0], dict) and answers[0].get("isCorrect") == 1:
+            voices = (raw or {}).get("userAnswerVo") or []
+            passed = bool(voices and isinstance(voices[0], dict)
+                          and voices[0].get("isCorrect") == 1)
+            if passed:
                 correct += 1
+            if self.memory is None or index >= len(questions) or index >= len(answers):
+                continue
+            try:
+                changed |= self._remember_question(
+                    questions[index][1], answers[index], raw or {}, passed, fill_sep)
+            except Exception as exc:
+                logger.warning("%s：更新答案记忆失败：%s", name, exc)
+        if changed:
+            self._save_memory(name)
         return correct
+
+    def _remember_question(self, prepared, encoded, raw, passed, fill_sep):
+        """Record what the platform marked right/wrong; returns whether memory changed."""
+        changed = False
+        submitted = _submitted_texts(prepared, encoded, fill_sep)
+        if prepared["kind"] == 3:
+            if submitted:
+                self.memory.remember(prepared, submitted, passed)
+                changed = True
+            return changed
+        right = [clean_html_text(option.get("content") or "")
+                 for option in (raw.get("optionVos") or [])
+                 if isinstance(option, dict) and option.get("isCorrect") == 1]
+        right = [text for text in right if text]
+        if right:
+            self.memory.remember_correct(prepared, right)
+            changed = True
+        elif submitted and passed:
+            # Judgement options carry no isCorrect mark; a passing verdict is the proof.
+            self.memory.remember_correct(prepared, submitted)
+            changed = True
+        if submitted and not passed:
+            self.memory.remember(prepared, submitted, False)
+            changed = True
+        return changed
+
+    def _remember_shared(self, recruit_id, stu_exam_id, exam_id, school, course_id,
+                         questions, answers, name):
+        if self.memory is None:
+            return
+        try:
+            rt = self.client.shared_look_homework(recruit_id, stu_exam_id, exam_id,
+                                                  school, course_id)
+            rows = []
+            for part in (rt or {}).get("examBase", {}).get("workExamParts") or []:
+                if isinstance(part, dict):
+                    rows.extend(q for q in (part.get("questionDtos") or [])
+                                if isinstance(q, dict))
+            if not rows:
+                return
+            ids = [row.get("id") for row in rows if row.get("id") not in (None, "")]
+            if not ids:
+                return
+            info = self.client.shared_answer_info(
+                recruit_id, stu_exam_id, exam_id, school, course_id, question_ids=ids) or {}
+            changed = False
+            for row in rows:
+                if row.get("id") in (None, ""):
+                    continue
+                prepared = prepare_shared(dict(row, eid=row.get("eid") or row.get("id")))
+                key = str(row.get("id"))
+                entry = info.get(key) if isinstance(info, dict) else None
+                if not isinstance(entry, dict):
+                    continue
+                texts = _shared_texts(prepared, entry, (row.get("questionOptions") or []))
+                if not texts:
+                    continue
+                if str(entry.get("isCurrent")) == "1":
+                    self.memory.remember_correct(prepared, texts)
+                else:
+                    self.memory.remember(prepared, texts, False)
+                changed = True
+            if changed:
+                self._save_memory(name)
+        except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
+            raise
+        except Exception as exc:
+            logger.warning("%s：回查共享课作业答案失败：%s", name, exc)
+
+    def _save_memory(self, name):
+        try:
+            self.memory.save()
+        except Exception as exc:
+            logger.warning("%s：保存答案记忆失败：%s", name, exc)
 
     def _result(self, name, status, message):
         result = {"paper": name, "status": status, "message": message}
@@ -582,6 +962,24 @@ def catalog_ai(client, course):
             for item in entries]
 
 
+def _retry_counts(row):
+    """(remaining redos, total redos) from backNum/isMarking, or None if unreadable."""
+    total = nonnegative_number(row.get("backNum"))
+    used = nonnegative_number(row.get("isMarking"))
+    if total is None or total != int(total):
+        return None
+    used = 0 if used is None else used
+    if used != int(used):
+        return None
+    return max(int(total) - int(used), 0), int(total)
+
+
+def _is_full_score(row):
+    score = nonnegative_number(row.get("score"))
+    total = nonnegative_number(row.get("totalScore"))
+    return score is not None and total is not None and score >= total
+
+
 def _shared_homework_items(client, recruit_id, course_id):
     rows = client.shared_homework_list(recruit_id, course_id, 1)
     rows += client.shared_homework_list(recruit_id, course_id, 2)
@@ -608,10 +1006,23 @@ def _shared_homework_items(client, recruit_id, course_id):
         }
         if "score" in row:
             item["score"] = row["score"]
+        retry = _retry_counts(row)
+        if retry is not None:
+            item["frequency"], item["answerCount"] = retry[1], retry[0]
         state = row.get("state")
         item["_completion_status"] = "submitted" if state == 4 else "not_started"
         if state == 4:
-            item["_unavailable"] = ("已提交", "已提交的作业不自动重做（会消耗重做次数），需要请到网页操作。")
+            if _is_full_score(row):
+                item["_unavailable"] = ("已满分", "已满分，无需重做。")
+            elif retry is None or retry[0] <= 0:
+                item["_unavailable"] = ("无重做次数", "重做次数已用完。")
+            else:
+                remaining = retry[0]
+                item["zhs"]["redo"] = True
+                item["_redo"] = True
+                item["_hint"] = (
+                    "重做成绩会覆盖当前成绩（当前 %s/%s），剩余重做 %d 次。"
+                    % (row.get("score"), row.get("totalScore"), remaining))
         elif state not in (1, 4, 5):
             item["_unavailable"] = ("状态未知", "平台状态未知，请到网页核对。")
         items.append(item)

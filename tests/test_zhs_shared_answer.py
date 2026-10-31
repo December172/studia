@@ -1,3 +1,4 @@
+import io
 import random
 import unittest
 
@@ -91,6 +92,10 @@ class FakeSharedClient:
     def shared_submit_exam(self, recruit_id, exam_id, stu_exam_id, count):
         self._record("shared_submit_exam", count)
         return {"statu": "1"}
+
+    def shared_redo_homework(self, recruit_id, exam_id, course_id):
+        self._record("shared_redo_homework", (recruit_id, exam_id, course_id))
+        return {"rt": True}
 
     def names(self):
         return [name for name, _ in self.calls]
@@ -189,13 +194,13 @@ class SharedHomeworkFlowTest(unittest.TestCase):
         self.assertEqual(result["status"], "preview")
         self.assertNotIn("shared_submit_homework", client.names())
 
-    def test_bad_answer_stops_without_submit(self):
+    def test_bad_answer_stops_without_saving_or_submit(self):
         client = FakeSharedClient([shared_question("e1"), shared_question("e2"),
                                    shared_question("e3")])
-        result = runner(client, FakeAI(["B", "Z"])).run_paper(COURSE, homework_item(), 1)
+        result = runner(client, FakeAI(["B", "Z", "B"])).run_paper(COURSE, homework_item(), 1)
         self.assertEqual(result["status"], "error")
         self.assertIn("第 2 题", result["message"])
-        self.assertEqual(len(client.call("shared_save_answer")), 1)
+        self.assertEqual(client.call("shared_save_answer"), [])
         self.assertNotIn("shared_submit_homework", client.names())
 
     def test_captcha_propagates(self):
@@ -222,16 +227,77 @@ class SharedHomeworkFlowTest(unittest.TestCase):
 
     def test_recheck_sees_submitted_paper(self):
         client = FakeSharedClient([shared_question("e1")])
-        client.homework_rows = [dict(client.homework_rows[0], state=4)]
+        client.homework_rows = [dict(client.homework_rows[0], state=4,
+                                     score=20, totalScore=20)]
         result = runner(client, FakeAI(["B"])).run_paper(COURSE, homework_item(), 1)
         self.assertEqual(result["status"], "error")
-        self.assertIn("已提交", result["message"])
+        self.assertIn("已满分", result["message"])
         self.assertNotIn("shared_do_homework", client.names())
 
     def test_empty_paper(self):
         client = FakeSharedClient([])
         result = runner(client, FakeAI([])).run_paper(COURSE, homework_item(), 1)
         self.assertEqual(result["status"], "error")
+
+
+class SharedHomeworkRedoFlowTest(unittest.TestCase):
+    def redo_client(self, questions=None):
+        client = FakeSharedClient(questions if questions is not None else [shared_question("e1")])
+        client.homework_rows = [{"id": 100, "examId": 200, "examName": "第一次作业",
+                                 "state": 4, "score": 12, "totalScore": 20,
+                                 "backNum": 2, "isMarking": 1, "courseId": 3}]
+        return client
+
+    def test_redo_is_requested_before_do_homework(self):
+        client = self.redo_client()
+        result = runner(client, FakeAI(["B"])).run_paper(COURSE, homework_item(), 1)
+        self.assertEqual(result["status"], "submitted", result)
+        names = client.names()
+        self.assertEqual(client.call("shared_redo_homework"), [(9, 200, 3)])
+        self.assertLess(names.index("shared_redo_homework"), names.index("shared_do_homework"))
+
+    def test_redo_failure_stops_before_do_homework(self):
+        client = self.redo_client()
+
+        def down(*args):
+            raise PlatformUnavailable("down")
+
+        client.shared_redo_homework = down
+        result = runner(client, FakeAI(["B"])).run_paper(COURSE, homework_item(), 1)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("申请重做失败", result["message"])
+        self.assertNotIn("shared_do_homework", client.names())
+
+    def test_ai_failure_after_redo_notes_consumed_attempt(self):
+        client = self.redo_client([shared_question("e1")])
+        result = runner(client, FakeAI(["Z"])).run_paper(COURSE, homework_item(), 1)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("已消耗一次重做机会", result["message"])
+        self.assertNotIn("shared_submit_homework", client.names())
+
+    def test_exam_never_requests_redo(self):
+        client = FakeSharedClient([shared_question("e1")])
+        client.homework_rows = []
+        client.exam_rows = [{"id": 300, "examId": 400, "examName": "期末", "state": 2,
+                             "studentStartTime": "s", "faStudentExamRemainCount": 3, "courseId": 3}]
+        runner(client, FakeAI(["B"])).run_paper(COURSE, exam_item(), 2)
+        self.assertNotIn("shared_redo_homework", client.names())
+
+
+class PapersHintTest(unittest.TestCase):
+    def test_selectable_redo_item_shows_hint(self):
+        from unittest.mock import patch
+        from rich.console import Console
+        import theme
+        from ui import TerminalUI
+
+        view = TerminalUI(console=Console(file=io.StringIO(), theme=theme.THEME, width=120))
+        task = (COURSE, {"id": "shw-1-2", "name": "作业",
+                         "_hint": "重做成绩会覆盖当前成绩"}, 1)
+        with patch.object(TerminalUI, "select", return_value=[]) as select:
+            view.papers([task])
+        hint = select.call_args.kwargs["item_hint"]
+        self.assertEqual(hint(task), "重做成绩会覆盖当前成绩")
 
 
 class SharedExamFlowTest(unittest.TestCase):
@@ -287,11 +353,39 @@ class CatalogSharedTest(unittest.TestCase):
         client.exam_rows = []
         entries = catalog(client, COURSE)
         by_id = {item["id"]: item for _, item, _ in entries}
-        self.assertEqual(by_id["shw-1-11"]["_unavailable"][0], "已提交")
+        self.assertEqual(by_id["shw-1-11"]["_unavailable"][0], "无重做次数")
         self.assertEqual(by_id["shw-1-11"]["_completion_status"], "submitted")
         self.assertEqual(by_id["shw-2-12"]["_unavailable"][0], "状态未知")
         self.assertNotIn("_unavailable", by_id["shw-3-13"])
-        self.assertEqual(task_availability(by_id["shw-1-11"], 1).label, "已提交")
+        self.assertEqual(task_availability(by_id["shw-1-11"], 1).label, "无重做次数")
+
+    def test_homework_redo_states(self):
+        client = self.make_client()
+        client.homework_rows = [
+            {"id": 1, "examId": 11, "examName": "满分", "state": 4,
+             "score": "100", "totalScore": "100", "backNum": 2, "isMarking": 1, "courseId": 3},
+            {"id": 2, "examId": 12, "examName": "可重做", "state": 4,
+             "score": "60", "totalScore": 100, "backNum": 2, "isMarking": 1, "courseId": 3},
+            {"id": 3, "examId": 13, "examName": "次数用完", "state": 4,
+             "score": 60, "totalScore": 100, "backNum": 2, "isMarking": 2, "courseId": 3},
+        ]
+        client.exam_rows = []
+        by_id = {item["id"]: item for _, item, _ in catalog(client, COURSE)}
+        self.assertEqual(by_id["shw-1-11"]["_unavailable"][0], "已满分")
+        self.assertNotIn("_redo", by_id["shw-1-11"])
+
+        redo = by_id["shw-2-12"]
+        self.assertNotIn("_unavailable", redo)
+        self.assertTrue(redo["_redo"])
+        self.assertTrue(redo["zhs"]["redo"])
+        self.assertIn("当前 60/100", redo["_hint"])
+        self.assertIn("剩余重做 1 次", redo["_hint"])
+        self.assertEqual((redo["frequency"], redo["answerCount"]), (2, 1))
+        self.assertTrue(task_availability(redo, 1).available)
+
+        self.assertEqual(by_id["shw-3-13"]["_unavailable"][0], "无重做次数")
+        self.assertEqual((by_id["shw-3-13"]["frequency"], by_id["shw-3-13"]["answerCount"]),
+                         (2, 0))
 
     def test_homework_skips_bad_rows(self):
         client = self.make_client()

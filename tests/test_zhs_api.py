@@ -371,6 +371,17 @@ class SharedExamApiTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "statu")
         self.assertIn("no", str(ctx.exception))
 
+    def test_shared_redo_homework(self):
+        client = make_api()
+        client.session.request.return_value = json_response({"status": "200", "rt": {"ok": 1}})
+        result = client.shared_redo_homework(9, 200, 3)
+        self.assertEqual(result["rt"], {"ok": 1})
+        _, kwargs = client.session.request.call_args
+        self.assertIn(api.HOMEWORK_GATEWAY + "/student/saveCourseTran",
+                      client.session.request.call_args.args[1])
+        body = json.loads(decrypt(kwargs["data"]["secretStr"], KEYS["exam"]))
+        self.assertEqual(body, {"recruitId": 9, "examId": 200, "description": "", "courseId": 3})
+
     def test_shared_submit_exam_uses_taurus(self):
         client = make_api()
         client.session.request.return_value = json_response({"status": "200", "rt": {"statu": "1"}})

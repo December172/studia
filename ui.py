@@ -1247,7 +1247,7 @@ class TerminalUI:
         def availability(task):
             return task_availability(task[1], task[2])
         def hint(task):
-            return availability(task).reason or task_time_hint(task[1])
+            return availability(task).reason or task[1].get("_hint") or task_time_hint(task[1])
         return self.select("选择任务", catalog,
                            lambda x: ("[附件作业] " if unsupported(x) else "") + paper_display_name(x[1]),
                            lambda x: task_type_label(x[1], x[2]) if single_course else

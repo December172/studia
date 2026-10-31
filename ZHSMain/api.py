@@ -784,6 +784,13 @@ class ZHSApi:
             extra=extra,
         )
 
+    def shared_redo_homework(self, recruit_id, exam_id, course_id):
+        return self.exam_form(
+            HOMEWORK_GATEWAY + "/student/saveCourseTran",
+            {"recruitId": recruit_id, "examId": exam_id, "description": "",
+             "courseId": course_id},
+        )
+
     def shared_submit_homework(self, recruit_id, exam_id, stu_exam_id, count):
         return self.exam_form(
             HOMEWORK_GATEWAY + "/answer/submit",
@@ -810,4 +817,11 @@ class ZHSApi:
             {"recruitId": recruit_id, "stuExamId": stu_exam_id, "examId": exam_id,
              "schoolId": school_id, "courseId": course_id,
              "questionIds": ",".join(str(qid) for qid in question_ids)},
+        ).get("rt")
+
+    def shared_look_homework(self, recruit_id, stu_exam_id, exam_id, school_id, course_id):
+        return self.exam_form(
+            HOMEWORK_GATEWAY + "/student/lookHomework",
+            {"recruitId": recruit_id, "studentExamId": stu_exam_id, "examId": exam_id,
+             "schoolId": school_id, "courseId": course_id},
         ).get("rt")

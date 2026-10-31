@@ -233,6 +233,20 @@ class SharedStudyTest(unittest.TestCase):
         self.assertEqual(saved[0]["payload"]["courseId"], 9)
 
 
+class StudyLogTest(unittest.TestCase):
+    def test_shared_play_logs(self):
+        client = FakeClient()
+        client.videos = two_video_course()
+        client.lesson = {"100": {"watchState": 1, "studyTotalTime": 30}}
+        client.lv = {"11": {"watchState": 0, "studyTotalTime": 0}}
+        with self.assertLogs("ZHSMain.main", "INFO") as captured:
+            run(client, [shared_row()], [])
+        text = "\n".join(captured.output)
+        self.assertIn("共 2 个视频（已完成 1）", text)
+        self.assertIn("开始播放：待学-1", text)
+        self.assertIn("播放完成：待学-1", text)
+
+
 class StopTest(unittest.TestCase):
     def test_study_time_limit_stops_later_courses(self):
         client = FakeClient()
