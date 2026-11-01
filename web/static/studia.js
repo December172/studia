@@ -334,9 +334,9 @@ const VIEWS = {
         || `<div class="model plain"><span class="m1"><small class="sans">还没有邀请码</small></span></div>`}</div>
       <div class="section"><h3>共享答案记忆</h3><span class="aside">命中的题直接用，不再调用 AI</span></div>
       <div class="models"><div class="model plain"><span class="m1"><b>智慧树 · ${memory.questions} 题</b><span class="pill blue">${memory.confirmed} 题已确认正确</span>
-        <small class="sans">所有人交卷后平台判定的对错都记在这里，再遇到同一题，对的直接用、错的避开。${memory.bundled ? `另有仓库自带的 ${memory.bundled} 题正确答案兜底。` : ""}</small></span></div>
+        <small class="sans">交卷后平台判定的对错，在同一门课的所有试卷之间共享：对的直接用、错的避开。</small></span></div>
         <div class="model plain"><span class="m1"><b>MOOC · ${memory.mooc.questions} 题</b><span class="pill blue">平台公布的标准答案</span>
-        <small class="sans">交卷后平台公布的标准答案，只在同一门课（同一个班）的同一份试卷里共享；单选、多选、判断题。</small></span></div></div>
+        <small class="sans">交卷后平台公布的标准答案，在同一门课（同一个班）的所有试卷之间共享；单选、多选、判断题。</small></span></div></div>
       <div class="section"><h3>用户</h3><span class="aside">${users.length} 人</span></div>
       <div class="models">${users.map((u) => `<div class="model"><span class="avatar big">${esc(u.username.slice(0, 1).toUpperCase())}</span>
           <span class="m1"><b>${esc(u.username)}</b>${u.role === "admin" ? '<span class="pill blue">管理员</span>' : ""}${u.disabled ? '<span class="pill red">已停用</span>' : ""}

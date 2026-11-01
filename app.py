@@ -14,7 +14,7 @@ from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi
 from ZHSMain.main import ZHSHandler
 import ZHSMain.answer
 from ZHSMain.answer import ZHSAnswerRunner
-from ZHSMain.memory import SHARED as SHARED_ANSWERS, AnswerMemory
+from ZHSMain.memory import AnswerMemory
 from ZHSMain.login import qr_login
 from NewMoocMain.oauth_login import oauth_login
 from ai.client import AIClient, AIError
@@ -424,8 +424,7 @@ class Application:
                             on_progress=self.view.on_progress,
                             max_workers=self.store.concurrency()["ai"],
                             memory=AnswerMemory(
-                                Path(self.store.path).parent / "zhs-answers.json",
-                                shared=SHARED_ANSWERS))
+                                Path(self.store.path).parent / "zhs-answers.json"))
                     try:
                         result = runner.run_paper(course, item, category)
                         results.append(result)

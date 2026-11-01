@@ -34,7 +34,7 @@ from task_metrics import score_text
 from ZHSMain.answer import ZHSAnswerRunner, catalog
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi, ZHSError
 from ZHSMain.main import ZHSHandler, course_units as zhs_units
-from ZHSMain.memory import SHARED as SHARED_ANSWERS, AnswerMemory
+from ZHSMain.memory import AnswerMemory
 from ai.memory import MoocAnswerMemory
 from ZYKMoocMain.api import ZYKMoocApi
 from ZYKMoocMain.main import ZYKMoocHandler
@@ -490,7 +490,7 @@ class Studia:
                 runner = ZHSAnswerRunner(
                     self.client(platform), ai, auto_submit=auto_submit, on_progress=on_progress,
                     cancel_event=cancel, max_workers=workers,
-                    memory=self.memory or AnswerMemory(Path(self.store.path).parent / "zhs-answers.json", shared=SHARED_ANSWERS))
+                    memory=self.memory or AnswerMemory(Path(self.store.path).parent / "zhs-answers.json"))
             else:
                 # No manual-answer or confirm callbacks: unanswerable papers stay unsubmitted.
                 runner = AnswerRunner(ExamAPI(self.client(platform)), ai, output_dir=self.reports_dir,

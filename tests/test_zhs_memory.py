@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 from ZHSMain.answer import ZHSAnswerRunner, prepare, prepare_shared
-from ZHSMain.memory import AnswerMemory
+from ZHSMain.memory import AnswerMemory, Scoped
 
 
 class FixedRng(random.Random):
@@ -88,29 +88,6 @@ class MemoryStoreTest(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / "zhs-answers.json"
 
-    def test_shared_answers_fill_in_and_local_rejection_wins(self):
-        shared = Path(self.directory.name) / "shared.json"
-        question = prepared(1)
-        source = AnswerMemory(Path(self.directory.name) / "source.json", shared=shared)
-        source.remember(question, ["2"], True)
-        source.remember(prepared(2, content="2+2=?"), ["3"], False)
-        self.assertEqual(source.export_shared(), 1)
-        self.assertNotIn("wrong", shared.read_text(encoding="utf-8"))
-
-        memory = AnswerMemory(self.path, shared=shared)
-        self.assertEqual(memory.lookup(question)["correct"], ["2"])
-        memory.remember(question, ["2"], False)
-        self.assertIsNone(memory.lookup(question)["correct"])
-        self.assertIsNone(AnswerMemory(self.path).lookup(prepared(3, content="?"))["correct"])
-
-    def test_broken_shared_file_is_ignored(self):
-        shared = Path(self.directory.name) / "shared.json"
-        shared.write_text("{", encoding="utf-8")
-        memory = AnswerMemory(self.path, shared=shared)
-        memory.remember(prepared(1), ["2"], True)
-        self.assertEqual(memory.lookup(prepared(1))["correct"], ["2"])
-        self.assertIsNone(memory.lookup(prepared(2, content="?"))["correct"])
-
     def test_key_ignores_option_order_and_matches_by_text(self):
         forward = prepare(raw_question(1, options=[
             {"id": 1, "content": "甲"}, {"id": 2, "content": "乙"}]))
@@ -187,10 +164,28 @@ class MemoryStoreTest(unittest.TestCase):
         self.assertEqual(len(data["items"]), 20)
 
 
+def in_course(memory, scope="ai/1"):
+    """The view run_paper() gives the runner for COURSE (or another course)."""
+    return Scoped(memory, scope)
+
+
 def runner(client, ai, memory, auto_submit=True):
     return ZHSAnswerRunner(client, ai, auto_submit=auto_submit, memory=memory,
                            sleep=lambda seconds: None, rng=FixedRng(),
                            heartbeat_interval=3600)
+
+
+class CourseScopeTest(unittest.TestCase):
+    def test_answers_reach_every_paper_of_their_course_but_no_other_course(self):
+        with tempfile.TemporaryDirectory() as directory:
+            memory = AnswerMemory(Path(directory) / "m.json")
+            in_course(memory, "ai/1").remember_correct(prepared(1), ["2"])
+            self.assertEqual(in_course(memory, "ai/1").lookup(prepared(7))["correct"], ["2"])
+            self.assertIsNone(in_course(memory, "ai/9").lookup(prepared(1))["correct"])
+            client, ai = FakeClient({1: raw_question(1)}), FakeAI(["A"])
+            runner(client, ai, memory).run_paper(
+                {"courseName": "别的课", "zhs": {"kind": "ai", "courseId": 9, "classId": 2}}, HOME, 1)
+            self.assertEqual(len(ai.asked), 1)   # another course asks the AI
 
 
 class ReuseFlowTest(unittest.TestCase):
@@ -200,7 +195,7 @@ class ReuseFlowTest(unittest.TestCase):
         self.path = Path(self.directory.name) / "zhs-answers.json"
 
     def test_confirmed_answer_skips_ai(self):
-        memory = AnswerMemory(self.path)
+        memory = in_course(AnswerMemory(self.path))
         memory.remember_correct(prepared(1), ["2"])
         ai = FakeAI([])
         client = FakeClient({1: raw_question(1)})
@@ -211,7 +206,7 @@ class ReuseFlowTest(unittest.TestCase):
         self.assertIn("复用已确认答案 1 题", result["message"])
 
     def test_single_choice_elimination_skips_ai(self):
-        memory = AnswerMemory(self.path)
+        memory = in_course(AnswerMemory(self.path))
         memory.remember(prepared(1), ["1"], False)
         ai = FakeAI([])
         client = FakeClient({1: raw_question(1)})
@@ -221,7 +216,7 @@ class ReuseFlowTest(unittest.TestCase):
         self.assertEqual(client.call("exam_save_answer")[0]["answer"], "102")
 
     def test_wrong_hint_is_sent_as_context(self):
-        memory = AnswerMemory(self.path)
+        memory = in_course(AnswerMemory(self.path))
         options = [{"id": 1, "content": "甲"}, {"id": 2, "content": "乙"},
                    {"id": 3, "content": "丙"}]
         memory.remember(prepared(1, options=options), ["甲"], False)
@@ -232,7 +227,7 @@ class ReuseFlowTest(unittest.TestCase):
         self.assertIn("以下答案已被平台判定为错误，不要再选：A", ai.asked[0]["context"])
 
     def test_ai_repeating_known_wrong_answer_stops_paper(self):
-        memory = AnswerMemory(self.path)
+        memory = in_course(AnswerMemory(self.path))
         options = [{"id": 1, "content": "甲"}, {"id": 2, "content": "乙"},
                    {"id": 3, "content": "丙"}]
         memory.remember(prepared(1, options=options), ["甲"], False)
@@ -246,7 +241,7 @@ class ReuseFlowTest(unittest.TestCase):
         self.assertNotIn("exam_submit", client.names())
 
     def test_ai_retried_after_repeating_known_wrong_answer(self):
-        memory = AnswerMemory(self.path)
+        memory = in_course(AnswerMemory(self.path))
         options = [{"id": 1, "content": "甲"}, {"id": 2, "content": "乙"},
                    {"id": 3, "content": "丙"}]
         memory.remember(prepared(1, options=options), ["甲"], False)
@@ -257,7 +252,7 @@ class ReuseFlowTest(unittest.TestCase):
         self.assertIn("2", str(client.call("exam_save_answer")[0]))
 
     def test_image_only_single_choice_guesses_untried_option(self):
-        memory = AnswerMemory(self.path)
+        memory = in_course(AnswerMemory(self.path))
         options = [{"id": i, "content": '<img src="x/%s.png">' % i} for i in (1, 2, 3, 4)]
         raw = raw_question(1, options=options)
         memory.remember(prepare(raw, True), ["[图片:1.png]"], False)
@@ -270,7 +265,7 @@ class ReuseFlowTest(unittest.TestCase):
             self.assertIn(client.call("exam_save_answer")[0]["answer"], {"2", "3", "4"})
 
     def test_homework_after_submit_updates_memory(self):
-        memory = AnswerMemory(self.path)
+        memory = in_course(AnswerMemory(self.path))
         save = Mock(wraps=memory.save)
         memory.save = save
         client = FakeClient(
@@ -295,7 +290,7 @@ class ReuseFlowTest(unittest.TestCase):
         save.assert_called()
 
     def test_failed_blank_learns_revealed_standard_answer(self):
-        memory = AnswerMemory(self.path)
+        memory = in_course(AnswerMemory(self.path))
         raw = raw_question(1, kind=3, content="波特率指 ___，单位为 ___。", options=[
             {"id": 2, "content": "Baud", "isCorrect": 1, "sort": 2},
             {"id": 1, "content": "<p>码元数</p>", "isCorrect": 1, "sort": 1}])
@@ -311,7 +306,7 @@ class ReuseFlowTest(unittest.TestCase):
 
     def test_passing_answer_is_remembered_when_options_are_unmarked(self):
         # Live judgement questions mark no option isCorrect; only the verdict proves it.
-        memory = AnswerMemory(self.path)
+        memory = in_course(AnswerMemory(self.path))
         options = [{"id": 101, "content": "对"}, {"id": 102, "content": "错"}]
         client = FakeClient({1: raw_question(1, options=options)}, correct={1: True})
         result = runner(client, FakeAI(["A"]), memory).run_paper(COURSE, HOME, 1)
@@ -319,7 +314,7 @@ class ReuseFlowTest(unittest.TestCase):
         self.assertEqual(memory.lookup(prepared(1, options=options))["correct"], ["对"])
 
     def test_reconfirmed_answer_leaves_the_wrong_list(self):
-        memory = AnswerMemory(self.path)
+        memory = in_course(AnswerMemory(self.path))
         item = prepared(1, options=[{"id": 101, "content": "1"}, {"id": 102, "content": "2"}])
         memory.remember(item, ["2"], False)
         memory.remember_correct(item, ["2"])
@@ -328,7 +323,7 @@ class ReuseFlowTest(unittest.TestCase):
     def test_shared_homework_after_submit_updates_memory(self):
         from ZHSMain.answer import prepare_shared
         from tests.test_zhs_shared_answer import FakeSharedClient, homework_item
-        memory = AnswerMemory(self.path)
+        memory = in_course(AnswerMemory(self.path), "shared/3")
 
         class SharedClient(FakeSharedClient):
             def shared_look_homework(self, recruit_id, stu_exam_id, exam_id, school_id,
@@ -372,7 +367,7 @@ class ReuseFlowTest(unittest.TestCase):
     def test_shared_lookup_failure_still_submits(self):
         from ZHSMain.answer import prepare_shared
         from tests.test_zhs_shared_answer import FakeSharedClient, homework_item
-        memory = AnswerMemory(self.path)
+        memory = in_course(AnswerMemory(self.path), "shared/3")
 
         class SharedClient(FakeSharedClient):
             def shared_look_homework(self, *args):
@@ -431,7 +426,7 @@ class DatabaseMemoryTest(unittest.TestCase):
             self.assertEqual(memory.lookup(question)["correct"], ["2"])
             restarted = DatabaseAnswerMemory(db)
             self.assertEqual(restarted.lookup(question), {"correct": ["2"], "wrong": [["1"]]})
-            self.assertEqual(restarted.stats(), {"questions": 1, "confirmed": 1, "bundled": 0})
+            self.assertEqual(restarted.stats(), {"questions": 1, "confirmed": 1})
 
     def test_legacy_user_files_merge_without_losing_either_side(self):
         from ZHSMain.memory import DatabaseAnswerMemory

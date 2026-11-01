@@ -411,7 +411,7 @@ class AnswerRunner:
                 save_answer(position, item_report)
                 reuse_count += 1
             memory_count = 0
-            memory_scope = answer_scope(course, exam_id)
+            memory_scope = answer_scope(course)
             for position, (_, q, preparation_error) in enumerate(items):
                 if self.memory is None or preparation_error is not None or position in entries or position in pending_positions:
                     continue

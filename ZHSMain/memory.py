@@ -1,4 +1,4 @@
-"""本地答案记忆：记住平台判定过的答案，下次作答优先复用或避开。"""
+"""答案记忆：记住平台判定过的答案，同一门课再遇到时优先复用或避开。"""
 from __future__ import annotations
 
 import hashlib
@@ -14,17 +14,13 @@ from MoocMain.log import Logger
 logger = Logger(__name__).get_log()
 
 MAX_WRONG = 20
-# Platform-confirmed answers shipped with the repo; read-only, local memory wins.
-SHARED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared_answers.json")
 
 
 class AnswerMemory:
-    def __init__(self, path, shared=None):
+    def __init__(self, path):
         self.path = None if path is None else _path(path)
-        self.shared = None if shared is None else _path(shared)
         self._lock = threading.RLock()
         self._items = {}
-        self._shared_items = None
         self._loaded = False
         self._dirty = False
         self._changed = set()
@@ -39,6 +35,9 @@ class AnswerMemory:
                               for option in public.get("options") or []),
             "blanks": prepared.get("blank_count") or 0,
         }
+        if prepared.get("scope"):
+            # Scoped to one course (see Scoped).
+            payload["scope"] = prepared["scope"]
         text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -52,25 +51,11 @@ class AnswerMemory:
             if not isinstance(item, dict):
                 item = {}
             wrong = [list(combo) for combo in item.get("wrong") or []]
-            for correct in (item.get("correct"), self._shared_correct(key)):
-                if correct and not any(_canonical(prepared, combo) == _canonical(prepared, correct)
-                                       for combo in wrong):
-                    return {"correct": list(correct), "wrong": wrong}
+            correct = item.get("correct")
+            if correct and not any(_canonical(prepared, combo) == _canonical(prepared, correct)
+                                   for combo in wrong):
+                return {"correct": list(correct), "wrong": wrong}
             return {"correct": None, "wrong": wrong}
-
-    def export_shared(self):
-        """Merge every locally confirmed answer into the shared file; returns its size."""
-        with self._lock:
-            self._load()
-            items = {key: {"correct": item["correct"]}
-                     for key, item in _read_items(self.shared).items() if item["correct"]}
-            items.update((key, {"correct": item["correct"]})
-                         for key, item in self._items.items() if item.get("correct"))
-            self.shared.write_text(json.dumps(
-                {"version": 1, "items": dict(sorted(items.items()))},
-                ensure_ascii=False, indent=0) + "\n", encoding="utf-8")
-            self._shared_items = None
-            return len(items)
 
     def remember(self, prepared, answer_texts, correct):
         if self.path is None:
@@ -115,17 +100,6 @@ class AnswerMemory:
 
     # ---------------------------------------------------------------- 内部
 
-    def _shared_correct(self, key):
-        if self.shared is None:
-            return None
-        if self._shared_items is None:
-            try:
-                self._shared_items = _read_items(self.shared)
-            except (OSError, ValueError, TypeError) as exc:
-                logger.warning("读取共享答案失败，本次不使用共享答案：%s", exc)
-                self._shared_items = {}
-        return (self._shared_items.get(key) or {}).get("correct")
-
     def _load(self):
         if self._loaded or self.path is None:
             return
@@ -158,6 +132,26 @@ class AnswerMemory:
                 os.unlink(temporary)
 
 
+class Scoped:
+    """A memory limited to one course: questions are looked up and stored under that scope,
+    so papers of the same course share answers and other courses never see them."""
+
+    def __init__(self, memory, scope):
+        self.memory, self.scope = memory, scope
+
+    def lookup(self, prepared):
+        return self.memory.lookup(dict(prepared, scope=self.scope))
+
+    def remember(self, prepared, answer_texts, correct):
+        self.memory.remember(dict(prepared, scope=self.scope), answer_texts, correct)
+
+    def remember_correct(self, prepared, answer_texts):
+        self.remember(prepared, answer_texts, True)
+
+    def save(self):
+        self.memory.save()
+
+
 class DatabaseAnswerMemory(AnswerMemory):
     """One memory for every user of a Studia server, in a table of its SQLite database.
 
@@ -166,8 +160,8 @@ class DatabaseAnswerMemory(AnswerMemory):
 
     TABLE = "zhs_answers"
 
-    def __init__(self, db_path, shared=None):
-        super().__init__(db_path, shared)
+    def __init__(self, db_path):
+        super().__init__(db_path)
         self.db = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None, timeout=10)
         self.db.execute("CREATE TABLE IF NOT EXISTS %s ("
                         "key TEXT PRIMARY KEY, correct TEXT, wrong TEXT NOT NULL, updated TEXT)" % self.TABLE)
@@ -219,10 +213,8 @@ class DatabaseAnswerMemory(AnswerMemory):
     def stats(self):
         with self._lock:
             self._load()
-            self._shared_correct("")  # loads the bundled file once
             return {"questions": len(self._items),
-                    "confirmed": sum(1 for item in self._items.values() if item.get("correct")),
-                    "bundled": len(self._shared_items or {})}
+                    "confirmed": sum(1 for item in self._items.values() if item.get("correct"))}
 
 
 def _read_items(path):
@@ -260,12 +252,3 @@ def _canonical(prepared, texts):
         return tuple(values)
     return tuple(sorted(set(values)))
 
-
-if __name__ == "__main__":
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from settings import SettingsStore
-    local = Path(SettingsStore().path).parent / "zhs-answers.json"
-    count = AnswerMemory(local, shared=SHARED).export_shared()
-    print("共享答案已更新：%s（%d 题）" % (SHARED, count))

@@ -5,8 +5,8 @@
 `isRight` and options flagged `IsAnswer`; verified on real papers 2026-11-01.
 Only single choice, multiple choice and judgement are learned: their format is verified.
 
-Conservatively scoped: an answer is only reused for the same course offering and the same
-paper (`scope`), never for a look-alike question elsewhere.
+Scoped to one course offering (`scope`): the papers of a course share answers (homework and
+exams often repeat questions); other courses never reuse them, even for a look-alike question.
 """
 import hashlib
 import json
@@ -18,15 +18,14 @@ from ZHSMain.memory import AnswerMemory, DatabaseAnswerMemory
 JUDGEMENT = {"1": "正确", "0": "错误"}
 
 
-def scope(course, exam_id):
-    return "%s/%s" % (course.get("id") or course.get("courseInfoId"), exam_id)
+def scope(course):
+    return str(course.get("id") or course.get("courseInfoId"))
 
 
 def mooc_key(q):
-    """Identity of a prepared question within its course and paper (`q["scope"]`); option order does not matter."""
-    if not q.get("scope"):
-        raise ValueError("答案记忆缺少课程和试卷范围")
-    payload = {"scope": q["scope"], "type": q["type_id"], "title": q["title"], "context": q.get("context", ""),
+    """Identity of a prepared question within its course (`q["scope"]`, set by every caller);
+    option order does not matter."""
+    payload = {"scope": q.get("scope") or "", "type": q["type_id"], "title": q["title"], "context": q.get("context", ""),
                "options": sorted(x["text"] for x in q.get("options", [])), "blanks": q.get("blank_count", 0)}
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -83,7 +82,7 @@ def learn(api, memory, course, exam_id, task_id):
         if not isinstance(raw, dict) or raw.get("questionSubList"):
             continue
         try:
-            q = dict(prepare_question({**raw, "id": raw.get("paperId")}, 0), scope=scope(course, exam_id))
+            q = dict(prepare_question({**raw, "id": raw.get("paperId")}, 0), scope=scope(course))
         except (ValueError, TypeError, KeyError):
             continue
         texts = standard_texts(q, raw)

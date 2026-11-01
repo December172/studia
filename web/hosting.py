@@ -22,7 +22,7 @@ from urllib.parse import urlencode, urlsplit
 from Crypto.Cipher import AES
 
 from NewMoocMain.oauth_login import SSO_AUTH_URL, SSO_SOURCE
-from ZHSMain.memory import SHARED as SHARED_ANSWERS, DatabaseAnswerMemory
+from ZHSMain.memory import DatabaseAnswerMemory
 from ai.memory import MoocDatabaseAnswerMemory
 from settings import SettingsError, SettingsStore
 from web.accounts import AccountError, Accounts, Sessions, Throttle
@@ -116,7 +116,7 @@ class Hub:
         self.sessions = Sessions(self.accounts)
         # Answers the platform has judged, shared by every user: one user's graded paper
         # spares everyone else the AI call (and the wrong answer) next time.
-        self.memory = DatabaseAnswerMemory(self.accounts.path, shared=SHARED_ANSWERS)
+        self.memory = DatabaseAnswerMemory(self.accounts.path)
         # MOOC answers are only shared within the same course offering and paper (ai.memory).
         self.mooc_memory = MoocDatabaseAnswerMemory(self.accounts.path)
         for legacy in sorted((self.data / "users").glob("*/zhs-answers.json")):

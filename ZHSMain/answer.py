@@ -16,6 +16,7 @@ from MoocMain.log import Logger
 from reporting import Reporter, child_thread_name
 from task_metrics import nonnegative_number
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit
+from ZHSMain.memory import Scoped
 
 logger = Logger(__name__).get_log()
 
@@ -299,6 +300,8 @@ class ZHSAnswerRunner:
         self.client = client
         self.ai_client = ai_client
         self.auto_submit = auto_submit
+        # The whole memory; run_paper() narrows self.memory to the paper's course.
+        self.all_memory = memory
         self.memory = memory
         self.reused = 0
         self.reporter = Reporter(on_progress)
@@ -319,6 +322,9 @@ class ZHSAnswerRunner:
         cz = course.get("zhs") or {}
         name = item.get("name") or "未命名试卷"
         kind = z.get("kind")
+        # Answers are shared between the papers of one course, never across courses.
+        self.memory = None if self.all_memory is None else Scoped(
+            self.all_memory, "%s/%s" % (cz.get("kind"), cz.get("courseId") or cz.get("secret")))
         try:
             if kind == "ai_homework":
                 return self._homework(z, cz, name)

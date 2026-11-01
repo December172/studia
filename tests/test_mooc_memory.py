@@ -50,16 +50,15 @@ class LearnAndReuseTests(unittest.TestCase):
         self.api = Mock(user_id="user")
         self.api.request.return_value = {"code": 200, "data": {"questions": [info_question()]}}
 
-    def test_learned_answers_stay_inside_their_course_and_paper(self):
+    def test_learned_answers_are_shared_by_the_papers_of_one_course_only(self):
         memory = MoocAnswerMemory(self.dir / "mooc-answers.json")
         self.assertEqual(learn(self.api, memory, COURSE, "exam", "t1"), 1)
         params = self.api.request.call_args.kwargs["params"]
         self.assertEqual((params["taskId"], params["examId"], params["courseInfoId"]), ("t1", "exam", "ci"))
         q = prepare_question(paper_question(), 1)
         reloaded = MoocAnswerMemory(self.dir / "mooc-answers.json")
-        self.assertEqual(reloaded.lookup(dict(q, scope="ci/exam"))["correct"], ["钢琴"])
-        self.assertIsNone(reloaded.lookup(dict(q, scope="ci/other-exam"))["correct"])
-        self.assertIsNone(reloaded.lookup(dict(q, scope="other-course/exam"))["correct"])
+        self.assertEqual(reloaded.lookup(dict(q, scope="ci"))["correct"], ["钢琴"])   # any paper of the course
+        self.assertIsNone(reloaded.lookup(dict(q, scope="other-course"))["correct"])
 
     def test_redo_uses_answers_revealed_by_the_last_attempt_without_asking_ai(self):
         self.api.records.return_value = [{"id": "t1", "status": 2}]
