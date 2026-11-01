@@ -4,31 +4,37 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Studia</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231a6fd6'/%3E%3Cpath d='m9 16.5 4.5 4.5L23 11' fill='none' stroke='%23fff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='3' width='26' height='26' rx='6' fill='%23bf3f29' transform='rotate(-4 16 16)'/%3E%3Ctext x='16' y='22.5' font-family='Palatino,Georgia,serif' font-style='italic' font-weight='600' font-size='18' text-anchor='middle' fill='%23fff'%3ES%3C/text%3E%3C/svg%3E">
+  <script src="theme.js"></script>
   <link rel="stylesheet" href="studia.css">
 </head>
 <body>
   <div class="app">
-    <aside class="sidebar" aria-label="导航">
-      <div class="sidebar_scroll">
+    <aside class="side" aria-label="导航">
+      <div class="side_top">
+        <div class="brand"><span class="seal">S</span><b>Studia</b><span class="grow"></span>
+          <button class="icon_btn" data-find title="查找 ⌘K" aria-label="查找"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5"/></svg></button></div>
         <div class="switcher_wrap"></div>
-        <nav class="sidebar_nav"></nav>
       </div>
-      <div class="sidebar_foot"></div>
+      <nav class="nav"></nav>
+      <div class="side_foot"></div>
     </aside>
     <main class="main">
-      <div class="main_scroll"><div class="page"></div></div>
-      <div class="toolbar" hidden></div>
-      <div class="jobbar" hidden></div>
+      <div class="scroll"><div class="page"></div></div>
+      <div class="player" hidden></div>
+      <section class="sheet" aria-label="专注视图">
+        <div class="sheet_bar"><span class="sheet_tag"></span><span class="grow"></span>
+          <button class="btn danger" data-stop>停止 <span class="kbd">⇧S</span></button>
+          <button class="btn" data-close>收起 <span class="kbd">Esc</span></button></div>
+        <div class="sheet_body"></div>
+      </section>
     </main>
   </div>
 
-  <div class="overlay" data-overlay>
-    <div class="finder" role="dialog" aria-label="快速查找">
-      <div class="finder_input"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5"/></svg><input placeholder="查找课程、试卷或页面" autocomplete="off"></div>
-      <div class="finder_list"></div>
-    </div>
+  <div class="palette_wrap" data-overlay>
+    <div class="palette" role="dialog" aria-label="快速查找"><input placeholder="查找课程、试卷或页面…" autocomplete="off"><div class="rows"></div></div>
   </div>
+  <div class="tip" aria-hidden="true"></div>
   <div class="toast" role="status" aria-live="polite"></div>
 
   <script type="module" src="studia.js"></script>

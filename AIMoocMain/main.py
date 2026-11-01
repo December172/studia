@@ -14,6 +14,29 @@ from AIMoocMain.api import AIMoocApi
 from AIMoocMain.activities import CourseActivities
 from base.util import parse_duration, get_mp3_duration
 
+# 作业、考试、测验在答题里做；子节点和文件夹无法展开。
+SKIPPED_TYPES = ("作业", "考试", "测验", "子节点", "文件夹")
+
+
+def course_units(client, course):
+    """Chapters with their leaf resources and how far each one is, without studying."""
+    info_id, course_id = course.get("id"), course.get("courseId")
+    done = set(client.study_record_list(info_id, course_id) or ())
+
+    def leaves(nodes):
+        for node in nodes:
+            yield from leaves(node["children"]) if node.get("children") else (node,)
+
+    chapters = []
+    for chapter in client.study_design_list(info_id, course_id) or []:
+        cells = client.get_cell_list(info_id, course_id, chapter.get("id")) or []
+        chapters.append({"name": chapter.get("name") or "未命名章节", "units": [{
+            "id": str(node.get("id")), "name": node.get("name") or "资源", "kind": node.get("fileType") or "",
+            "state": "done" if node.get("id") in done else
+                     "skipped" if node.get("fileType") in SKIPPED_TYPES else "queued",
+        } for node in leaves(cells)]})
+    return chapters
+
 
 class AIMoocHandler:
     def __init__(self, jump_content: str = "", token: str = None, username: str = None, password: str = None, *, client=None, course_rows=None, on_progress=None, max_workers=1, cancel_event=None, activity_ai=None):
@@ -164,29 +187,8 @@ class AIMoocHandler:
 
         self.logging.info(f"{prefix}  资源: {resource_name} | 类型: {file_type}")
 
-        # 跳过作业
-        if file_type == "作业":
-            self.logging.info(f"{prefix}  跳过作业")
-            return "skipped"
-
-        # 跳过考试
-        if file_type == "考试":
-            self.logging.info(f"{prefix}  跳过考试")
-            return "skipped"
-
-        # 跳过测验
-        if file_type == "测验":
-            self.logging.info(f"{prefix}  跳过测验")
-            return "skipped"
-
-        # 跳过子节点
-        if file_type == "子节点":
-            self.logging.info(f"{prefix}  跳过无法展开的子节点")
-            return "skipped"
-
-        # 跳过文件夹
-        if file_type == "文件夹":
-            self.logging.info(f"{prefix}  跳过文件夹")
+        if file_type in SKIPPED_TYPES:
+            self.logging.info(f"{prefix}  跳过{file_type}")
             return "skipped"
 
         # 已完成的课程不再处理

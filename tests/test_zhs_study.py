@@ -6,7 +6,7 @@ from unittest.mock import patch
 from base.auth import AuthenticationExpired
 from reporting import ProgressEvent
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApiError
-from ZHSMain.main import ZHSHandler
+from ZHSMain.main import ZHSHandler, course_units
 
 EV_KEY = "zzpttjd"
 
@@ -195,6 +195,8 @@ class SharedStudyTest(unittest.TestCase):
         fields = decode_ev(last["sdsew"]).split(";")
         self.assertEqual(fields, ["5", "101", "11", "777", "7", "0", "10", "10",
                                   "0:00:10", "U-1zhs"])
+        units = [(event.key, event.status) for event in events if event.kind == "unit"]
+        self.assertEqual(units, [("101-11", "running"), ("101-11", "done")])
         names = client.names()
         cache_index = max(i for i, name in enumerate(names) if name == "shared_save_cache")
         last_progress = max(i for i, name in enumerate(names) if name == "shared_save_progress")
@@ -292,7 +294,7 @@ class StopTest(unittest.TestCase):
         run(client, [shared_row("A", "a"), shared_row("B", "b")], events)
         self.assertEqual(client.args_of("shared_gologin"), [{"secret": "a"}])
         results = [(event.name, event.status) for event in events if event.kind == "result"]
-        self.assertEqual(results, [("A", "error")])
+        self.assertEqual(results, [("A", "waiting")])
 
     def test_captcha_at_precheck_stops_later_courses(self):
         client = FakeClient()
@@ -301,7 +303,7 @@ class StopTest(unittest.TestCase):
         events = []
         run(client, [shared_row("A", "a"), shared_row("B", "b")], events)
         self.assertEqual(len(client.args_of("shared_gologin")), 1)
-        self.assertEqual(events[-1].status, "error")
+        self.assertEqual(events[-1].status, "waiting")
 
     def test_authentication_expired_propagates(self):
         client = FakeClient()
@@ -394,6 +396,15 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(fields[6], "20")
         self.assertEqual(fields[7], "20")
         self.assertEqual(last["zwsds"], "MTAx")
+
+    def test_course_units_groups_videos_by_chapter(self):
+        client = FakeClient()
+        client.videos = two_video_course()
+        client.lesson = {"100": {"watchState": 1, "studyTotalTime": 30}}
+        self.assertEqual(course_units(client, shared_row()), [{"name": "第一章", "units": [
+            {"id": "100-0", "name": "已完成", "kind": "video", "minutes": 0, "state": "done"},
+            {"id": "101-11", "name": "待学-1", "kind": "video", "minutes": 0, "state": "queued"},
+        ]}])
 
 
 class AiStudyTest(unittest.TestCase):

@@ -87,6 +87,8 @@ def run_resources(handler, resources, course_name='课程'):
         handler._course_failed |= status == 'error'
         handler._course_processed |= status == 'success'
         name = node.get('name', '资源')
+        done = status == 'success' or node.get('id') in getattr(handler, 'study_record_list', ())
+        handler.progress.unit(node.get('id'), name, 'done' if done else 'failed' if status == 'error' else status)
         summary = f"成功 {counts['success']} · 跳过 {counts['skipped']} · 失败 {counts['error']}"
         handler.progress.resources(f'{course_name} · {name} · {summary}', completed, total)
 
@@ -95,6 +97,7 @@ def run_resources(handler, resources, course_name='课程'):
             if handler.cancel_event.is_set():
                 handler._course_failed = True
                 break
+            handler.progress.unit(args[0].get('id'), args[0].get('name', '资源'), 'running')
             try:
                 status = handler.handle_resource(*args)
             except BaseException as error:
@@ -138,6 +141,7 @@ def run_resources(handler, resources, course_name='课程'):
                     _close_worker_client(handler, client)
                     raise
                 pending[future] = (args[0], client)
+                handler.progress.unit(args[0].get('id'), args[0].get('name', '资源'), 'running')
             if not pending:
                 break
             done, _ = wait(pending, return_when=FIRST_COMPLETED)

@@ -3,10 +3,10 @@ const listeners = new Set();
 const emit = (event) => listeners.forEach((listener) => listener(event));
 const platforms = [
   { id: "mooc", name: "MOOC", short: "MOOC", login: "browser", logged_in: true, features: { answer: true, review: false } },
-  { id: "zhs", name: "智慧树", short: "智慧树", login: "qr", logged_in: false, features: { answer: true, review: true } },
+  { id: "zhs", name: "智慧树", short: "智慧树", login: "qr", logged_in: true, features: { answer: true, review: true } },
 ];
 const courses = {
-  mooc: [{ id: "m1", platform: "mooc", name: "大学英语（二）", type: "MOOC", kind: "mooc", progress: 62 }],
+  mooc: [{ id: "m1", platform: "mooc", name: "大学英语（二）", type: "第 7 期开课", kind: "mooc", progress: 62 }, { id: "m2", platform: "mooc", name: "中外音乐与民族技艺实践", type: "第 3 期开课", kind: "mooc", progress: 100 }],
   zyk: [{ id: "z1", platform: "zyk", name: "Python 程序设计", type: "资源库", kind: "zyk", progress: 35 }],
   zhs: [
     { id: "shared-1", platform: "zhs", name: "新一代信息技术导论", type: "共享课", kind: "shared", progress: 100 },
@@ -27,41 +27,82 @@ const models = [
   { id: "p2", provider: "DeepSeek 官方", model: "deepseek-v4.1-flash", base_url: "https://api.deepseek.com/v1", key_hint: "sk-…77c1", active: false, health: "error", health_message: "401 鉴权失败", deletable: true },
 ];
 const history = [
-  { id: "h1", title: "自动学习", course: "z1", course_name: "Python 程序设计", platform: "zyk", state: "done", summary: "学习完成",
-    started: Date.now() / 1000 - 7200, ended: Date.now() / 1000 - 5400, lines: [{ text: "第 3 章 · 完成", done: true, time: "08:12" }] },
+  { id: "h3", title: "AI 答题", course: "shared-1", course_name: "新一代信息技术导论", platform: "zhs", state: "waiting", summary: "智慧树要求先完成滑块验证",
+    started: Date.now() / 1000 - 900, ended: Date.now() / 1000 - 840, lines: [{ text: "第三章单元测试 · 等你操作", level: "warn", done: true, time: "14:20" }] },
+  { id: "h2", title: "AI 答题", course: "m1", course_name: "大学英语（二）", platform: "mooc", state: "error", summary: "第 4 题：AI 返回的答案格式不符",
+    started: Date.now() / 1000 - 4000, ended: Date.now() / 1000 - 3815, lines: [{ text: "第四单元测验 · 出错", level: "error", done: true, time: "13:40" }] },
+  { id: "h1", title: "自动学习", course: "m1", course_name: "大学英语（二）", platform: "mooc", state: "done", summary: "学习完成",
+    started: Date.now() / 1000 - 9000, ended: Date.now() / 1000 - 2900, lines: [{ text: "第 3 章 · 完成", done: true, time: "08:12" }] },
 ];
+
+// Course grid: chapters of units; the first `done` units are already finished.
+function chapters(spec, done) {
+  let n = 0;
+  return spec.map(([name, count], ci) => ({ name, units: Array.from({ length: count }, (_, ui) => {
+    n += 1;
+    const kind = ["video", "video", "ppt", "video", "doc", "作业"][(ui + ci) % 6];
+    return { id: `u${ci}-${ui}`, name: `${ci + 1}.${ui + 1} ${{ video: "课文精讲", ppt: "课件", doc: "阅读材料", 作业: "单元作业" }[kind]}`, kind,
+      minutes: kind === "video" ? 6 + ((ui * 5 + ci * 11) % 14) : 0, state: kind === "作业" ? "skipped" : n <= done ? "done" : "queued" };
+  }) }));
+}
+const units = {
+  m1: chapters([["第 1 章 自我介绍", 7], ["第 2 章 校园生活", 8], ["第 3 章 职场沟通", 9], ["第 4 章 产品说明", 8], ["第 5 章 安全规范", 7]], 22),
+  "shared-1": chapters([["第一章 信息技术概述", 6], ["第二章 云计算", 6], ["第三章 人工智能", 7]], 99),
+  "ai-1": chapters([["信道与编码", 5], ["网络体系结构", 6]], 7),
+};
 
 function fakeJob(body) {
   const course = courses[body.platform].find((c) => c.id === body.course);
   const title = { study: "自动学习", review: "每日复习", answer: "AI 答题" }[body.type];
-  const steps = body.type === "answer" ? ["第三章单元测试", "第五章单元测试"] : ["信道的基本概念", "数据通信方式", "传输介质"];
   job = { type: "job", id: "j" + Date.now(), title, course: body.course, course_name: course.name, platform: body.platform,
     state: "running", summary: "", started: Date.now() / 1000, ended: null, lines: [] };
   emit(job);
-  emit({ type: "progress", kind: "begin", name: title, total: steps.length, unit: "项" });
-  let i = 0;
-  const timer = setInterval(() => {
+  const finish = (state, summary) => {
+    if (!job) return;
+    const finished = Object.assign({}, job, { state, summary, ended: Date.now() / 1000 });
+    job = null;
+    history.unshift(finished);
+    emit(finished);
+  };
+  if (body.type === "answer") {
+    const steps = (body.tasks || []).map((id) => tasks.find((t) => t.id === id)?.name || "试卷");
+    emit({ type: "progress", kind: "begin", name: title, total: steps.length, unit: "份试卷" });
+    steps.forEach((step, i) => setTimeout(() => {
+      if (!job) return;
+      emit({ type: "progress", kind: "detail", name: step });
+      emit({ type: "progress", kind: "questions", name: step, completed: 10, total: 10, unit: "题" });
+      emit({ type: "progress", kind: "result", name: step, status: body.auto_submit ? "submitted" : "preview" });
+      if (i === steps.length - 1) setTimeout(() => finish("done", `处理完成 ${steps.length}/${steps.length} 份试卷`), 800);
+    }, 1500 * (i + 1)));
+    return;
+  }
+  const todo = units[body.course].flatMap((ch) => ch.units).filter((u) => u.state === "queued" || u.state === "failed");
+  const total = units[body.course].flatMap((ch) => ch.units).length;
+  emit({ type: "progress", kind: "begin", name: title, total: 1, unit: "门课程" });
+  let i = 0, ticks = 0;
+  const step = () => {
     if (!job) { clearInterval(timer); return; }
-    const step = steps[i];
-    emit({ type: "progress", kind: "detail", name: `${course.name} · ${step}` });
-    emit({ type: "log", text: `开始：${step}` });
-    let done = 0;
-    const inner = setInterval(() => {
-      done += 1;
-      emit({ type: "progress", kind: "resources", name: step, completed: done, total: 6, unit: "项资源" });
-      if (done === 6) { clearInterval(inner); emit({ type: "progress", kind: "result", name: step, status: "success" }); }
-    }, 280);
-    i += 1;
-    if (i === steps.length) {
-      clearInterval(timer);
-      setTimeout(() => {
-        const finished = Object.assign({}, job, { state: "done", summary: `${title}完成`, ended: Date.now() / 1000 });
-        job = null;
-        history.unshift(finished);
-        emit(finished);
-      }, 2200);
+    const u = todo[i];
+    if (!u) { clearInterval(timer); emit({ type: "progress", kind: "result", name: course.name, status: "success" }); finish("done", "学习完成"); return; }
+    if (ticks === 0) {
+      u.state = "running";
+      emit({ type: "progress", kind: "unit", key: u.id, name: u.name, status: "running" });
+      emit({ type: "log", text: `开始：${u.name}`, level: "" });
     }
-  }, 2000);
+    ticks += 1;
+    const length = u.minutes ? 4 : 1;
+    emit({ type: "progress", kind: "detail", name: `${course.name} · ${u.name} · ${ticks}/${length}` });
+    if (ticks >= length) {
+      u.state = Math.random() < 0.08 ? "failed" : "done";
+      emit({ type: "progress", kind: "unit", key: u.id, name: u.name, status: u.state });
+      emit({ type: "log", text: u.state === "done" ? `已完成：${u.name}` : `${u.name}：上报失败`, level: u.state === "done" ? "" : "error" });
+      if (Math.random() < 0.12) emit({ type: "log", text: "讨论区发帖频率限制，等待 60 秒", level: "warn" });
+      i += 1; ticks = 0;
+      const doneCount = total - todo.length + i;
+      emit({ type: "progress", kind: "resources", name: `${course.name} · ${u.name}`, completed: doneCount, total, unit: "项资源" });
+    }
+  };
+  const timer = setInterval(step, 700);
 }
 
 export function subscribe(listener) { listeners.add(listener); }
@@ -86,8 +127,10 @@ export async function request(path, method, body) {
   if ((m = path.match(/^\/api\/platforms\/(\w+)\/logout$/))) { platforms.find((x) => x.id === m[1]).logged_in = false; return {}; }
   if ((m = path.match(/^\/api\/platforms\/(\w+)\/courses$/))) return { courses: courses[m[1]] };
   if (path.match(/^\/api\/platforms\/(\w+)\/tasks/)) return { tasks };
+  if ((m = path.match(/^\/api\/platforms\/\w+\/units\?course=(.+)$/))) return { chapters: units[decodeURIComponent(m[1])] || [] };
   if (path === "/api/jobs" && method === "POST") { fakeJob(body); return { ok: true }; }
   if (path === "/api/jobs/stop") {
+    Object.values(units).forEach((list) => list.forEach((ch) => ch.units.forEach((u) => { if (u.state === "running") u.state = "queued"; })));
     const stopped = Object.assign({}, job, { state: "stopped", summary: "已停止", ended: Date.now() / 1000 });
     job = null; history.unshift(stopped); emit(stopped); return {};
   }

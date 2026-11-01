@@ -191,3 +191,21 @@ class StudyProgressTests(unittest.TestCase):
         self.assertIs(raised.exception, failure)
         self.assertEqual(events[-1].completed, 2)
         self.assertCountEqual(transport.closed, transport.clones)
+
+
+class CourseUnitsTests(unittest.TestCase):
+    def test_units_follow_chapters_with_done_and_skipped_states(self):
+        from types import SimpleNamespace
+        from AIMoocMain.main import course_units
+        client = SimpleNamespace(
+            study_record_list=lambda info, course: ['v1'],
+            study_design_list=lambda info, course: [{'id': 'c1', 'name': '第一章'}],
+            get_cell_list=lambda info, course, parent: [
+                {'id': 'v1', 'name': '视频', 'fileType': 'video'},
+                {'id': 'f', 'name': '小节', 'children': [
+                    {'id': 'w', 'name': '作业一', 'fileType': '作业'},
+                    {'id': 'p', 'name': '课件', 'fileType': 'ppt'}]}])
+        chapters = course_units(client, {'id': 'i', 'courseId': 'c'})
+        self.assertEqual([c['name'] for c in chapters], ['第一章'])
+        self.assertEqual([(u['id'], u['state']) for u in chapters[0]['units']],
+                         [('v1', 'done'), ('w', 'skipped'), ('p', 'queued')])

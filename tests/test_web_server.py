@@ -86,6 +86,24 @@ class WebServerTest(unittest.TestCase):
         self.assertEqual((history[0]["platform"], history[0]["course_name"]), ("zhs", "网络课"))
         self.assertEqual(history[0]["lines"][0]["text"], "第一节完成")
 
+    def test_captcha_leaves_the_job_waiting_for_the_user(self):
+        from ZHSMain.api import CaptchaRequired
+        platform = self.app.platforms["zhs"]
+        platform.rows = [{"courseName": "网络课", "zhs": {"kind": "ai", "courseId": "c1"}}]
+        platform.client = Mock()
+        platform.spec = dict(platform.spec, handler=lambda **kwargs: Mock(blocked=CaptchaRequired("请先完成滑块验证")),
+                             units=lambda client, row: [{"name": "第一章", "units": []}])
+        status, body = self.request("GET", "/api/platforms/zhs/units?course=ai-c1")
+        self.assertEqual((status, json.loads(body)["chapters"][0]["name"]), (200, "第一章"))
+        self.assertEqual(self.request("GET", "/api/platforms/zyk/units?course=x")[0], 404)
+        self.assertEqual(self.request("POST", "/api/jobs", body={"platform": "zhs", "type": "study", "course": "ai-c1"})[0], 200)
+        for _ in range(50):
+            if self.app.job is None:
+                break
+            time.sleep(0.02)
+        job = json.loads(self.request("GET", "/api/jobs")[1])["history"][0]
+        self.assertEqual((job["state"], job["summary"]), ("waiting", "请先完成滑块验证"))
+
     def test_model_test_records_health_and_default_model_cannot_be_deleted(self):
         from ai.client import AIConfig
         store = self.app.store

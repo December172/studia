@@ -31,6 +31,79 @@ def _nonneg_int(value):
     return 0
 
 
+def _video_key(video):
+    return "%s-%s" % (video["lessonId"], video["id"])
+
+
+def _resource_key(item):
+    detail = item.get("resourcesDetail") or {}
+    return str(detail.get("resourcesUid") or detail.get("resourcesFileId") or item.get("resourcesUid") or "")
+
+
+def ai_groups(client, row):
+    """Knowledge points of an AI course, each with its learning resources."""
+    course_id, class_id = row["zhs"]["courseId"], row["zhs"]["classId"]
+    basic = client.ai_course_basic(course_id, class_id) or {}
+    points = [point for theme in basic.get("cakeThemeList") or [] for point in theme.get("knowledgeList") or []]
+    return [(point, client.ai_resources(course_id, class_id, point["knowledgeId"]) or []) for point in points]
+
+
+def shared_context(client, row, log):
+    """Log into a shared course and read its videos with their watch states."""
+    course = row.get("courseName") or "未知课程"
+    z = row["zhs"]
+    secret = z["secret"]
+    client.shared_gologin(secret)
+    info = client.shared_course(secret) or {}
+    recruit_id = info["recruitId"]
+    report_course_id = (info.get("courseInfo") or {}).get("courseId")
+    data = client.shared_videos(secret) or {}
+    cc_course_id = data["courseId"]
+    videos = ZHSHandler._shared_videos(data)
+    if not videos:
+        log.warning("%s：没有可学习的视频", course)
+        return None
+
+    lesson_ids = [video["lessonId"] for video in videos]
+    video_ids = [video["id"] for video in videos if video["id"]]
+    states = client.shared_study_info(lesson_ids, video_ids, recruit_id) or {}
+    client.shared_last_video(recruit_id)
+
+    for video in videos:
+        watch, played = ZHSHandler._shared_state(states, video)
+        video["watchState"] = watch
+        video["studyTotalTime"] = played
+    ctx = {
+        "course": course,
+        "recruit_id": recruit_id,
+        "cc_course_id": cc_course_id,
+        "report_course_id": report_course_id,
+    }
+    return ctx, videos, lesson_ids, video_ids
+
+
+def course_units(client, row):
+    """Chapters with their videos/resources and how far each one is, without studying."""
+    kind = (row.get("zhs") or {}).get("kind")
+    if kind == "ai":
+        return [{"name": point.get("knowledgeName") or point.get("name") or "知识点", "units": [{
+            "id": _resource_key(item),
+            "name": (item.get("resourcesDetail") or {}).get("resourcesName") or item.get("resourcesName") or "资源",
+            "kind": "video" if ZHSHandler._is_video(item.get("resourcesDetail") or {}, item) else "doc",
+            "state": "done" if _to_int(item.get("studyStatus")) == 1 else "queued",
+        } for item in items]} for point, items in ai_groups(client, row)]
+    if kind != "shared":
+        return []
+    prepared = shared_context(client, row, Logger(__name__).get_log())
+    chapters = {}
+    for video in prepared[1] if prepared else ():
+        chapters.setdefault(video["chapter"], []).append({
+            "id": _video_key(video), "name": video["name"], "kind": "video", "minutes": round(_nonneg_int(video["videoSec"]) / 60),
+            "state": "done" if video["watchState"] == 1 else "queued",
+        })
+    return [{"name": name, "units": units} for name, units in chapters.items()]
+
+
 class ZHSHandler:
     def __init__(self, *, client, course_rows, on_progress=None, max_workers=1,
                  cancel_event=None, sleep=time.sleep, rng=None, review_minutes=0):
@@ -45,6 +118,8 @@ class ZHSHandler:
         self.sleep = sleep
         self.rng = rng or random.Random()
         self.log = Logger(__name__).get_log()
+        # A captcha or study-time limit that stopped the run; only a person can clear it.
+        self.blocked = None
         self.start_courses()
 
     def start_courses(self):
@@ -70,7 +145,8 @@ class ZHSHandler:
                     status = "skipped"
             except (CaptchaRequired, StudyTimeLimit) as error:
                 self.log.warning("%s：%s；后续课程未执行", name, error)
-                self.progress.result(name, "error")
+                self.progress.result(name, "waiting")
+                self.blocked = error
                 break
             except (AuthenticationExpired, KeyboardInterrupt):
                 raise
@@ -83,7 +159,7 @@ class ZHSHandler:
     # ---------------------------------------------------------------- 共享课
 
     def study_shared(self, row):
-        prepared = self._shared_context(row)
+        prepared = shared_context(self.client, row, self.log)
         if prepared is None:
             return "skipped"
         ctx, videos, lesson_ids, video_ids = prepared
@@ -97,16 +173,20 @@ class ZHSHandler:
             if self.cancel_event.is_set():
                 raise KeyboardInterrupt
             name = video["name"]
+            key = _video_key(video)
             if video["watchState"] == 1:
                 skipped += 1
             else:
+                self.progress.unit(key, name, "running")
                 try:
                     self.play_shared(ctx, video)
                     success += 1
+                    self.progress.unit(key, name, "done")
                 except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
                     raise
                 except Exception as error:
                     failed += 1
+                    self.progress.unit(key, name, "failed")
                     self.log.error("%s · %s：学习失败：%s", course, name, error)
             completed = success + skipped + failed
             self.progress.resources(
@@ -121,7 +201,7 @@ class ZHSHandler:
 
     def review_shared(self, row):
         """Rewatch finished videos in real time until the daily review budget is spent."""
-        prepared = self._shared_context(row)
+        prepared = shared_context(self.client, row, self.log)
         if prepared is None:
             return "skipped"
         ctx, videos, _, _ = prepared
@@ -159,38 +239,6 @@ class ZHSHandler:
         self.log.info("%s：今日复习 %d 分钟", course, reviewed // 60)
         return "success" if reviewed >= budget else "error"
 
-    def _shared_context(self, row):
-        course = row.get("courseName") or "未知课程"
-        z = row["zhs"]
-        secret = z["secret"]
-        self.client.shared_gologin(secret)
-        info = self.client.shared_course(secret) or {}
-        recruit_id = info["recruitId"]
-        report_course_id = (info.get("courseInfo") or {}).get("courseId")
-        data = self.client.shared_videos(secret) or {}
-        cc_course_id = data["courseId"]
-        videos = self._shared_videos(data)
-        if not videos:
-            self.log.warning("%s：没有可学习的视频", course)
-            return None
-
-        lesson_ids = [video["lessonId"] for video in videos]
-        video_ids = [video["id"] for video in videos if video["id"]]
-        states = self.client.shared_study_info(lesson_ids, video_ids, recruit_id) or {}
-        self.client.shared_last_video(recruit_id)
-
-        for video in videos:
-            watch, played = self._shared_state(states, video)
-            video["watchState"] = watch
-            video["studyTotalTime"] = played
-        ctx = {
-            "course": course,
-            "recruit_id": recruit_id,
-            "cc_course_id": cc_course_id,
-            "report_course_id": report_course_id,
-        }
-        return ctx, videos, lesson_ids, video_ids
-
     @staticmethod
     def _shared_videos(data):
         videos = []
@@ -204,6 +252,7 @@ class ZHSHandler:
                         "name": lesson.get("name") or "未命名视频",
                         "lessonId": lesson.get("id"),
                         "chapterId": chapter.get("id"),
+                        "chapter": chapter.get("name") or "未命名章节",
                         "videoSec": lesson.get("videoSec"),
                     })
                     continue
@@ -214,6 +263,7 @@ class ZHSHandler:
                         "name": small.get("name") or lesson.get("name") or "未命名视频",
                         "lessonId": small.get("lessonId") or lesson.get("id"),
                         "chapterId": chapter.get("id"),
+                        "chapter": chapter.get("name") or "未命名章节",
                         "videoSec": small.get("videoSec"),
                     })
         return videos
@@ -451,20 +501,9 @@ class ZHSHandler:
 
     def study_ai(self, row):
         course = row.get("courseName") or "未知课程"
-        z = row["zhs"]
-        course_id = z["courseId"]
-        class_id = z["classId"]
-        basic = self.client.ai_course_basic(course_id, class_id) or {}
-        knowledge_points = []
-        for theme in basic.get("cakeThemeList") or []:
-            knowledge_points.extend(theme.get("knowledgeList") or [])
-
-        groups = []
-        total = 0
-        for point in knowledge_points:
-            items = self.client.ai_resources(course_id, class_id, point["knowledgeId"]) or []
-            groups.append((point, items))
-            total += len(items)
+        course_id, class_id = row["zhs"]["courseId"], row["zhs"]["classId"]
+        groups = ai_groups(self.client, row)
+        total = sum(len(items) for _, items in groups)
         if total == 0:
             self.log.warning("%s：没有可学习的资源", course)
             return "skipped"
@@ -483,9 +522,11 @@ class ZHSHandler:
             detail = item.get("resourcesDetail") or {}
             name = detail.get("resourcesName") or item.get("resourcesName") or "资源"
             self.progress.detail(f"{course} · {name}")
+            key = _resource_key(item)
             if _to_int(item.get("studyStatus")) == 1:
                 skipped += 1
             else:
+                self.progress.unit(key, name, "running")
                 self.sleep(self.rng.uniform(0.2, 2))
                 try:
                     if self._is_video(detail, item):
@@ -501,10 +542,12 @@ class ZHSHandler:
                         )
                         self.log.info("%s · 已完成：%s", course, name)
                     success += 1
+                    self.progress.unit(key, name, "done")
                 except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
                     raise
                 except Exception as error:
                     failed += 1
+                    self.progress.unit(key, name, "failed")
                     self.log.error("%s · %s：学习失败：%s", course, name, error)
             completed = success + skipped + failed
             self.progress.resources(

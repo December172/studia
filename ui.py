@@ -234,8 +234,8 @@ class TerminalUI:
                 label = {"success": "成功", "submitted": "已交卷", "preview": "答案已生成 · 未交卷",
                          "skipped": "跳过", "needs_review": "答案未完成", "paused": "待补答",
                          "submission_unknown": "交卷结果未知",
-                         "submitting": "交卷结果未知", "error": "失败", "ai_error": "AI 服务失败", "cancelled": "中断"}.get(event.status, event.status)
-                level = "success" if event.status in ("success", "submitted", "preview") else "warning" if event.status == "skipped" else "error"
+                         "submitting": "交卷结果未知", "waiting": "等你操作", "error": "失败", "ai_error": "AI 服务失败", "cancelled": "中断"}.get(event.status, event.status)
+                level = "success" if event.status in ("success", "submitted", "preview") else "warning" if event.status in ("skipped", "waiting") else "error"
                 self.log(f"{event.name} · {label}", level)
 
     def render(self):

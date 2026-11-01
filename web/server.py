@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from AIMoocMain.api import AIMoocApi
 from AIMoocMain.exam_api import ExamAPI, ExamError, ExamServiceError, TaskUnavailableError
 from AIMoocMain.export_questions import paper_display_name, paper_exam_id
-from AIMoocMain.main import AIMoocHandler
+from AIMoocMain.main import AIMoocHandler, course_units as mooc_units
 from ai.client import AIClient, AIConfig, AIError
 from ai.runner import AnswerRunner
 from base.concurrency import INTERACTIVE_WORKERS
@@ -33,7 +33,7 @@ from task_capabilities import task_availability, task_type_label
 from task_metrics import score_text
 from ZHSMain.answer import ZHSAnswerRunner, catalog
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi, ZHSError
-from ZHSMain.main import ZHSHandler
+from ZHSMain.main import ZHSHandler, course_units as zhs_units
 from ZHSMain.memory import SHARED as SHARED_ANSWERS, AnswerMemory
 from ZYKMoocMain.api import ZYKMoocApi
 from ZYKMoocMain.main import ZYKMoocHandler
@@ -48,11 +48,11 @@ logger = logging.getLogger(__name__)
 # Order is the sidebar order. "answer"/"review" mark what the web UI can run today.
 PLATFORMS = {
     "mooc": {"name": "MOOC", "short": "MOOC", "login": "browser", "api": AIMoocApi,
-             "handler": AIMoocHandler, "answer": True, "review": False, "needs_ai": True},
+             "handler": AIMoocHandler, "units": mooc_units, "answer": True, "review": False, "needs_ai": True},
     "zyk": {"name": "资源库", "short": "资源库", "login": "browser", "api": ZYKMoocApi,
-            "handler": ZYKMoocHandler, "answer": False, "review": False, "needs_ai": False, "hidden": True},
+            "handler": ZYKMoocHandler, "units": None, "answer": False, "review": False, "needs_ai": False, "hidden": True},
     "zhs": {"name": "智慧树", "short": "智慧树", "login": "qr", "api": ZHSApi,
-            "handler": ZHSHandler, "answer": True, "review": True, "needs_ai": False},
+            "handler": ZHSHandler, "units": zhs_units, "answer": True, "review": True, "needs_ai": False},
 }
 
 
@@ -321,6 +321,19 @@ class Studia:
             platform.entries[course_id] = listed
         return {"tasks": result}
 
+    def units(self, pid, course_id):
+        """Every learning unit of one course by chapter, for the course grid."""
+        platform = self.platform(pid)
+        if platform.spec["units"] is None:
+            raise HttpError(400, "%s 暂不支持查看学习单元" % platform.spec["name"])
+        row = self.find_row(platform, course_id)
+        try:
+            return {"chapters": platform.spec["units"](self.client(platform), row)}
+        except AuthenticationExpired:
+            raise self.expire(platform)
+        except CaptchaRequired as exc:
+            raise HttpError(409, str(exc))
+
     # ------------------------------------------------------------ jobs
 
     def start_job(self, body):
@@ -388,9 +401,12 @@ class Studia:
                 state, summary = "stopped", "已停止"
         except KeyboardInterrupt:
             state, summary = "stopped", "已停止"
+        except (CaptchaRequired, StudyTimeLimit) as exc:
+            # Only the user can clear these: solve the captcha on the platform, or come back tomorrow.
+            state, summary = "waiting", str(exc) or "平台要求验证"
         except AuthenticationExpired:
             self.expire(platform)
-            state, summary = "error", "%s 登录已过期，请重新登录" % platform.spec["name"]
+            state, summary = "waiting", "%s 登录已过期，请重新登录" % platform.spec["name"]
         except Exception as exc:
             logger.exception("网页任务失败")
             state, summary = "error", str(exc) or "任务失败"
@@ -429,7 +445,9 @@ class Studia:
         if minutes:
             kwargs["review_minutes"] = minutes
         try:
-            spec["handler"](**kwargs)
+            blocked = getattr(spec["handler"](**kwargs), "blocked", None)
+            if blocked is not None:
+                raise blocked
         finally:
             if ai is not None:
                 ai.session.close()
@@ -456,10 +474,9 @@ class Studia:
                 name = (item.get("name") if platform.id == "zhs" else paper_display_name(item)) or "试卷"
                 try:
                     result = runner.run_paper(course, item, category)
-                except (CaptchaRequired, StudyTimeLimit) as exc:
-                    self.progress_event("result", name, status="error")
-                    self.publish({"type": "log", "text": f"{name}：{exc}", "level": "error"})
-                    break
+                except (CaptchaRequired, StudyTimeLimit):
+                    self.progress_event("result", name, status="waiting")
+                    raise
                 except TaskUnavailableError as exc:
                     result = {"status": "skipped", "message": str(exc)}
                 except ExamError as exc:
@@ -581,7 +598,7 @@ class _EventLogHandler(logging.Handler):
 
 
 STATUS_TEXT = {"success": "完成", "skipped": "跳过", "error": "出错", "submitted": "已交卷", "saved": "已保存答案", "preview": "已生成答案", "paused": "已暂停",
-               "ai_error": "AI 出错", "submission_unknown": "交卷结果未知"}
+               "ai_error": "AI 出错", "submission_unknown": "交卷结果未知", "waiting": "等你操作"}
 
 
 STATUS_LABEL = {"submitted": "已提交", "draft": "未提交", "not_started": "未作答"}
@@ -663,6 +680,7 @@ ROUTES = [
     ("GET", r"/api/platforms/(\w+)/login", lambda app, m, q, b: app.login_status(m[1])),
     ("POST", r"/api/platforms/(\w+)/logout", lambda app, m, q, b: app.logout(m[1])),
     ("GET", r"/api/platforms/(\w+)/courses", lambda app, m, q, b: app.courses(m[1])),
+    ("GET", r"/api/platforms/(\w+)/units", lambda app, m, q, b: app.units(m[1], (q.get("course") or [""])[0])),
     ("GET", r"/api/platforms/(\w+)/tasks", lambda app, m, q, b: app.tasks(m[1], (q.get("course") or [""])[0])),
     ("GET", r"/api/jobs", lambda app, m, q, b: app.jobs()),
     ("POST", r"/api/jobs", lambda app, m, q, b: app.start_job(b)),

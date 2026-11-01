@@ -100,7 +100,9 @@ class TaskSchedulingTests(unittest.TestCase):
         with patch.object(cancel, 'wait') as wait:
             run_resources(handler, [({'id': str(i)},) for i in range(3)])
         self.assertEqual(handled, ['0', '1', '2'])
-        self.assertEqual([e.completed for e in self.events], [0, 1, 2, 3])
+        self.assertEqual([e.completed for e in self.events if e.kind == 'resources'], [0, 1, 2, 3])
+        self.assertEqual([(e.key, e.status) for e in self.events if e.kind == 'unit'],
+                         [(k, s) for k in '012' for s in ('running', 'done')])
         wait.assert_not_called()
 
     def test_cancel_after_completion_starts_no_more_resources(self):
