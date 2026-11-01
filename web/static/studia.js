@@ -73,13 +73,12 @@ async function api(path, { method = "GET", body } = {}) {
 
 const state = {
   platforms: [], courses: {}, papers: {}, units: {}, selected: {},
-  jobs: [], runs: {}, focus: null, history: [], view: "", loginToken: { cancelled: true }, lastDone: null,
+  jobs: [], runs: {}, focus: null, jobLimit: 4, history: [], view: "", loginToken: { cancelled: true }, lastDone: null,
   current: store.get("studia-platform", ""), menuOpen: false, meOpen: false, logFilter: "all", armed: null, editPassword: false,
 };
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
 const runOf = (id) => (state.runs[id] = state.runs[id] || freshRun());
 // Mirrors the server's rules (web/server.py _check_conflicts) so buttons say why before you click.
-const MAX_JOBS = 4;
 const GROUP = { study: "learn", review: "learn", answer: "answer" };
 const jobType = (j) => j.kind || { 自动学习: "study", 每日复习: "review", "AI 答题": "answer" }[j.title];
 function blocker(pid, cid, type) {
@@ -88,7 +87,7 @@ function blocker(pid, cid, type) {
     if (o.course === cid) return o.state === "queued" ? `正在排队（${o.title}）` : `正在${o.title}…`;
     if (pid === "zhs" && GROUP[type] === "learn") return `智慧树一次只能播一个视频，等「${o.course_name}」的${o.title}结束`;
   }
-  return state.jobs.length >= MAX_JOBS ? `最多同时运行 ${MAX_JOBS} 个任务` : "";
+  return "";
 }
 // The job the player and focus view follow: the one picked, else one on the open course, else the newest.
 function focusedJob() {
@@ -315,42 +314,88 @@ document.addEventListener("mouseover", (event) => {
 
 /* ---------------------------------------------------------------- views */
 
+let adminTimer = 0;
 const VIEWS = {
-  async admin() {
-    const head = `<h1 class="title">管理</h1><p class="sub">邀请新用户、管理账号，查看所有人正在运行的任务。</p>`;
-    let users, invites, memory;
-    try { [users, invites, memory] = await Promise.all([api("/api/admin/users"), api("/api/admin/invites"), api("/api/admin/memory")]); }
-    catch (error) { setPage(`${head}<div class="empty">${esc(error.message)}</div>`); return; }
+  async admin(refresh = false) {
+    clearTimeout(adminTimer);
+    const head = `<h1 class="title">管理</h1><p class="sub">全站任务、每人任务上限、账号和邀请码、日志导出。</p>`;
+    let users, invites, memory, jobs, settings;
+    try {
+      [users, invites, memory, jobs, settings] = await Promise.all(["users", "invites", "memory", "jobs", "settings"].map((x) => api(`/api/admin/${x}`)));
+    } catch (error) { if (!refresh) setPage(`${head}<div class="empty">${esc(error.message)}</div>`); return; }
     if (state.view !== "#/admin") return;
-    users = users.users; invites = invites.invites;
+    users = users.users; invites = invites.invites; jobs = jobs.jobs;
     const nameOf = (uid) => users.find((u) => u.id === uid)?.username || "—";
     const inviteState = { open: ["blue", "可用"], used: ["", "已使用"], expired: ["", "已过期"] };
+    const running = jobs.filter((j) => j.state === "running").length;
+    const pad2 = (n) => String(n).padStart(2, "0");
+    const local = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const kept = (name, fallback) => $(`[name="${name}"]`, page)?.value || fallback;
+    quiet = refresh;
     setPage(`${head}
+      <div class="section"><h3>全站任务</h3><span class="aside">${running} 个运行中 · ${jobs.length - running} 个排队 · 每 5 秒刷新</span></div>
+      <div class="runs">${jobs.map((j) => `<div class="run">${j.state === "queued" ? ICON.waiting : ICON.running}
+          <span class="t1">${esc(j.username)} · ${esc(j.title)} · ${esc(j.course_name)}<small>${esc(platformOf(j.platform)?.short || j.platform)} · 开始于 ${ago(j.started)}</small></span>
+          <span class="fix"><button class="btn small danger" data-stop-job="${esc(j.user_id)}/${esc(j.id)}">停止</button></span>
+          <span class="state ${j.state === "queued" ? "waiting" : "running"}">${j.state === "queued" ? "排队中" : "运行中"}<span class="mono">${duration(Date.now() / 1000 - j.started)}</span></span>
+          <span class="when"></span></div>`).join("") || `<div class="run"><span></span><span class="t1"><small>现在没有任务在运行</small></span></div>`}</div>
+
+      <div class="section"><h3>任务上限</h3></div>
+      <p class="hint">每个人同时最多运行几个任务，多出的会排队，等自己前面的任务结束后自动开始。可以在下面的用户列表里给某个人单独设置。用户自己只能在设置里调学习和答题的并发数，不能改这里。</p>
+      <div class="models"><div class="model plain"><span class="m1"><b>默认每人同时 <input class="inline_num" type="number" min="1" max="20" name="max_jobs" value="${esc(kept("max_jobs", settings.max_jobs))}"> 个任务</b>
+          <small class="sans">4 核 4G 的服务器，每人 4 个、6 个人同时跑是可以的；答题多的话，让大家把答题并发调到 3–4。</small></span>
+        <span class="row_btns"><button class="btn small primary" data-save-limit>保存</button></span></div></div>
+
+      <div class="section"><h3>用户</h3><span class="aside">${users.length} 人</span></div>
+      <div class="models">${users.map((u) => `<div class="model"><span class="avatar big">${esc(u.username.slice(0, 1).toUpperCase())}</span>
+          <span class="m1"><b>${esc(u.username)}</b>${u.role === "admin" ? '<span class="pill blue">管理员</span>' : ""}${u.disabled ? '<span class="pill red">已停用</span>' : ""}<span class="pill">同时 ${u.job_limit} 个${u.max_jobs ? "（单独设置）" : ""}</span>
+          <small class="sans">${u.jobs?.length ? u.jobs.map((j) => `${esc(j.title)} · ${esc(j.course_name)}${j.state === "queued" ? "（排队）" : ""}`).join("；") : u.last_login ? `上次登录 ${ago(u.last_login)}` : "还没登录过"}</small></span><span></span>
+          <span class="row_btns">${u.jobs?.length ? `<button class="btn small danger" data-stop-user="${u.id}">停止全部任务</button>` : ""}
+            <button class="btn small" data-user-limit="${u.id}" data-current="${u.max_jobs || ""}">任务上限</button>
+            <button class="btn small" data-reset="${u.id}">重置密码</button>
+            ${u.id === session.user.id ? "" : u.disabled ? `<button class="btn small" data-enable="${u.id}">启用</button>` : `<button class="btn small danger" data-disable="${u.id}">停用</button>`}</span></div>`).join("")}</div>
+
       <div class="section"><h3>邀请码</h3><button class="link" data-invite>＋ 生成邀请码</button></div>
       <p class="hint">把邀请码发给对方，对方在登录页选「用邀请码注册」。每个邀请码只能用一次，7 天后过期。</p>
       <div class="models">${invites.map((i) => `<div class="model plain"><span class="m1"><b><code>${esc(i.code)}</code></b><span class="pill ${inviteState[i.state][0]}">${inviteState[i.state][1]}</span>
           <small class="sans">${i.used_by ? `${esc(nameOf(i.used_by))} 已注册` : `创建于 ${ago(i.created)} · ${new Date(i.expires * 1000).toLocaleDateString()} 过期`}</small></span>
         <span class="row_btns">${i.state === "open" ? `<button class="btn small" data-copy="${esc(i.code)}">复制</button><button class="btn small danger" data-revoke="${esc(i.code)}">作废</button>` : ""}</span></div>`).join("")
         || `<div class="model plain"><span class="m1"><small class="sans">还没有邀请码</small></span></div>`}</div>
+
       <div class="section"><h3>共享答案记忆</h3><span class="aside">命中的题直接用，不再调用 AI</span></div>
       <div class="models"><div class="model plain"><span class="m1"><b>智慧树 · ${memory.questions} 题</b><span class="pill blue">${memory.confirmed} 题已确认正确</span>
         <small class="sans">交卷后平台判定的对错，在同一门课的所有试卷之间共享：对的直接用、错的避开。</small></span></div>
         <div class="model plain"><span class="m1"><b>MOOC · ${memory.mooc.questions} 题</b><span class="pill blue">平台公布的标准答案</span>
         <small class="sans">交卷后平台公布的标准答案，在同一门课（同一个班）的所有试卷之间共享；单选、多选、判断题。</small></span></div></div>
-      <div class="section"><h3>用户</h3><span class="aside">${users.length} 人</span></div>
-      <div class="models">${users.map((u) => `<div class="model"><span class="avatar big">${esc(u.username.slice(0, 1).toUpperCase())}</span>
-          <span class="m1"><b>${esc(u.username)}</b>${u.role === "admin" ? '<span class="pill blue">管理员</span>' : ""}${u.disabled ? '<span class="pill red">已停用</span>' : ""}
-          <small class="sans">${u.jobs?.length ? u.jobs.map((j) => `${esc(j.title)} · ${esc(j.course_name)}${j.state === "queued" ? "（排队）" : ""}`).join("；") : u.last_login ? `上次登录 ${ago(u.last_login)}` : "还没登录过"}</small></span><span></span>
-          <span class="row_btns">${u.jobs?.length ? `<button class="btn small danger" data-stop-user="${u.id}">停止全部任务</button>` : ""}
-            <button class="btn small" data-reset="${u.id}">重置密码</button>
-            ${u.id === session.user.id ? "" : u.disabled ? `<button class="btn small" data-enable="${u.id}">启用</button>` : `<button class="btn small danger" data-disable="${u.id}">停用</button>`}</span></div>`).join("")}</div>`);
+
+      <div class="section"><h3>日志导出</h3></div>
+      <p class="hint">导出一段时间里的日志，下载为文本文件。运行日志是所有人任务的过程记录（已隐去密码和令牌）；操作记录是登录、注册和管理员操作。</p>
+      <div class="models"><div class="model plain log_export"><span class="log_range">
+          <label>从 <input type="datetime-local" name="log_from" value="${esc(kept("log_from", local(today)))}"></label>
+          <label>到 <input type="datetime-local" name="log_to" value="${esc(kept("log_to", local(new Date())))}"></label>
+          <label>类型 <select name="log_kind"><option value="app">运行日志</option><option value="audit" ${kept("log_kind", "") === "audit" ? "selected" : ""}>操作记录</option></select></label></span>
+        <span class="row_btns"><button class="btn small primary" data-export-logs>导出</button></span></div></div>`);
+    quiet = false;
     const act = async (path, body, message) => {
-      try { await api(path, { method: "POST", body: body || {} }); toast(message); VIEWS.admin(); } catch (e) { toast(e.message); }
+      try { await api(path, { method: "POST", body: body || {} }); toast(message); VIEWS.admin(true); } catch (e) { toast(e.message); }
     };
     $("[data-invite]", page).onclick = async () => {
-      try { const { code } = await api("/api/admin/invites", { method: "POST", body: { days: 7 } }); navigator.clipboard?.writeText(code).catch(() => {}); toast(`邀请码 ${code} 已复制`); VIEWS.admin(); }
+      try { const { code } = await api("/api/admin/invites", { method: "POST", body: { days: 7 } }); navigator.clipboard?.writeText(code).catch(() => {}); toast(`邀请码 ${code} 已复制`); VIEWS.admin(true); }
       catch (e) { toast(e.message); }
     };
+    $("[data-save-limit]", page).onclick = () => act("/api/admin/settings", { max_jobs: Number($('[name="max_jobs"]', page).value) }, "已保存，马上生效");
+    $("[data-export-logs]", page).onclick = () => {
+      const from = new Date($('[name="log_from"]', page).value).getTime() / 1000;
+      const to = new Date($('[name="log_to"]', page).value).getTime() / 1000;
+      if (!(from < to)) { toast("请选择正确的时间段"); return; }
+      location.href = `/api/admin/logs?kind=${$('[name="log_kind"]', page).value}&from=${Math.floor(from)}&to=${Math.ceil(to)}`;
+    };
+    page.querySelectorAll("[data-stop-job]").forEach((el) => (el.onclick = () => act(`/api/admin/users/${el.dataset.stopJob.replace("/", "/jobs/")}/stop`, null, "已发出停止指令")));
+    page.querySelectorAll("[data-user-limit]").forEach((el) => (el.onclick = () => {
+      const value = window.prompt("这个人同时最多运行几个任务（1–20）？留空表示跟随默认值。", el.dataset.current);
+      if (value !== null) act(`/api/admin/users/${el.dataset.userLimit}/limit`, { max_jobs: value.trim() }, "已保存，马上生效");
+    }));
     page.querySelectorAll("[data-copy]").forEach((el) => (el.onclick = () => { navigator.clipboard?.writeText(el.dataset.copy).then(() => toast("已复制"), () => toast(el.dataset.copy)); }));
     page.querySelectorAll("[data-revoke]").forEach((el) => (el.onclick = () => act(`/api/admin/invites/${el.dataset.revoke}/revoke`, null, "邀请码已作废")));
     page.querySelectorAll("[data-stop-user]").forEach((el) => (el.onclick = () => act(`/api/admin/users/${el.dataset.stopUser}/stop`, null, "已发出停止指令")));
@@ -363,13 +408,20 @@ const VIEWS = {
       const password = window.prompt("输入新密码（至少 8 位）。保存后对方需要用新密码重新登录。");
       if (password) act(`/api/admin/users/${el.dataset.reset}/password`, { password }, "密码已重置");
     }));
+    // Live view of everyone's jobs; paused while the admin is typing or the tab is hidden.
+    const tick = () => {
+      if (state.view !== "#/admin") return;
+      if (document.hidden || page.querySelector("input:focus, select:focus, .armed")) adminTimer = setTimeout(tick, 5000);
+      else VIEWS.admin(true);
+    };
+    adminTimer = setTimeout(tick, 5000);
   },
 
   jobs() {
     const open = new Set([...page.querySelectorAll(".run_lines:not([hidden])")].map((el) => el.dataset.lines));
-    const live = state.jobs.length ? `<div class="section"><h3>进行中</h3><span class="aside">${state.jobs.length} / ${MAX_JOBS} 个</span></div>
+    const live = state.jobs.length ? `<div class="section"><h3>进行中</h3><span class="aside">每人最多同时运行 ${state.jobLimit} 个，多出的排队</span></div>
       <div class="runs">${state.jobs.map((job) => { const run = runOf(job.id); return `<div class="run">${ICON.running}
-        <span class="t1">${esc(job.title)} · ${esc(job.course_name)}<small>${esc(platformOf(job.platform)?.short || "")} · ${esc(job.state === "queued" ? "服务器繁忙，排队等待中…" : run.unit?.name || run.detail || "准备中…")}</small></span>
+        <span class="t1">${esc(job.title)} · ${esc(job.course_name)}<small>${esc(platformOf(job.platform)?.short || "")} · ${esc(job.state === "queued" ? `排队中：你同时最多运行 ${state.jobLimit} 个任务` : run.unit?.name || run.detail || "准备中…")}</small></span>
         <span class="fix"><button class="btn small" data-open="${job.id}">展开</button><button class="btn small danger" data-stop="${job.id}">停止</button></span>
         <span class="state running">${STATE_WORD[job.state] || "进行中"}<span class="mono" data-elapsed="${job.id}">${duration(elapsed(job))}</span></span>
         <span class="when">${ago(job.started)}</span></div>`; }).join("")}</div>` : "";
@@ -380,7 +432,7 @@ const VIEWS = {
         <span class="when">${ago(j.ended || j.started)}</span></div>
       <div class="run_lines" data-lines="${i}" ${open.has(String(i)) ? "" : "hidden"}>${logHtml(j.lines || [])}</div>`).join("");
     setPage(`<h1 class="title">任务</h1>
-      <p class="sub">${session.mode === "hosted" ? "任务在服务器上运行，关掉网页也不会中断。" : "任务在这台电脑上运行，关掉网页不会中断，关掉终端才会停止。"}不同课程可以同时学习和答题，最多 ${MAX_JOBS} 个。</p>
+      <p class="sub">${session.mode === "hosted" ? "任务在服务器上运行，关掉网页也不会中断。" : "任务在这台电脑上运行，关掉网页不会中断，关掉终端才会停止。"}不同课程可以同时学习和答题，每人最多同时运行 ${state.jobLimit} 个，多出的会排队，前面的结束后自动开始。</p>
       ${live}
       <div class="section"><h3>历史</h3><span class="aside">只有失败和需要你处理的任务才有按钮，点一行看日志</span></div>
       ${rows ? `<div class="runs">${rows}</div>` : `<div class="empty">还没有运行过任务</div>`}`);
@@ -754,7 +806,7 @@ function renderPlayer() {
     patch(player, `
       <div class="np"><span class="art">${job.title === "AI 答题" ? ICON.pen : job.title === "每日复习" ? ICON.repeat : ICON.play}</span>
         <span class="what"><small><span class="live">${queued ? "排队中" : LIVE_WORD[job.title] || "进行中"}</span>${esc(job.course_name)}</small>
-        <b>${esc(queued ? "服务器繁忙，等前面的任务结束" : run.unit?.name || run.detail || "准备中…")}</b></span></div>
+        <b>${esc(queued ? `排队中，等你前面的任务结束（最多同时 ${state.jobLimit} 个）` : run.unit?.name || run.detail || "准备中…")}</b></span></div>
       <div class="scrub"><span class="track ${pct == null ? "unknown" : ""}"><i style="width:${pct ?? 0}%"></i></span><span class="t">${esc(label || clock(elapsed(job)))}</span></div>
       <div class="np_meta">${recentCells(key(job.platform, job.course))}
         ${others ? `<button class="btn" data-go="#/jobs" title="查看全部任务">另有 ${others} 个</button>` : ""}
@@ -982,6 +1034,7 @@ async function refreshState() {
     const data = await api("/api/state");
     state.platforms = data.platforms;
     state.history = data.history || [];
+    state.jobLimit = data.job_limit || state.jobLimit;
     const live = data.jobs || [];
     for (const job of live) {
       if (state.jobs.some((j) => j.id === job.id)) continue;

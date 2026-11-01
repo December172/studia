@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime
 import getpass
 import hmac
 import html
@@ -26,7 +27,7 @@ from ZHSMain.memory import DatabaseAnswerMemory
 from ai.memory import MoocDatabaseAnswerMemory
 from settings import SettingsError, SettingsStore
 from web.accounts import AccountError, Accounts, Sessions, Throttle
-from web.server import NOT_HANDLED, HttpError, Reply, Studia, _EventLogHandler, make_handler
+from web.server import MAX_JOBS, MAX_PENDING, NOT_HANDLED, HttpError, Reply, Studia, _EventLogHandler, make_handler
 
 COOKIE = "studia_session"
 OAUTH_TTL = 600
@@ -107,7 +108,7 @@ class EncryptedSettingsStore(SettingsStore):
 class Hub:
     """Accounts plus one Studia app per user, each rooted in data/users/<id>/."""
 
-    def __init__(self, data_dir, public_url, *, key, max_jobs=4, trust_proxy=False):
+    def __init__(self, data_dir, public_url, *, key, trust_proxy=False):
         self.key = key
         self.data = Path(data_dir).expanduser()
         (self.data / "users").mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -134,7 +135,8 @@ class Hub:
         self.throttle = Throttle()
         self.public_url = public_url.rstrip("/")
         self.trust_proxy = trust_proxy
-        self.slots = threading.BoundedSemaphore(max_jobs)
+        # The program writes its daily log files to the working directory (/data in Docker).
+        self.log_dir = Path.cwd()
         self.lock = threading.RLock()
         self.apps = {}
         self.pending_oauth = {}
@@ -147,8 +149,9 @@ class Hub:
                 directory.mkdir(mode=0o700, parents=True, exist_ok=True)
                 store = EncryptedSettingsStore(directory, self.key, uid)
                 store.ensure_default_model()
-                app = Studia(store, reports_dir=directory / "ai_results", slots=self.slots, memory=self.memory, mooc_memory=self.mooc_memory,
-                             oauth_url=lambda pid, uid=uid: self.oauth_url(uid, pid))
+                app = Studia(store, reports_dir=directory / "ai_results", memory=self.memory, mooc_memory=self.mooc_memory,
+                             oauth_url=lambda pid, uid=uid: self.oauth_url(uid, pid),
+                             job_limit=lambda uid=uid: self.job_limit(uid))
                 self.apps[uid] = app
             return app
 
@@ -190,12 +193,28 @@ class Hub:
 
     # ------------------------------------------------------------ admin helpers
 
+    def default_job_limit(self):
+        return self.accounts.setting("max_jobs", MAX_JOBS)
+
+    def job_limit(self, uid):
+        """Jobs this person may run at once: their own limit if an admin set one, else the site default."""
+        user = self.accounts.user(uid)
+        return (user or {}).get("max_jobs") or self.default_job_limit()
+
     def overview(self):
         users = self.accounts.users()
         for user in users:
             app = self.apps.get(user["id"])
             user["jobs"] = app._running() if app else []
+            user["job_limit"] = user["max_jobs"] or self.default_job_limit()
         return users
+
+    def all_jobs(self):
+        """Every running or waiting job on the site, oldest first, with whose it is."""
+        names = {user["id"]: user["username"] for user in self.accounts.users()}
+        jobs = [dict(job, user_id=uid, username=names.get(uid, uid))
+                for uid, app in list(self.apps.items()) for job in app._running()]
+        return sorted(jobs, key=lambda job: job["started"])
 
     def disable(self, uid):
         self.accounts.set_disabled(uid, True)
@@ -360,7 +379,7 @@ class HostedAccess:
         if user["role"] != "admin":
             raise HttpError(403, "只有管理员可以访问")
         try:
-            result = self._admin(method, path, body, user)
+            result = self._admin(method, path, body, user, query)
         except AccountError as exc:
             raise HttpError(400, str(exc))
         if method == "POST":
@@ -369,14 +388,42 @@ class HostedAccess:
             hub.audit("admin:" + path.rsplit("/", 1)[-1], actor=user["username"], target=name, ip=self._ip(request))
         return result
 
-    def _admin(self, method, path, body, me):
+    def _admin(self, method, path, body, me, query=None):
         hub = self.hub
+        if method == "GET" and path == "/api/admin/logs":
+            arg = lambda name: (query or {}).get(name, [""])[0]
+            kind = "audit" if arg("kind") == "audit" else "app"
+            try:
+                start, end = float(arg("from")), float(arg("to"))
+            except ValueError:
+                raise HttpError(400, "请选择导出的时间段") from None
+            if not 0 < start < end or end - start > 92 * 86400:
+                raise HttpError(400, "时间段无效，最长 92 天")
+            hub.audit("admin:export_logs", actor=me["username"], target=kind)
+            name = "studia-%s-%s.log" % (kind, time.strftime("%Y%m%d-%H%M", time.localtime(start)))
+            return Reply(export_logs(hub.data if kind == "audit" else hub.log_dir, kind, start, end).encode("utf-8"),
+                         content_type="text/plain; charset=utf-8",
+                         headers={"Content-Disposition": 'attachment; filename="%s"' % name})
         if method == "GET" and path == "/api/admin/users":
             return {"users": hub.overview()}
         if method == "GET" and path == "/api/admin/invites":
             return {"invites": hub.accounts.invites()}
         if method == "GET" and path == "/api/admin/memory":
             return dict(hub.memory.stats(), mooc=hub.mooc_memory.stats())
+        if method == "GET" and path == "/api/admin/jobs":
+            return {"jobs": hub.all_jobs()}
+        if method == "GET" and path == "/api/admin/settings":
+            return {"max_jobs": hub.default_job_limit()}
+        if method == "POST" and path == "/api/admin/settings":
+            hub.accounts.set_setting("max_jobs", _job_limit(body.get("max_jobs")))
+            return {"max_jobs": hub.default_job_limit()}
+        match = re.fullmatch(r"/api/admin/users/(\w+)/jobs/(\w+)/stop", path)
+        if method == "POST" and match:
+            app = hub.apps.get(match[1])
+            if app is None or match[2] not in app.jobs:
+                raise HttpError(404, "任务已经结束")
+            app.stop_job(match[2])
+            return {}
         if method == "POST" and path == "/api/admin/invites":
             days = min(max(int(body.get("days") or 7), 1), 30)
             return {"code": hub.accounts.create_invite(me["id"], ttl=days * 86400)}
@@ -384,7 +431,7 @@ class HostedAccess:
         if method == "POST" and match:
             hub.accounts.revoke_invite(match[1])
             return {}
-        match = re.fullmatch(r"/api/admin/users/(\w+)/(disable|enable|password|stop)", path)
+        match = re.fullmatch(r"/api/admin/users/(\w+)/(disable|enable|password|stop|limit)", path)
         if method == "POST" and match:
             uid, action = match[1], match[2]
             if hub.accounts.user(uid) is None:
@@ -398,12 +445,66 @@ class HostedAccess:
             elif action == "password":
                 hub.accounts.set_password(uid, str(body.get("password", "")))
                 hub.sessions.drop_user(uid)
+            elif action == "limit":
+                # Empty returns the user to the site default.
+                limit = body.get("max_jobs")
+                hub.accounts.set_job_limit(uid, None if limit in (None, "") else _job_limit(limit))
             else:
                 app = hub.apps.get(uid)
                 if app:
                     app.stop_job()
             return {}
         raise HttpError(404, "not found")
+
+
+LOG_TIME = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+EXPORT_LIMIT = 20 * 1024 * 1024
+
+
+def export_logs(directory, kind, start, end):
+    """Log lines written between two epoch times. A line without its own time (a traceback)
+    goes with the line before it. Runtime logs are one file per day; audit is one file."""
+    if kind == "audit":
+        files = [Path(directory) / "audit.log"]
+    else:
+        day, last = datetime.date.fromtimestamp(start), datetime.date.fromtimestamp(end)
+        files = []
+        while day <= last:
+            files.append(Path(directory) / ("icve-ai-assistant-log_%s.log" % day.isoformat()))
+            day += datetime.timedelta(days=1)
+    lines, size, keep = [], 0, False
+    for path in files:
+        if not path.is_file():
+            continue
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                if kind == "audit":
+                    try:
+                        stamp = json.loads(line)["time"]
+                    except (ValueError, KeyError, TypeError):
+                        continue
+                else:
+                    match = LOG_TIME.match(line)
+                    stamp = match[1] if match else None
+                if stamp:
+                    keep = start <= time.mktime(time.strptime(stamp, "%Y-%m-%d %H:%M:%S")) <= end
+                if keep:
+                    lines.append(line)
+                    size += len(line)
+                    if size > EXPORT_LIMIT:
+                        lines.append("……超过 20MB，后面的省略了，请缩短时间段\n")
+                        return "".join(lines)
+    return "".join(lines) or "这段时间没有日志。\n"
+
+
+def _job_limit(value):
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        raise HttpError(400, "请填写 1 到 %d 之间的整数" % MAX_PENDING) from None
+    if not 1 <= limit <= MAX_PENDING:
+        raise HttpError(400, "请填写 1 到 %d 之间的整数" % MAX_PENDING)
+    return limit
 
 
 def serve_hosted(hub, host, port):
@@ -449,8 +550,6 @@ def main(argv):
                         help="数据目录：数据库和每个用户的子目录（STUDIA_DATA）")
     parser.add_argument("--public-url", default=env("STUDIA_PUBLIC_URL"),
                         help="浏览器访问用的地址，例如 https://studia.example.com（STUDIA_PUBLIC_URL）")
-    parser.add_argument("--max-jobs", type=int, default=int(env("STUDIA_MAX_JOBS", "4")),
-                        help="全站同时运行的任务数（STUDIA_MAX_JOBS）")
     parser.add_argument("--trust-proxy", action="store_true", default=env("STUDIA_TRUST_PROXY", "") in ("1", "true", "yes"),
                         help="信任反向代理传来的 X-Forwarded-For（STUDIA_TRUST_PROXY=1）")
     parser.add_argument("--key-file", default=env("STUDIA_KEY_FILE"),
@@ -470,7 +569,7 @@ def main(argv):
             return 1
         key = None
     hub = Hub(args.data, args.public_url or "http://127.0.0.1:%d" % args.port, key=key,
-              max_jobs=max(1, args.max_jobs), trust_proxy=args.trust_proxy)
+              trust_proxy=args.trust_proxy)
     if args.create_admin:
         password = getpass.getpass("设置 %s 的密码：" % args.create_admin)
         if password != getpass.getpass("再输入一次："):

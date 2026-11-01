@@ -43,8 +43,10 @@ STATIC = Path(__file__).resolve().parent / "static"
 REVIEW_MINUTES = 30
 QR_REFRESHES = 5
 HISTORY = 20
-# ponytail: per-user cap on parallel jobs; hosted mode additionally shares the site-wide --max-jobs slots.
+# Jobs one person runs at once (an administrator can change it in hosted mode); more wait in line.
 MAX_JOBS = 4
+# ponytail: running plus waiting jobs per person, so one browser cannot pile up threads.
+MAX_PENDING = 20
 LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题"}
 # Jobs that play course content conflict with each other; answering is separate.
 GROUP = {"study": "learn", "review": "learn", "answer": "answer"}
@@ -96,7 +98,8 @@ class Platform:
 class Studia:
     """All state behind the web UI; one running job at a time across platforms."""
 
-    def __init__(self, store=None, oauth=oauth_login, *, reports_dir="ai_results", slots=None, oauth_url=None, memory=None, mooc_memory=None):
+    def __init__(self, store=None, oauth=oauth_login, *, reports_dir="ai_results", oauth_url=None, memory=None, mooc_memory=None,
+                 job_limit=None):
         self.store = store or SettingsStore()
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
@@ -106,7 +109,8 @@ class Studia:
         # a site-wide slot pool, and browser login returns to the server instead
         # of a localhost listener.
         self.reports_dir = reports_dir
-        self.slots = slots
+        # How many of this person's jobs may run at once; read each time, so an admin's change applies at once.
+        self.job_limit = job_limit or (lambda: MAX_JOBS)
         self.oauth_url = oauth_url
         # Hosted mode passes the site-wide memory; locally it lives next to the settings file.
         self.memory = memory
@@ -151,7 +155,8 @@ class Studia:
 
     def state(self):
         return {"platforms": [p.public(self.logged_in(p)) for p in self.platforms.values()],
-                "jobs": self._running(), "history": [_job_public(j) for j in self.history]}
+                "jobs": self._running(), "history": [_job_public(j) for j in self.history],
+                "job_limit": self.job_limit()}
 
     def client(self, platform):
         with self.lock:
@@ -361,7 +366,7 @@ class Studia:
             self._check_conflicts(platform.id, course_id, kind)
             job = {"id": secrets.token_hex(4), "kind": kind, "title": LABEL[kind], "course": course_id,
                    "platform": platform.id, "course_name": row.get("courseName") or "课程", "cancel": threading.Event(),
-                   "state": "running", "summary": "", "started": time.time(), "ended": None, "lines": []}
+                   "state": "queued", "summary": "", "started": time.time(), "ended": None, "lines": []}
             if kind == "answer":
                 selected = self._selected(platform, course_id, body.get("tasks") or [])
                 target = lambda: self._answer(platform, selected, bool(body.get("auto_submit")), job)
@@ -370,14 +375,15 @@ class Studia:
                 target = lambda: self._study(platform, row, minutes, job)
             self.jobs[job["id"]] = job
             JOBS[job["id"]] = self
+            self._take_turn(job)
         self.publish(dict(_job_public(job), type="job"))
         threading.Thread(target=self._run_job, args=(job, target, platform), daemon=True,
                          name="studia-job-%s" % job["id"]).start()
         return {"ok": True, "id": job["id"]}
 
     def _check_conflicts(self, pid, course_id, kind):
-        if len(self.jobs) >= MAX_JOBS:
-            raise HttpError(409, "最多同时运行 %d 个任务，请等其中一个结束" % MAX_JOBS)
+        if len(self.jobs) >= MAX_PENDING:
+            raise HttpError(409, "进行中和排队的任务已有 %d 个，请等一些结束" % MAX_PENDING)
         for other in self.jobs.values():
             if GROUP[other["kind"]] != GROUP[kind] or other["platform"] != pid:
                 continue
@@ -408,22 +414,32 @@ class Studia:
             raise HttpError(400, "请先选择试卷（试卷列表可能已过期，请刷新）")
         return selected
 
+    def _take_turn(self, job):
+        """Start a waiting job when this person has a free place; first come, first served.
+        Call with self.lock held. Returns whether the job may run."""
+        if job["state"] == "running":
+            return True
+        running = sum(1 for other in self.jobs.values() if other["state"] == "running")
+        ahead = sum(1 for other in self.jobs.values()
+                    if other["state"] == "queued" and other["started"] < job["started"])
+        if running + ahead >= self.job_limit():
+            return False
+        job["state"] = "running"
+        return True
+
     def _run_job(self, job, target, platform):
         state, summary = "done", ""
-        acquired = False
         try:
-            if self.slots is not None:
-                # Site-wide limit: wait (cancellably) for a free slot before touching any platform.
-                while not self.slots.acquire(timeout=1):
-                    if job["cancel"].is_set():
-                        raise KeyboardInterrupt
-                    if job["state"] != "queued":
-                        job["state"] = "queued"
-                        self.publish(dict(_job_public(job), type="job"))
-                acquired = True
-                if job["state"] == "queued":
-                    job["state"] = "running"
-                    self.publish(dict(_job_public(job), type="job"))
+            # Wait (cancellably) for a place among this person's running jobs before touching any platform.
+            while True:
+                with self.lock:
+                    queued, ready = job["state"] == "queued", self._take_turn(job)
+                if ready:
+                    break
+                if job["cancel"].wait(1):
+                    raise KeyboardInterrupt
+            if queued:
+                self.publish(dict(_job_public(job), type="job"))
             summary = target() or "已完成"
             if job["cancel"].is_set():
                 state, summary = "stopped", "已停止"
@@ -439,8 +455,6 @@ class Studia:
             logger.exception("网页任务失败")
             state, summary = "error", str(exc) or "任务失败"
         finally:
-            if acquired:
-                self.slots.release()
             with self.lock:
                 job.update(state=state, summary=summary, ended=time.time())
                 self.history.insert(0, job)

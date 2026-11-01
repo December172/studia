@@ -81,9 +81,9 @@ class WebServerTest(unittest.TestCase):
         check("mooc", "m2", "study")             # MOOC courses study side by side
         with self.assertRaisesRegex(Exception, "正在自动学习"):
             check("mooc", "m1", "study")
-        self.app.jobs = {str(i): dict(running, id=str(i), platform="mooc", course=str(i)) for i in range(4)}
-        with self.assertRaisesRegex(Exception, "最多同时运行"):
-            check("mooc", "m9", "answer")
+        self.app.jobs = {str(i): dict(running, id=str(i), platform="mooc", course=str(i)) for i in range(20)}
+        with self.assertRaisesRegex(Exception, "排队的任务已有"):
+            check("mooc", "m99", "answer")
 
     def test_finished_job_lands_in_history_with_its_lines(self):
         platform = self.app.platforms["zhs"]

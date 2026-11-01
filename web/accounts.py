@@ -63,6 +63,7 @@ class Accounts:
             code TEXT PRIMARY KEY, created REAL, created_by TEXT, expires REAL, used_by TEXT);
         CREATE TABLE IF NOT EXISTS sessions (
             key TEXT PRIMARY KEY, uid TEXT NOT NULL, csrf TEXT NOT NULL, expires REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
     """
 
     def __init__(self, directory):
@@ -77,6 +78,10 @@ class Accounts:
         self.lock = threading.RLock()
         with self.lock:
             self.db.executescript(self.SCHEMA)
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(users)")}
+            if "max_jobs" not in columns:
+                # A per-user override of the site's parallel-job limit; NULL means the default.
+                self.db.execute("ALTER TABLE users ADD COLUMN max_jobs INTEGER")
         self._import_json()
 
     def _import_json(self):
@@ -87,7 +92,8 @@ class Accounts:
         data = json.loads(legacy.read_text(encoding="utf-8"))
         with self.transaction():
             for uid, u in (data.get("users") or {}).items():
-                self.db.execute("INSERT OR IGNORE INTO users VALUES (?,?,?,?,?,?,?)",
+                self.db.execute("INSERT OR IGNORE INTO users (id, username, password, role, disabled, created, last_login) "
+                                "VALUES (?,?,?,?,?,?,?)",
                                 (uid, u["username"], u["password"], u["role"], int(bool(u.get("disabled"))),
                                  u.get("created"), u.get("last_login")))
             for code, i in (data.get("invites") or {}).items():
@@ -113,7 +119,23 @@ class Accounts:
     @staticmethod
     def public(row):
         return {"id": row["id"], "username": row["username"], "role": row["role"], "disabled": bool(row["disabled"]),
-                "created": row["created"], "last_login": row["last_login"]}
+                "created": row["created"], "last_login": row["last_login"], "max_jobs": row["max_jobs"]}
+
+    # ------------------------------------------------------------ site settings and limits
+
+    def setting(self, key, default=None):
+        row = self._one("SELECT value FROM settings WHERE key = ?", key)
+        return json.loads(row["value"]) if row else default
+
+    def set_setting(self, key, value):
+        with self.transaction():
+            self.db.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, json.dumps(value)))
+
+    def set_job_limit(self, uid, limit):
+        """A user's own parallel-job limit; None returns them to the site default."""
+        with self.transaction():
+            if self.db.execute("UPDATE users SET max_jobs = ? WHERE id = ?", (limit, uid)).rowcount == 0:
+                raise AccountError("用户不存在")
 
     # ------------------------------------------------------------ users
 
@@ -122,7 +144,7 @@ class Accounts:
         uid = secrets.token_hex(8)
         try:
             with self.transaction():
-                self.db.execute("INSERT INTO users VALUES (?,?,?,?,0,?,NULL)",
+                self.db.execute("INSERT INTO users (id, username, password, role, created) VALUES (?,?,?,?,?)",
                                 (uid, username, hash_password(password), role, time.time()))
         except sqlite3.IntegrityError:
             raise AccountError("用户名已被使用")
@@ -135,7 +157,7 @@ class Accounts:
         with self.transaction():
             if self.db.execute("SELECT 1 FROM users WHERE role = 'admin'").fetchone():
                 raise AccountError("管理员已经设置过了，请直接登录")
-            self.db.execute("INSERT INTO users VALUES (?,?,?,'admin',0,?,NULL)",
+            self.db.execute("INSERT INTO users (id, username, password, role, created) VALUES (?,?,?,'admin',?)",
                             (uid, username, hash_password(password), time.time()))
         return uid
 
@@ -210,7 +232,7 @@ class Accounts:
             if invite is None or invite["used_by"] or invite["expires"] < time.time():
                 raise AccountError("邀请码无效或已过期")
             try:
-                self.db.execute("INSERT INTO users VALUES (?,?,?,'user',0,?,NULL)",
+                self.db.execute("INSERT INTO users (id, username, password, role, created) VALUES (?,?,?,'user',?)",
                                 (uid, username, hash_password(password), time.time()))
             except sqlite3.IntegrityError:
                 raise AccountError("用户名已被使用")

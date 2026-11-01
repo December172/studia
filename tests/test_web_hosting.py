@@ -13,7 +13,7 @@ from unittest.mock import patch
 import web.accounts
 from web.accounts import AccountError, Accounts, Sessions, Throttle
 from settings import SettingsError
-from web.hosting import COOKIE, EncryptedSettingsStore, HostedAccess, Hub, _key_file, load_key, main
+from web.hosting import COOKIE, EncryptedSettingsStore, HostedAccess, Hub, _key_file, export_logs, load_key, main
 from web.server import JOBS, Studia, _EventLogHandler, make_handler
 
 
@@ -26,7 +26,7 @@ class HostedServerTest(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), None)
         self.port = self.server.server_address[1]
-        self.hub = Hub(directory.name, "http://127.0.0.1:%d" % self.port, key=os.urandom(32), max_jobs=1)
+        self.hub = Hub(directory.name, "http://127.0.0.1:%d" % self.port, key=os.urandom(32))
         self.server.RequestHandlerClass = make_handler(HostedAccess(self.hub, self.port))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
@@ -79,6 +79,35 @@ class HostedServerTest(unittest.TestCase):
         self.assertEqual(self.request("GET", "/api/state")[0], 401)
         self.assertEqual(self.request("GET", "/")[0], 200)
         self.assertEqual(self.request("GET", "/api/mode", host="evil.example")[0], 403)
+
+    def test_admin_sets_job_limits_and_sees_everyones_jobs(self):
+        token, csrf = self.login("admin", "admin-password")
+        alice = self.hub.accounts.create_user("alice", "alice-password")
+        post = lambda path, body: self.request("POST", path, body, cookie=token, csrf=csrf)
+        self.assertEqual(self.request("GET", "/api/admin/settings", cookie=token)[1], {"max_jobs": 4})
+        self.assertEqual(post("/api/admin/settings", {"max_jobs": 2})[1], {"max_jobs": 2})
+        self.assertEqual(self.hub.job_limit(alice), 2)
+        self.assertEqual(post("/api/admin/users/%s/limit" % alice, {"max_jobs": 6})[0], 200)
+        self.assertEqual(self.hub.job_limit(alice), 6)
+        self.assertEqual(post("/api/admin/users/%s/limit" % alice, {"max_jobs": ""})[0], 200)
+        self.assertEqual(self.hub.job_limit(alice), 2)
+        self.assertEqual(post("/api/admin/settings", {"max_jobs": 0})[0], 400)
+        app = self.hub.app(alice)
+        app.jobs = {"j1": {"id": "j1", "kind": "study", "title": "自动学习", "course": "c", "course_name": "课",
+                           "platform": "zhs", "state": "queued", "summary": "", "started": 1, "ended": None,
+                           "lines": [], "cancel": threading.Event()}}
+        jobs = self.request("GET", "/api/admin/jobs", cookie=token)[1]["jobs"]
+        self.assertEqual([(j["username"], j["state"]) for j in jobs], [("alice", "queued")])
+        self.assertEqual(post("/api/admin/users/%s/jobs/j1/stop" % alice, {})[0], 200)
+        self.assertTrue(app.jobs["j1"]["cancel"].is_set())
+        status, text, _, _ = self.request("GET", "/api/admin/logs?kind=audit&from=%d&to=%d" % (time.time() - 3600, time.time() + 60), cookie=token)
+        self.assertEqual(status, 200)
+        self.assertIn("admin:limit", text)   # the limit changes above were recorded
+        self.assertEqual(self.request("GET", "/api/admin/logs?kind=app&from=x&to=1", cookie=token)[0], 400)
+        # A user cannot reach any of it.
+        user_token, user_csrf = self.login("alice", "alice-password")
+        self.assertEqual(self.request("POST", "/api/admin/settings", {"max_jobs": 20},
+                                      cookie=user_token, csrf=user_csrf)[0], 403)
 
     def test_login_cookie_csrf_and_logout(self):
         status, _, token, header = self.request("POST", "/api/auth/login", {"username": "ADMIN", "password": "admin-password"})
@@ -197,22 +226,33 @@ class IsolationUnitTest(unittest.TestCase):
         self.assertEqual([line["job"] for line in alice.lines], ["a1", "a1"])
         self.assertEqual(bob.lines, [])
 
-    def test_jobs_queue_when_the_site_is_busy(self):
-        slots = threading.BoundedSemaphore(1)
-        slots.acquire()
+    def test_jobs_beyond_the_personal_limit_wait_their_turn(self):
         app = Studia.__new__(Studia)
-        app.lock, app.slots, app.history, app.events = threading.RLock(), slots, [], []
+        app.lock, app.history, app.events, app.jobs = threading.RLock(), [], [], {}
         app.publish = app.events.append
-        job = {"id": "j", "title": "t", "course": "c", "course_name": "c", "platform": "zhs", "state": "running",
-                   "summary": "", "started": 0, "ended": None, "lines": [], "cancel": threading.Event()}
-        app.jobs = {"j": job}
-        runner = threading.Thread(target=app._run_job, args=(job, lambda: "完成", None))
-        runner.start()
+        app.job_limit = lambda: 1
+        gate = threading.Event()
+
+        def job(jid, started):
+            app.jobs[jid] = {"id": jid, "title": jid, "course": jid, "course_name": jid, "platform": "zhs",
+                             "state": "queued", "summary": "", "started": started, "ended": None, "lines": [],
+                             "cancel": threading.Event()}
+            with app.lock:
+                app._take_turn(app.jobs[jid])
+            return app.jobs[jid]
+
+        first, second = job("a", 1), job("b", 2)
+        self.assertEqual((first["state"], second["state"]), ("running", "queued"))
+        runners = [threading.Thread(target=app._run_job, args=(first, lambda: gate.wait(5) and "完成", None)),
+                   threading.Thread(target=app._run_job, args=(second, lambda: "完成", None))]
+        for runner in runners:
+            runner.start()
         time.sleep(1.3)
-        self.assertEqual(app.events[0]["state"], "queued")
-        slots.release()
-        runner.join(5)
-        self.assertEqual([e["state"] for e in app.events], ["queued", "running", "done"])
+        self.assertEqual(second["state"], "queued")
+        gate.set()
+        for runner in runners:
+            runner.join(5)
+        self.assertEqual([(e["id"], e["state"]) for e in app.events], [("a", "done"), ("b", "running"), ("b", "done")])
 
     def test_throttle_window(self):
         throttle = Throttle(limit=2, window=60)
@@ -305,3 +345,22 @@ class IsolationUnitTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LogExportTest(unittest.TestCase):
+    def test_only_lines_inside_the_window_and_their_tracebacks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            day = Path(directory) / "icve-ai-assistant-log_2026-11-01.log"
+            day.write_text("[2026-11-01 08:00:00,001][1][a.py][line: 1][INFO] :: early\n"
+                           "[2026-11-01 09:30:00,001][1][a.py][line: 1][ERROR] :: boom\n"
+                           "Traceback (most recent call last):\n"
+                           "[2026-11-01 11:00:00,001][1][a.py][line: 1][INFO] :: late\n", encoding="utf-8")
+            at = lambda text: time.mktime(time.strptime(text, "%Y-%m-%d %H:%M"))
+            text = export_logs(directory, "app", at("2026-11-01 09:00"), at("2026-11-01 10:00"))
+            self.assertEqual(text.splitlines(), ["[2026-11-01 09:30:00,001][1][a.py][line: 1][ERROR] :: boom",
+                                                 "Traceback (most recent call last):"])
+            Path(directory, "audit.log").write_text(
+                json.dumps({"time": "2026-11-01 09:15:00", "action": "login"}) + "\n", encoding="utf-8")
+            self.assertIn('"login"', export_logs(directory, "audit", at("2026-11-01 09:00"), at("2026-11-01 10:00")))
+            self.assertEqual(export_logs(directory, "app", at("2026-11-02 09:00"), at("2026-11-02 10:00")),
+                             "这段时间没有日志。\n")
