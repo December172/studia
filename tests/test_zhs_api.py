@@ -105,6 +105,101 @@ class SecureTest(unittest.TestCase):
             client.secure("https://x.test/path", {})
 
 
+class FailureDiagnosticsTest(unittest.TestCase):
+    """Failed calls log endpoint, HTTP status, business code, platform message and field shape, nothing secret."""
+
+    URL = "https://studyservice-api.zhihuishu.com/gateway/t/v1/learning/saveDatabaseIntervalTimeV2?uuid=U-9&ticket=ST-1"
+
+    def client(self, payload, status=200):
+        client = make_api()
+        client.session.cookies.set("CASLOGC", "secret-cookie-value-123", domain="zhihuishu.com")
+        client.session.cookies.set("SESSION", "jsessionid-abcdef0123456789", domain="zhihuishu.com")
+        client.session.request.return_value = json_response(payload, status)
+        return client
+
+    def assert_nothing_secret(self, text):
+        for secret in ("secret-cookie-value-123", "jsessionid-abcdef0123456789", "uuid=", "ticket=", "ST-1",
+                       "secretStr", "13800138000", "alice-password", "student-no-778899"):
+            self.assertNotIn(secret, text)
+
+    def test_decode_error_names_the_endpoint_code_message_and_fields(self):
+        client = self.client({"code": -1, "message": "参数解码发生错误", "data": None, "success": False})
+        with self.assertLogs("ZHSMain.api", "WARNING") as logs, self.assertRaises(ZHSApiError) as ctx:
+            client.secure(self.URL, {"uuid": "U-9", "password": "alice-password", "studentNo": "student-no-778899"})
+        self.assertEqual(ctx.exception.code, -1)            # behaviour unchanged
+        line = logs.output[0]
+        self.assertIn("POST studyservice-api.zhihuishu.com/gateway/t/v1/learning/saveDatabaseIntervalTimeV2", line)
+        self.assertIn("HTTP 200", line)
+        self.assertIn("业务码 -1", line)
+        self.assertIn("提示：参数解码发生错误", line)
+        self.assertIn("响应字段：code(int), message(str), data(null), success(bool)", line)
+        self.assertNotIn("验证类型", line)
+        self.assert_nothing_secret(line)
+
+    def test_captcha_logs_the_platform_message_and_an_unknown_type_when_none_is_given(self):
+        client = self.client({"code": -12, "message": "请完成安全验证 13800138000", "data": {"token": "abcdefghijklmnopqrstuvwxyz"}})
+        with self.assertLogs("ZHSMain.api", "WARNING") as logs, self.assertRaises(CaptchaRequired):
+            client.secure(self.URL, {})
+        line = logs.output[0]
+        self.assertIn("业务码 -12", line)
+        self.assertIn("提示：请完成安全验证 ***", line)
+        self.assertIn("验证类型：未知", line)
+        self.assertIn("data(dict: token(str))", line)
+        self.assertNotIn("abcdefghijklmnopqrstuvwxyz", line)
+        self.assert_nothing_secret(line)
+
+    def test_captcha_type_is_logged_only_when_the_platform_names_it(self):
+        client = self.client({"code": -12, "msg": "", "data": {"captchaType": "slide"}})
+        with self.assertLogs("ZHSMain.api", "WARNING") as logs, self.assertRaises(CaptchaRequired):
+            client.secure(self.URL, {})
+        self.assertIn("验证类型：captchaType=slide", logs.output[0])
+
+    def test_http_and_connection_failures_keep_their_errors_and_hide_the_query(self):
+        client = self.client({}, status=502)
+        with self.assertLogs("ZHSMain.api", "WARNING") as logs, self.assertRaises(PlatformUnavailable):
+            client.secure(self.URL, {})
+        self.assertIn("HTTP 502", logs.output[0])
+        self.assert_nothing_secret(logs.output[0])
+        client.session.request.side_effect = requests.ConnectionError("Max retries exceeded with url: " + self.URL)
+        with self.assertLogs("ZHSMain.api", "WARNING") as logs, self.assertRaises(PlatformUnavailable):
+            client.secure(self.URL, {})
+        self.assertIn("HTTP 无响应 · 提示：ConnectionError", logs.output[0])
+        self.assert_nothing_secret(logs.output[0])
+
+    def test_shared_exam_slider_block_is_logged_and_still_asks_the_user(self):
+        client = self.client({"status": "403", "msg": "请完成滑块验证", "rt": None})
+        with self.assertLogs("ZHSMain.api", "WARNING") as logs, self.assertRaises(CaptchaRequired):
+            client.exam_form("https://studentexam-api.zhihuishu.com/studentExam/gateway/t/v1/answer/saveStudentAnswer",
+                             {"answer": "B", "uuid": "U-9"})
+        line = logs.output[0]
+        self.assertIn("POST studentexam-api.zhihuishu.com/studentExam/gateway/t/v1/answer/saveStudentAnswer", line)
+        self.assertIn("业务码 403 · 提示：请完成滑块验证 · 验证类型：未知", line)
+        self.assertNotIn('"B"', line)
+        self.assert_nothing_secret(line)
+
+    def test_the_line_reaches_the_web_job_log(self):
+        import logging
+        import threading
+        from web.server import JOBS, _EventLogHandler
+        app = Mock()
+        handler = _EventLogHandler()
+        log = logging.getLogger("ZHSMain.api")
+        log.addHandler(handler)
+        JOBS["ab12"] = app
+        try:
+            client = self.client({"code": -1, "message": "参数解码发生错误"})
+            worker = threading.Thread(target=lambda: self.assertRaises(ZHSApiError, client.secure, self.URL, {}),
+                                      name="studia-job-ab12")
+            worker.start()
+            worker.join(5)
+        finally:
+            log.removeHandler(handler)
+            JOBS.pop("ab12", None)
+        event = app.publish.call_args[0][0]
+        self.assertEqual((event["job"], event["level"]), ("ab12", "warn"))
+        self.assertIn("业务码 -1", event["text"])
+
+
 class CookieTest(unittest.TestCase):
     def test_restored_expired_exam_cookie_is_not_sent(self):
         client = make_api()

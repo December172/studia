@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 import urllib.parse
 
@@ -50,6 +51,77 @@ HEADERS = {
 
 STUDY_GATEWAY = STUDY + "/gateway/t/v1"
 AI_GATEWAY = AI + "/run/gateway/t/stu"
+
+# ---------------------------------------------------------------- 失败诊断
+# One warning line per failed call, so a log shows which endpoint failed and what the
+# platform said. Never the request, the full response, cookies, secretStr or account data.
+
+# Response fields that name the kind of verification, when the platform sends one.
+CAPTCHA_TYPE_FIELDS = ("captchaType", "verifyType", "validateType", "checkType")
+# Long tokens, long digit runs (phone, student, ticket numbers) and e-mail addresses.
+_SENSITIVE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+|\d{7,}|[A-Za-z0-9+/=_-]{16,}")
+
+
+class _Json(dict):
+    """A decoded JSON object that remembers the HTTP status it came with."""
+    http_status = None
+
+
+def _endpoint(url):
+    parts = urllib.parse.urlsplit(url)
+    return parts.netloc + parts.path
+
+
+def _clean(text, limit=200):
+    text = " ".join(str(text if text is not None else "").split())[:limit]
+    return _SENSITIVE.sub("***", text)
+
+
+def _type(value):
+    if value is None:
+        return "null"
+    return {bool: "bool", int: "int", float: "float", str: "str", list: "list", dict: "dict"}.get(type(value), "other")
+
+
+def _shape(result):
+    """Field names and value types, one level into `data`; never the values."""
+    fields = []
+    for name, value in list(result.items())[:30]:
+        if isinstance(value, dict):
+            inner = ", ".join("%s(%s)" % (_clean(k, 40), _type(v)) for k, v in list(value.items())[:30])
+            fields.append("%s(dict: %s)" % (_clean(name, 40), inner))
+        else:
+            fields.append("%s(%s)" % (_clean(name, 40), _type(value)))
+    return ", ".join(fields) or "（空）"
+
+
+def _captcha_type(result):
+    """The verification type only when the platform names it in a field; never guessed."""
+    data = result.get("data") if isinstance(result, dict) else None
+    for source in (result, data):
+        if isinstance(source, dict):
+            for field in CAPTCHA_TYPE_FIELDS:
+                value = source.get(field)
+                if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).strip():
+                    return "%s=%s" % (field, _clean(value, 40))
+    return "未知"
+
+
+def _log_failure(method, url, status, *, code=None, message=None, result=None, captcha=False):
+    try:
+        parts = ["智慧树接口失败：%s %s" % (method.upper(), _endpoint(url)), "HTTP %s" % (status or "无响应")]
+        if code is not None:
+            parts.append("业务码 %s" % _clean(code, 20))
+        if message is not None:
+            parts.append("提示：%s" % (_clean(message) or "（空）"))
+        if captcha:
+            parts.append("验证类型：%s" % _captcha_type(result))
+        if isinstance(result, dict):
+            parts.append("响应字段：%s" % _shape(result))
+        logger.warning(" · ".join(parts))
+    except Exception:
+        # A diagnostic must never change how the request fails.
+        logger.debug("记录智慧树接口诊断失败", exc_info=True)
 
 
 class ZHSError(RuntimeError):
@@ -187,20 +259,28 @@ class ZHSApi:
                 timeout=(10, 30),
                 allow_redirects=allow_redirects,
             )
-        except requests.RequestException:
+        except requests.RequestException as exc:
+            # The exception text can contain the full URL with its query; only its class is logged.
+            _log_failure(method, url, None, message=type(exc).__name__)
             raise PlatformUnavailable("暂时无法连接智慧树，请稍后重试") from None
         if response.status_code in (401, 403):
+            _log_failure(method, url, response.status_code)
             raise AuthenticationExpired("智慧树登录已过期，请重新扫码")
         if response.status_code >= 400:
+            _log_failure(method, url, response.status_code)
             raise PlatformUnavailable(f"智慧树返回 HTTP {response.status_code}，请稍后重试")
         if not expect_json:
             return response
         try:
             result = response.json()
         except ValueError:
+            _log_failure(method, url, response.status_code, message="响应不是 JSON")
             raise PlatformUnavailable("智慧树响应无法解析，请稍后重试") from None
         if not isinstance(result, dict):
+            _log_failure(method, url, response.status_code, message="响应是 %s，不是对象" % _type(result))
             raise PlatformUnavailable("智慧树返回了未知格式，请稍后重试")
+        result = _Json(result)
+        result.http_status = response.status_code
         return result
 
     def _secure_form(self, payload, key):
@@ -222,10 +302,13 @@ class ZHSApi:
             result = self._request("POST", url, data=form)
 
         code = result.get("code", ok)
-        if code == -12:
-            raise CaptchaRequired("智慧树要求验证码，请到网页完成验证后重试")
         if code != ok:
-            raise ZHSApiError(code, result.get("message") or result.get("msg") or "")
+            message = result.get("message") or result.get("msg") or ""
+            _log_failure(method, url, getattr(result, "http_status", None), code=code, message=message,
+                         result=result, captcha=code == -12)
+            if code == -12:
+                raise CaptchaRequired("智慧树要求验证码，请到网页完成验证后重试")
+            raise ZHSApiError(code, message)
         return result
 
     def login_qr(self):
@@ -711,7 +794,10 @@ class ZHSApi:
         result = self._request("POST", url, data=form, origin=EXAM_PAGE)
         if str(result.get("status")) != "200":
             message = result.get("msg") or result.get("message") or ""
-            if "滑块" in message or "验证" in message:
+            captcha = "滑块" in message or "验证" in message
+            _log_failure("POST", url, getattr(result, "http_status", None), code=result.get("status"),
+                         message=message, result=result, captcha=captcha)
+            if captcha:
                 raise CaptchaRequired(
                     "智慧树拒绝了本次作答请求（%s），请到网页打开该试卷完成验证后重试" % message)
             raise ZHSApiError(result.get("status"), message)
