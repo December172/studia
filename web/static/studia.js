@@ -71,7 +71,7 @@ async function api(path, { method = "GET", body } = {}) {
 const state = {
   platforms: [], courses: {}, papers: {}, units: {}, selected: {},
   jobs: [], runs: {}, focus: null, history: [], view: "", loginToken: { cancelled: true }, lastDone: null,
-  current: store.get("studia-platform", ""), menuOpen: false, logFilter: "all",
+  current: store.get("studia-platform", ""), menuOpen: false, logFilter: "all", armed: null,
 };
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
 const runOf = (id) => (state.runs[id] = state.runs[id] || freshRun());
@@ -172,14 +172,14 @@ function renderSidebar() {
   const item = (hash, icon, label, extra = "", cls = "") =>
     `<button class="nav_item ${cls}" data-go="${hash}" aria-current="${view === hash}">${icon}<span class="label">${esc(label)}</span>${extra}</button>`;
 
-  $(".switcher_wrap").innerHTML = `
+  patch($(".switcher_wrap"), `
     <button class="switch" data-menu aria-haspopup="menu" aria-expanded="${state.menuOpen}">
       <span class="plat ${p.id}">${INITIAL[p.id]}</span><span class="who"><b>${esc(p.name)}</b><small>${esc(platformStatus(p))}</small></span><span class="chev">${ICON.updown}</span></button>
     ${state.menuOpen ? `<div class="menu" role="menu">${state.platforms.map((x, i) => `
       <button class="menu_row" role="menuitem" data-switch="${x.id}"><span class="plat ${x.id}">${INITIAL[x.id]}</span>
         <span class="who"><b>${esc(x.name)}</b><small>${esc(platformStatus(x))}</small></span>
         ${state.jobs.some((j) => j.platform === x.id) ? '<span class="live">进行中</span>' : ""}
-        ${x.id === p.id ? `<span class="tick">${ICON.tick}</span>` : `<span class="kbd">⌘${i + 1}</span>`}</button>`).join("")}</div>` : ""}`;
+        ${x.id === p.id ? `<span class="tick">${ICON.tick}</span>` : `<span class="kbd">⌘${i + 1}</span>`}</button>`).join("")}</div>` : ""}`);
 
   let html = item("#/jobs", ICON.pulse, "任务", jobPill());
   if (session.user?.role === "admin") html += item("#/admin", ICON.shield, "管理");
@@ -191,26 +191,49 @@ function renderSidebar() {
     return item(`#/course/${p.id}/${c.id}`, ring(c.progress, COLOR[p.id]), c.name,
       busy ? '<span class="live"></span>' : c.progress == null ? "" : `<span class="count">${esc(c.progress)}%</span>`);
   }).join("") || `<div class="nav_item quiet"><span class="label">没有课程</span></div>`;
-  $(".nav").innerHTML = html;
+  patch($(".nav"), html);
 
-  $(".side_foot").innerHTML = (session.user
+  patch($(".side_foot"), (session.user
     ? `<button class="me" data-go="#/settings/account" title="账号与密码"><span class="avatar">${esc(session.user.username.slice(0, 1).toUpperCase())}</span>${esc(session.user.username)}</button>`
     : `<button class="me" data-go="#/settings/account"><span class="avatar">本</span>本机</button>`)
     + `<button class="icon_btn" data-theme title="夜读模式 ⌘J" aria-label="切换夜读模式">${ICON.moon}</button>
-       <button class="icon_btn" data-go="#/settings" title="设置" aria-label="设置">${ICON.gear}</button>`;
+       <button class="icon_btn" data-go="#/settings" title="设置" aria-label="设置">${ICON.gear}</button>`);
 }
 
 /* ---------------------------------------------------------------- page helpers */
 
 const page = $(".page");
 const scroller = $(".scroll");
-// Entrance animation only when the user navigates; background repaints must not replay it.
+// Live progress repaints several times a second. Patch the existing DOM instead of
+// replacing it, so buttons, running animations and a finger mid-tap survive the update.
+function patch(target, html) {
+  const fresh = document.createElement("template");
+  fresh.innerHTML = html;
+  patchChildren(target, fresh.content);
+}
+function patchChildren(from, to) {
+  const old = [...from.childNodes], next = [...to.childNodes];
+  next.forEach((node, i) => {
+    const have = old[i];
+    if (!have) from.appendChild(node);
+    else if (have.nodeType !== node.nodeType || have.nodeName !== node.nodeName) from.replaceChild(node, have);
+    else if (node.nodeType === 1) {
+      // A reused element may now mean something else; views rebind their handlers after each paint.
+      have.onclick = null;
+      for (const { name } of [...have.attributes]) if (!node.hasAttribute(name)) have.removeAttribute(name);
+      for (const { name, value } of [...node.attributes]) if (have.getAttribute(name) !== value) have.setAttribute(name, value);
+      patchChildren(have, node);
+    } else if (have.nodeValue !== node.nodeValue) have.nodeValue = node.nodeValue;
+  });
+  for (let i = old.length - 1; i >= next.length; i -= 1) from.removeChild(old[i]);
+}
+
+// Entrance animation only when the user navigates; background repaints patch in place.
 let quiet = false;
 function setPage(html) {
-  const scroll = scroller.scrollTop;
+  if (quiet) { patch(page, html); return; }
   page.innerHTML = html;
   page.classList.remove("enter");
-  if (quiet) { scroller.scrollTop = scroll; return; }
   void page.offsetWidth;
   page.classList.add("enter");
 }
@@ -260,7 +283,10 @@ async function loadUnits(pid, cid, force = false) {
   repaint();
 }
 
+const TOUCH = matchMedia("(hover: none)").matches;
 const tip = $(".tip");
+// Touch screens fire mouseover on tap but never mouseout; hide the tip once the page moves.
+document.addEventListener("scroll", () => tip.classList.remove("show"), true);
 document.addEventListener("mouseover", (event) => {
   const cell = event.target.closest(".cell[data-u]");
   const grid = cell?.closest("[data-k]");
@@ -575,7 +601,7 @@ function renderCourse(p, c, tab, full = false) {
       return `<button class="act" data-start="${type}" ${block ? "disabled" : ""}><span class="act_head"><span class="glyph">${icon}</span>${label}</span>
         <p>${text}</p><span class="foot"><span>${esc(foot)}</span>${i === 0 ? '<span class="kbd">S</span>' : ""}</span></button>`;
     }).join("")}</div>
-      <div class="section"><h3>学习单元</h3><span class="aside">每格一个单元，悬停查看</span></div>
+      <div class="section"><h3>学习单元</h3><span class="aside">每格一个单元，${TOUCH ? "点一格" : "悬停"}查看</span></div>
       ${gridHtml(k)}`;
   } else if (!p.features.answer) {
     body = `<div class="notice">${esc(p.name)} 的网页版答题还在接入中。现在可以在终端里运行 <code>python StartWork.py</code>，选这门课后进入「AI 答题」。</div>`;
@@ -606,7 +632,7 @@ function renderCourse(p, c, tab, full = false) {
     }).join("") || `<div class="empty">这门课没有作业、测验或考试</div>`;
     if (categories.length) body += `<div class="dock"><span class="info">${answerBlock ? esc(answerBlock) : n ? `已选 <b>${n}</b> 份 · 交卷前会再确认一次` : "勾选要作答的试卷"}</span>
       <button class="btn" data-save ${n && !answerBlock ? "" : "disabled"}>仅生成答案</button>
-      <button class="btn primary" data-submit ${n && !answerBlock ? "" : "disabled"}>AI 作答并交卷</button></div>`;
+      <button class="btn primary ${state.armed === k ? "armed" : ""}" data-submit ${n && !answerBlock ? "" : "disabled"}>${state.armed === k ? `再按一次，交 ${n} 份卷` : "AI 作答并交卷"}</button></div>`;
   }
   if (full) setPage(head + body); else { quiet = true; setPage(head + body); quiet = false; }
 
@@ -623,10 +649,10 @@ function renderCourse(p, c, tab, full = false) {
   if (save) save.onclick = () => startJob({ platform: p.id, course: c.id, type: "answer", tasks: tasks(), auto_submit: false });
   const submit = $("[data-submit]", page);
   if (submit) submit.onclick = () => {
-    if (submit.classList.contains("armed")) { startJob({ platform: p.id, course: c.id, type: "answer", tasks: tasks(), auto_submit: true }); return; }
-    submit.classList.add("armed");
-    submit.textContent = `再按一次，交 ${selectedOf(k).size} 份卷`;
-    setTimeout(() => { if (submit.isConnected) { submit.classList.remove("armed"); submit.textContent = "AI 作答并交卷"; } }, 4000);
+    if (state.armed === k) { state.armed = null; startJob({ platform: p.id, course: c.id, type: "answer", tasks: tasks(), auto_submit: true }); return; }
+    state.armed = k;
+    renderCourse(p, c, tab);
+    setTimeout(() => { if (state.armed === k) { state.armed = null; repaint(); } }, 4000);
   };
   if (tab === "study") loadUnits(p.id, c.id);
   if (tab === "answer" && p.features.answer && !papers) loadPapers(p, c);
@@ -691,20 +717,20 @@ function renderPlayer() {
     const { pct, label } = progressOf(run);
     const others = state.jobs.length - 1;
     player.classList.remove("ended");
-    player.innerHTML = `
+    patch(player, `
       <div class="np"><span class="art">${job.title === "AI 答题" ? ICON.pen : job.title === "每日复习" ? ICON.repeat : ICON.play}</span>
         <span class="what"><small><span class="live">${queued ? "排队中" : LIVE_WORD[job.title] || "进行中"}</span>${esc(job.course_name)}</small>
         <b>${esc(queued ? "服务器繁忙，等前面的任务结束" : run.unit?.name || run.detail || "准备中…")}</b></span></div>
       <div class="scrub"><span class="track ${pct == null ? "unknown" : ""}"><i style="width:${pct ?? 0}%"></i></span><span class="t">${esc(label || clock(elapsed(job)))}</span></div>
       <div class="np_meta">${recentCells(key(job.platform, job.course))}
         ${others ? `<button class="btn" data-go="#/jobs" title="查看全部任务">另有 ${others} 个</button>` : ""}
-        <button class="btn" data-open="${job.id}">展开 <span class="kbd">F</span></button><button class="icon_btn" data-stop="${job.id}" title="停止 ⇧S" aria-label="停止">${ICON.stop}</button></div>`;
+        <button class="btn" data-open="${job.id}">展开 <span class="kbd">F</span></button><button class="icon_btn" data-stop="${job.id}" title="停止 ⇧S" aria-label="停止">${ICON.stop}</button></div>`);
   } else {
     player.classList.add("ended");
-    player.innerHTML = `
+    patch(player, `
       <div class="np"><span class="art ${done.state === "waiting" ? "waiting" : "still"}">${ICON[done.state] || ICON.stopped}</span>
         <span class="what"><small>${esc(done.title)} · ${esc(done.course_name)} · ${STATE_WORD[done.state] || ""}</small><b>${esc(done.summary || "已结束")}</b></span></div>
-      <div class="np_meta"><button class="btn" data-go="#/jobs">查看</button><button class="btn" data-dismiss>关闭</button></div>`;
+      <div class="np_meta"><button class="btn" data-go="#/jobs">查看</button><button class="btn" data-dismiss>关闭</button></div>`);
   }
   if (sheet.classList.contains("open")) renderFocus();
 }
@@ -714,17 +740,16 @@ function renderFocus() {
   const job = live || state.lastDone;
   const body = $(".sheet_body", sheet);
   // With several jobs, the bar doubles as a switcher between them.
-  $(".sheet_tag", sheet).innerHTML = state.jobs.length > 1
+  patch($(".sheet_tag", sheet), state.jobs.length > 1
     ? state.jobs.map((j) => `<button class="chip" data-focus="${j.id}" aria-pressed="${j.id === live.id}">${esc(j.title)} · ${esc(j.course_name)}</button>`).join("")
-    : live ? `<span class="live">${LIVE_WORD[live.title] || "进行中"}</span>` : "";
+    : live ? `<span class="live">${LIVE_WORD[live.title] || "进行中"}</span>` : "");
   const stop = $("[data-stop]", sheet);
   stop.hidden = !live;
   if (live) stop.dataset.stop = live.id;
-  if (!job) { body.innerHTML = `<div class="focus"><div><div class="clock">—</div><p class="of">现在没有任务。</p></div></div>`; return; }
+  if (!job) { patch(body, `<div class="focus"><div><div class="clock">—</div><p class="of">现在没有任务。</p></div></div>`); return; }
   const run = live ? runOf(live.id) : freshRun();
   const { pct, label } = progressOf(run);
   const k = key(job.platform, job.course);
-  const logScroll = $(".log_body", body)?.scrollTop;
   const grid = job.title !== "AI 答题" && unitsOf(k)
     ? `<div class="section" style="margin-top:34px"><h3>整门课</h3><span class="aside mono">${tally(unitsOf(k)).done}/${tally(unitsOf(k)).all}</span></div>${gridHtml(k)}` : "";
   const headline = live
@@ -734,11 +759,10 @@ function renderFocus() {
        <div class="ticks"><span>开始</span><span>${esc(label)}</span><span>结束</span></div>`
     : `<div class="clock">${STATE_WORD[job.state] || "结束"}<small>${duration(elapsed(job))}</small></div>
        <div class="now">${esc(job.summary || "")}</div><div class="of">${esc(job.title)} · ${esc(job.course_name)}</div>`;
-  body.innerHTML = `<div class="focus"><div>${headline}${grid}</div>
+  patch(body, `<div class="focus"><div>${headline}${grid}</div>
     <div class="log"><div class="log_head"><span class="grow">日志</span>
       ${[["all", "全部"], ["warn", "提醒"], ["err", "错误"]].map(([f, l]) => `<button class="chip" data-filter="${f}" aria-pressed="${state.logFilter === f}">${l}</button>`).join("")}</div>
-      <div class="log_body">${logHtml(live ? run.lines : job.lines || [], state.logFilter)}</div></div></div>`;
-  if (logScroll != null) $(".log_body", body).scrollTop = logScroll;
+      <div class="log_body">${logHtml(live ? run.lines : job.lines || [], state.logFilter)}</div></div></div>`);
 }
 function openSheet(id) {
   if (id) state.focus = id;
@@ -852,6 +876,10 @@ function connectEvents() {
   if (MOCK) { import("./mock.js").then((m) => m.subscribe(handleEvent)); return; }
   const source = new EventSource(session.mode === "hosted" ? "/api/events" : `/api/events?t=${encodeURIComponent(TOKEN)}`);
   source.onmessage = (message) => handleEvent(JSON.parse(message.data));
+  // Events sent while the stream was down are lost; catch up from the server on reconnect.
+  let opened = false;
+  source.onopen = () => { if (opened) refreshState().then(repaint); opened = true; };
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refreshState().then(repaint); });
 }
 
 /* ---------------------------------------------------------------- login */
@@ -920,12 +948,20 @@ async function refreshState() {
     const data = await api("/api/state");
     state.platforms = data.platforms;
     state.history = data.history || [];
-    for (const job of data.jobs || []) {
+    const live = data.jobs || [];
+    for (const job of live) {
       if (state.jobs.some((j) => j.id === job.id)) continue;
-      state.jobs.push(job);
       runOf(job.id).lines = job.lines || [];
       if (jobType(job) !== "answer") loadUnits(job.platform, job.course);
     }
+    // Jobs that ended while we were away: drop them and refresh what they changed.
+    for (const gone of state.jobs.filter((j) => !live.some((x) => x.id === j.id))) {
+      delete state.runs[gone.id];
+      const ended = state.history.find((h) => h.id === gone.id);
+      if (ended) finishUnits(ended);
+      delete state.papers[key(gone.platform, gone.course)];
+    }
+    state.jobs = live;
     for (const p of state.platforms) if (!p.logged_in) delete state.courses[p.id];
   } catch (error) { toast(error.message); }
   renderSidebar();
@@ -970,6 +1006,8 @@ overlay.addEventListener("click", (event) => { if (event.target === overlay) clo
 document.addEventListener("click", (event) => {
   const t = event.target;
   if (state.menuOpen && !t.closest(".menu, [data-menu]")) { state.menuOpen = false; renderSidebar(); }
+  if (t.closest("[data-drawer]")) { document.body.classList.toggle("drawer"); return; }
+  if (t.closest("[data-go], [data-find]")) document.body.classList.remove("drawer");
   if (t.closest("[data-menu]")) { state.menuOpen = !state.menuOpen; renderSidebar(); return; }
   const sw = t.closest("[data-switch]"); if (sw) { switchPlatform(sw.dataset.switch); return; }
   const target = t.closest("[data-go]"); if (target) { closeSheet(); go(target.dataset.go); }
@@ -999,6 +1037,7 @@ window.addEventListener("keydown", (event) => {
   if (mod && ["1", "2", "3"].includes(event.key) && state.platforms[event.key - 1]) { event.preventDefault(); switchPlatform(state.platforms[event.key - 1].id); return; }
   if (mod && event.key.toLowerCase() === "k") { event.preventDefault(); openFinder(); return; }
   if (mod && event.key.toLowerCase() === "j") { event.preventDefault(); toggleTheme(); return; }
+  if (event.key === "Escape" && document.body.classList.contains("drawer")) { document.body.classList.remove("drawer"); return; }
   if (event.key === "Escape") { if (state.menuOpen) { state.menuOpen = false; renderSidebar(); } else closeSheet(); return; }
   if (mod || event.altKey || event.target.closest("input, textarea, select") || document.body.classList.contains("signed-out")) return;
   if (event.key === "S" && event.shiftKey) { stopJob(focusedJob()?.id); return; }
