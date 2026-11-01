@@ -29,6 +29,9 @@ const ICON = {
   pulse: svg('<path d="M2 8h2.4l1.7-4.5 3.4 9 1.7-4.5H14"/>', 15),
   gear: svg('<circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M3.6 12.4l1.2-1.2M11.2 4.8l1.2-1.2"/>', 15),
   moon: svg('<path d="M13 9.5A5.5 5.5 0 0 1 6.5 3a5.5 5.5 0 1 0 6.5 6.5z"/>', 15),
+  sun: svg('<circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/>', 15),
+  logout: svg('<path d="M6.5 2.5h-3v11h3M10 5l3 3-3 3M13 8H6"/>', 15),
+  key: svg('<circle cx="5.5" cy="10.5" r="3"/><path d="m7.6 8.4 5.9-5.9M11 5l1.5 1.5"/>', 15),
   shield: svg('<path d="M8 1.8 13 3.6v4c0 3.2-2.1 5.4-5 6.6-2.9-1.2-5-3.4-5-6.6v-4z"/>', 15),
   login: svg('<path d="M9.5 2.5h3v11h-3M3 8h7M7.5 5l3 3-3 3"/>', 15),
   updown: svg('<path d="m5 6 3-3 3 3M5 10l3 3 3-3"/>', 12),
@@ -71,7 +74,7 @@ async function api(path, { method = "GET", body } = {}) {
 const state = {
   platforms: [], courses: {}, papers: {}, units: {}, selected: {},
   jobs: [], runs: {}, focus: null, history: [], view: "", loginToken: { cancelled: true }, lastDone: null,
-  current: store.get("studia-platform", ""), menuOpen: false, logFilter: "all", armed: null,
+  current: store.get("studia-platform", ""), menuOpen: false, meOpen: false, logFilter: "all", armed: null, editPassword: false,
 };
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
 const runOf = (id) => (state.runs[id] = state.runs[id] || freshRun());
@@ -134,6 +137,7 @@ function toggleTheme() {
   document.documentElement.dataset.theme = night ? "night" : "";
   store.set("studia-theme", night ? "night" : "day");
   toast(night ? "夜读模式" : "日间模式");
+  renderSidebar();
 }
 
 /* ---------------------------------------------------------------- sidebar */
@@ -193,10 +197,18 @@ function renderSidebar() {
   }).join("") || `<div class="nav_item quiet"><span class="label">没有课程</span></div>`;
   patch($(".nav"), html);
 
-  patch($(".side_foot"), (session.user
-    ? `<button class="me" data-go="#/settings/account" title="账号与密码"><span class="avatar">${esc(session.user.username.slice(0, 1).toUpperCase())}</span>${esc(session.user.username)}</button>`
-    : `<button class="me" data-go="#/settings/account"><span class="avatar">本</span>本机</button>`)
-    + `<button class="icon_btn" data-theme title="夜读模式 ⌘J" aria-label="切换夜读模式">${ICON.moon}</button>
+  const me = session.user;
+  const night = document.documentElement.dataset.theme === "night";
+  patch($(".side_foot"), (me
+    ? `<button class="me" data-me aria-haspopup="menu" aria-expanded="${state.meOpen}"><span class="avatar">${esc(me.username.slice(0, 1).toUpperCase())}</span><span class="label">${esc(me.username)}</span></button>
+       ${state.meOpen ? `<div class="menu me_menu" role="menu">
+         <div class="me_head"><span class="avatar big">${esc(me.username.slice(0, 1).toUpperCase())}</span><span class="who"><b>${esc(me.username)}</b><small>${me.role === "admin" ? "管理员" : "成员"}</small></span></div>
+         <button class="menu_row" role="menuitem" data-go="#/settings/account">${ICON.key}<span class="grow">账号与密码</span></button>
+         ${me.role === "admin" ? `<button class="menu_row" role="menuitem" data-go="#/admin">${ICON.shield}<span class="grow">管理</span></button>` : ""}
+         <div class="psep"></div>
+         <button class="menu_row danger" role="menuitem" data-signout>${ICON.logout}<span class="grow">退出 Studia</span></button></div>` : ""}`
+    : `<span class="me static" title="本机模式：只有这台电脑能访问"><span class="avatar">本</span><span class="label">本机</span></span>`)
+    + `<button class="icon_btn" data-toggle-theme title="${night ? "日间模式" : "夜读模式"} ⌘J" aria-label="切换日间 / 夜读模式">${night ? ICON.sun : ICON.moon}</button>
        <button class="icon_btn" data-go="#/settings" title="设置" aria-label="设置">${ICON.gear}</button>`);
 }
 
@@ -414,16 +426,25 @@ const VIEWS = {
     const where = session.mode === "hosted" ? "设置只对你的账号生效，保存在服务器上你自己的目录里。" : "所有设置只保存在这台电脑上。";
     const head = `<h1 class="title">设置</h1><p class="sub">${where}</p>${tabs}`;
     if (tab === "account") {
-      const studia = session.user ? `<div class="section"><h3>Studia 账号</h3></div>
-        <div class="models"><div class="model"><span class="avatar big">${esc(session.user.username.slice(0, 1).toUpperCase())}</span>
-          <span class="m1"><b>${esc(session.user.username)}</b>${session.user.role === "admin" ? '<span class="pill blue">管理员</span>' : ""}
-          <small class="sans">修改密码后，其他设备上的登录会全部失效</small></span><span></span>
-          <span class="row_btns"><button class="btn small" data-signout>退出 Studia</button></span></div>
-        <form class="form_card" data-password><h3>修改密码</h3>
-          <div class="field"><label>原密码</label><input name="old" type="password" autocomplete="current-password" required></div>
-          <div class="field"><label>新密码</label><input name="new" type="password" autocomplete="new-password" minlength="8" required></div>
-          <div class="field"><label>再输一次</label><input name="again" type="password" autocomplete="new-password" minlength="8" required></div>
-          <div class="form_btns"><button class="btn primary">保存新密码</button></div></form></div>` : "";
+      const me = session.user;
+      const studia = me ? `<div class="section"><h3>Studia 账号</h3></div>
+        <div class="models">
+          <div class="model plain"><span class="account_who"><span class="avatar big">${esc(me.username.slice(0, 1).toUpperCase())}</span>
+            <span class="m1"><b>${esc(me.username)}</b><span class="pill ${me.role === "admin" ? "blue" : ""}">${me.role === "admin" ? "管理员" : "成员"}</span>
+            <small class="sans">${me.last_login ? `上次登录 ${ago(me.last_login)}` : ""}${me.created ? ` · ${new Date(me.created * 1000).toLocaleDateString()} 加入` : ""}</small></span></span></div>
+          ${state.editPassword ? `<form class="model plain password_form" data-password>
+            <span class="m1"><b>修改密码</b><small class="sans">保存后，其他设备上的登录会全部退出。</small></span>
+            <span class="pw_fields">
+              <label class="auth_field"><span>原密码</span><input name="old" type="password" autocomplete="current-password" required></label>
+              <label class="auth_field"><span>新密码</span><input name="new" type="password" autocomplete="new-password" minlength="8" placeholder="至少 8 位" required></label>
+              <label class="auth_field"><span>再输一次</span><input name="again" type="password" autocomplete="new-password" minlength="8" required></label>
+              <span class="row_btns"><button type="button" class="btn" data-password-cancel>取消</button><button class="btn primary">保存新密码</button></span>
+            </span></form>`
+          : `<div class="model plain"><span class="m1"><b>密码</b><small class="sans">修改后，其他设备上的登录会全部退出</small></span>
+              <span class="row_btns"><button class="btn small" data-password-edit>修改密码</button></span></div>`}
+          <div class="model plain"><span class="m1"><b>退出登录</b><small class="sans">只退出这个浏览器</small></span>
+            <span class="row_btns"><button class="btn small danger" data-signout>退出 Studia</button></span></div>
+        </div>` : "";
       setPage(`${head}${studia}<div class="section"><h3>平台账号</h3></div>
         <div class="models">${state.platforms.map((p) => `<div class="model"><span class="plat ${p.id}">${INITIAL[p.id]}</span>
           <span class="m1"><b>${esc(p.name)}</b><small class="sans">${esc(platformStatus(p))} · ${p.login === "qr" ? "App 扫码登录" : "职教云浏览器授权"}</small></span><span></span>
@@ -434,15 +455,23 @@ const VIEWS = {
         toast("已退出登录");
         VIEWS.settings("account");
       }));
-      const signout = $("[data-signout]", page);
-      if (signout) signout.onclick = async () => { try { await api("/api/auth/logout", { method: "POST" }); } catch { /* already gone */ } location.reload(); };
+      const edit = $("[data-password-edit]", page);
+      if (edit) edit.onclick = () => { state.editPassword = true; quiet = true; VIEWS.settings("account"); quiet = false; $("[data-password] input", page)?.focus(); };
+      const cancel = $("[data-password-cancel]", page);
+      if (cancel) cancel.onclick = () => { state.editPassword = false; quiet = true; VIEWS.settings("account"); quiet = false; };
       const form = $("[data-password]", page);
       if (form) form.onsubmit = async (event) => {
         event.preventDefault();
         const data = Object.fromEntries(new FormData(form));
+        if (data.new.length < 8) { toast("新密码至少 8 位"); return; }
         if (data.new !== data.again) { toast("两次输入的新密码不一致"); return; }
-        try { await api("/api/auth/password", { method: "POST", body: { old: data.old, new: data.new } }); await loadMe(); form.reset(); toast("密码已修改"); }
-        catch (e) { toast(e.message); }
+        try {
+          await api("/api/auth/password", { method: "POST", body: { old: data.old, new: data.new } });
+          await loadMe();
+          state.editPassword = false;
+          toast("密码已修改");
+          VIEWS.settings("account");
+        } catch (e) { toast(e.message); }
       };
       return;
     }
@@ -460,7 +489,7 @@ const VIEWS = {
           <div class="form_btns"><button class="btn primary" data-concurrency>保存</button></div></div></div>
         <div class="section"><h3>外观</h3></div>
         <div class="models"><div class="model plain"><span class="m1"><b>夜读模式</b><small class="sans">深色主题，只替换颜色，不改布局。只记在这个浏览器里。</small></span>
-          <button class="btn" data-theme>切换 <span class="kbd">⌘J</span></button></div></div>`);
+          <button class="btn" data-toggle-theme>切换 <span class="kbd">⌘J</span></button></div></div>`);
       quiet = false;
       $("[data-concurrency]", page).onclick = async () => {
         const body = { ai: Number($('input[name="ai"]', page).value), study: Number($('input[name="study"]', page).value) };
@@ -1006,13 +1035,16 @@ overlay.addEventListener("click", (event) => { if (event.target === overlay) clo
 document.addEventListener("click", (event) => {
   const t = event.target;
   if (state.menuOpen && !t.closest(".menu, [data-menu]")) { state.menuOpen = false; renderSidebar(); }
+  if (state.meOpen && !t.closest("[data-me]")) { state.meOpen = false; renderSidebar(); }
+  if (t.closest("[data-me]")) { state.meOpen = !state.meOpen; renderSidebar(); return; }
+  if (t.closest("[data-signout]")) { signOut(); return; }
   if (t.closest("[data-drawer]")) { document.body.classList.toggle("drawer"); return; }
   if (t.closest("[data-go], [data-find]")) document.body.classList.remove("drawer");
   if (t.closest("[data-menu]")) { state.menuOpen = !state.menuOpen; renderSidebar(); return; }
   const sw = t.closest("[data-switch]"); if (sw) { switchPlatform(sw.dataset.switch); return; }
   const target = t.closest("[data-go]"); if (target) { closeSheet(); go(target.dataset.go); }
   if (t.closest("[data-find]")) openFinder();
-  if (t.closest("[data-theme]")) toggleTheme();
+  if (t.closest("[data-toggle-theme]")) toggleTheme();
   const open = t.closest("[data-open]"); if (open) openSheet(open.dataset.open);
   if (t.closest("[data-close]")) closeSheet();
   const stop = t.closest("[data-stop]"); if (stop) stopJob(stop.dataset.stop);
@@ -1038,6 +1070,7 @@ window.addEventListener("keydown", (event) => {
   if (mod && event.key.toLowerCase() === "k") { event.preventDefault(); openFinder(); return; }
   if (mod && event.key.toLowerCase() === "j") { event.preventDefault(); toggleTheme(); return; }
   if (event.key === "Escape" && document.body.classList.contains("drawer")) { document.body.classList.remove("drawer"); return; }
+  if (event.key === "Escape" && state.meOpen) { state.meOpen = false; renderSidebar(); return; }
   if (event.key === "Escape") { if (state.menuOpen) { state.menuOpen = false; renderSidebar(); } else closeSheet(); return; }
   if (mod || event.altKey || event.target.closest("input, textarea, select") || document.body.classList.contains("signed-out")) return;
   if (event.key === "S" && event.shiftKey) { stopJob(focusedJob()?.id); return; }
@@ -1058,7 +1091,7 @@ function route() {
   renderSidebar();
   renderPlayer();
   scroller.scrollTop = 0;
-  if (name === "settings") VIEWS.settings(a);
+  if (name === "settings") { state.editPassword = false; VIEWS.settings(a); }
   else if (name === "course") VIEWS.course(a, decodeURIComponent(b || ""), c);
   else if (name === "login") VIEWS.login(a);
   else if (name === "admin" && session.user?.role !== "admin") go(homeOf(currentPlatform()));
@@ -1160,6 +1193,11 @@ function showAuth(mode = "login") {
       button.textContent = text.button;
     }
   };
+}
+
+async function signOut() {
+  try { await api("/api/auth/logout", { method: "POST" }); } catch { /* already gone */ }
+  location.reload();
 }
 
 async function loadMe() {
