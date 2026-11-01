@@ -9,7 +9,7 @@ from http.server import ThreadingHTTPServer
 from unittest.mock import Mock
 
 from settings import SettingsStore
-from web.server import Studia, _course, make_handler
+from web.server import LocalAccess, Studia, _course, make_handler
 
 
 class WebServerTest(unittest.TestCase):
@@ -19,7 +19,7 @@ class WebServerTest(unittest.TestCase):
         self.app = Studia(SettingsStore(directory.name), oauth=Mock(return_value=None))
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), None)
         self.port = self.server.server_address[1]
-        self.server.RequestHandlerClass = make_handler(self.app, self.port)
+        self.server.RequestHandlerClass = make_handler(LocalAccess(self.app, self.port))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)

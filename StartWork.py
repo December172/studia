@@ -56,7 +56,10 @@ def main(view=None):
 
 if __name__ == '__main__':
     import sys
-    if '--web' in sys.argv[1:]:
+    if '--serve' in sys.argv[1:]:
+        from web.hosting import main as hosted
+        sys.exit(hosted([arg for arg in sys.argv[1:] if arg != '--serve']))
+    elif '--web' in sys.argv[1:]:
         from web.server import serve
         serve()
     else:

@@ -38,6 +38,7 @@ const ICON = {
   logout: svg('<path d="M6.5 2.5h-3v11h3M10 5l3 3-3 3M13 8H6"/>', 14),
   stop: svg('<rect x="3.5" y="3.5" width="9" height="9" rx="2" fill="currentColor" stroke="none"/>', 11),
   check: '<svg width="15" height="15" viewBox="0 0 15 15" fill="none"><path d="m3.8 7.8 2.4 2.4 5-5.2" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  shield: svg('<path d="M8 1.8 13 3.6v4c0 3.2-2.1 5.4-5 6.6-2.9-1.2-5-3.4-5-6.6v-4z"/>'),
   tick: svg('<path d="m3.5 8.5 3 3 6-7"/>'),
   search: svg('<circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5"/>', 15),
   ok: svg('<circle cx="8" cy="8" r="6.5" fill="#4cb36c" stroke="none"/><path d="m5.2 8.2 1.9 1.9 3.8-4" stroke="#fff" stroke-width="1.7"/>'),
@@ -47,19 +48,23 @@ const ICON = {
 
 /* ------------------------------------------------------------------ api */
 
+// local: one person, token from the terminal URL; hosted: cookie session + CSRF header.
+const session = { mode: "local", user: null, csrf: "" };
 let mockModule = null;
 async function api(path, { method = "GET", body } = {}) {
   if (MOCK) {
     mockModule = mockModule || (await import("./mock.js"));
     return mockModule.request(path, method, body);
   }
-  const response = await fetch(path, {
-    method,
-    headers: { "X-Studia-Token": TOKEN, ...(body ? { "Content-Type": "application/json" } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const headers = body ? { "Content-Type": "application/json" } : {};
+  if (session.mode === "hosted") { if (method !== "GET") headers["X-Studia-CSRF"] = session.csrf; }
+  else headers["X-Studia-Token"] = TOKEN;
+  const response = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined, credentials: "same-origin" });
   const data = await response.json().catch(() => ({}));
-  if (response.status === 401 && path !== "/api/state") refreshState();
+  if (response.status === 401 && !path.startsWith("/api/auth/") && path !== "/api/mode") {
+    if (session.mode === "hosted") loadMe().then((ok) => { if (!ok) showAuth(); else refreshState(); });
+    else if (path !== "/api/state") refreshState();
+  }
   if (!response.ok) throw new Error(data.error || `请求失败（${response.status}）`);
   return data;
 }
@@ -138,6 +143,7 @@ function renderSidebar() {
 
   const courses = state.courses[p.id] || [];
   let html = item("#/jobs", ICON.jobs, "任务", jobPill);
+  if (session.user?.role === "admin") html += item("#/admin", ICON.shield, "管理");
   html += `<div class="nav_label">${p.logged_in ? "课程" : esc(p.short)}</div>`;
   if (!p.logged_in) html += item(`#/login/${p.id}`, ICON.login, `登录${/^[A-Za-z]/.test(p.short) ? " " : ""}${p.short}`, "", "login");
   else if (!state.courses[p.id]) html += `<div class="nav_item"><span class="label" style="color:var(--faint)">正在读取课程…</span></div>`;
@@ -147,7 +153,10 @@ function renderSidebar() {
       open ? `<span class="count" title="${open} 份试卷可作答">${open}</span>` : "");
   }).join("") || `<div class="nav_item"><span class="label" style="color:var(--faint)">没有课程</span></div>`;
   $(".sidebar_nav").innerHTML = html;
-  $(".sidebar_foot").innerHTML = `<button class="foot_btn" data-go="#/settings" aria-current="${view === "#/settings"}">${ICON.gear}设置</button>`;
+  $(".sidebar_foot").innerHTML = session.user
+    ? `<button class="foot_btn account" data-go="#/settings/account" title="账号与密码"><span class="me">${esc(session.user.username.slice(0, 1).toUpperCase())}</span>${esc(session.user.username)}</button>
+       <button class="foot_btn icon" data-go="#/settings" aria-label="设置" title="设置">${ICON.gear}</button>`
+    : `<button class="foot_btn" data-go="#/settings" aria-current="${view === "#/settings"}">${ICON.gear}设置</button>`;
 
   $("[data-menu]").onclick = (event) => { event.stopPropagation(); state.menuOpen = !state.menuOpen; renderSidebar(); };
   document.querySelectorAll("[data-switch]").forEach((el) => (el.onclick = () => switchPlatform(el.dataset.switch)));
@@ -185,6 +194,52 @@ const lastRun = (pid, cid, type) => state.history.find((j) => j.platform === pid
 /* ---------------------------------------------------------------- views */
 
 const VIEWS = {
+  async admin() {
+    setToolbar("");
+    const head = `<h1 class="title">管理</h1><p class="meta">邀请新用户、管理账号，查看所有人正在运行的任务。</p>`;
+    let users, invites;
+    try { [users, invites] = await Promise.all([api("/api/admin/users"), api("/api/admin/invites")]); }
+    catch (error) { setPage(`${head}<div class="empty">${esc(error.message)}</div>`); return; }
+    if (state.view !== "#/admin") return;
+    users = users.users; invites = invites.invites;
+    const nameOf = (uid) => users.find((u) => u.id === uid)?.username || "—";
+    const inviteState = { open: ["blue", "可用"], used: ["", "已使用"], expired: ["", "已过期"] };
+    setPage(`${head}
+      <div class="heading">邀请码<button class="link" data-invite>+ 生成邀请码</button></div>
+      <p class="meta" style="margin:0 0 8px">把邀请码发给对方，对方在登录页选「用邀请码注册」。每个邀请码只能用一次，7 天后过期。</p>
+      ${invites.map((i) => `<div class="model"><span class="model_body"><span class="model_name"><code class="code">${esc(i.code)}</code>
+          <span class="tag ${inviteState[i.state][0]}">${inviteState[i.state][1]}</span></span>
+          <span class="model_sub">${i.used_by ? `${esc(nameOf(i.used_by))} 已注册` : `创建于 ${ago(i.created)} · ${new Date(i.expires * 1000).toLocaleDateString()} 过期`}</span></span>
+        <span class="model_actions">${i.state === "open" ? `<button class="button" data-copy="${esc(i.code)}">复制</button><button class="button danger" data-revoke="${esc(i.code)}">作废</button>` : ""}</span></div>`).join("")
+        || `<div class="empty" style="margin-top:20px">还没有邀请码</div>`}
+      <div class="heading">用户<span class="hint">${users.length} 人</span></div>
+      ${users.map((u) => `<div class="model"><span class="me big">${esc(u.username.slice(0, 1).toUpperCase())}</span>
+          <span class="model_body"><span class="model_name">${esc(u.username)}${u.role === "admin" ? '<span class="tag blue">管理员</span>' : ""}${u.disabled ? '<span class="tag">已停用</span>' : ""}</span>
+          <span class="model_sub">${u.job ? `${esc(u.job.title)} · ${esc(u.job.course_name)} · ${u.job.state === "queued" ? "排队中" : "运行中"}` : u.last_login ? `上次登录 ${ago(u.last_login)}` : "还没登录过"}</span></span>
+          <span class="model_actions">${u.job ? `<button class="button danger" data-stop-user="${u.id}">停止任务</button>` : ""}
+            <button class="button" data-reset="${u.id}">重置密码</button>
+            ${u.id === session.user.id ? "" : u.disabled ? `<button class="button" data-enable="${u.id}">启用</button>` : `<button class="button danger" data-disable="${u.id}">停用</button>`}</span></div>`).join("")}`);
+    const act = async (path, body, message) => {
+      try { await api(path, { method: "POST", body: body || {} }); toast(message); VIEWS.admin(); } catch (e) { toast(e.message); }
+    };
+    $("[data-invite]", page).onclick = async () => {
+      try { const { code } = await api("/api/admin/invites", { method: "POST", body: { days: 7 } }); navigator.clipboard?.writeText(code).catch(() => {}); toast(`邀请码 ${code} 已复制`); VIEWS.admin(); }
+      catch (e) { toast(e.message); }
+    };
+    page.querySelectorAll("[data-copy]").forEach((el) => (el.onclick = () => { navigator.clipboard?.writeText(el.dataset.copy).then(() => toast("已复制"), () => toast(el.dataset.copy)); }));
+    page.querySelectorAll("[data-revoke]").forEach((el) => (el.onclick = () => act(`/api/admin/invites/${el.dataset.revoke}/revoke`, null, "邀请码已作废")));
+    page.querySelectorAll("[data-stop-user]").forEach((el) => (el.onclick = () => act(`/api/admin/users/${el.dataset.stopUser}/stop`, null, "已发出停止指令")));
+    page.querySelectorAll("[data-enable]").forEach((el) => (el.onclick = () => act(`/api/admin/users/${el.dataset.enable}/enable`, null, "已启用")));
+    page.querySelectorAll("[data-disable]").forEach((el) => (el.onclick = () => {
+      if (!el.classList.contains("armed")) { el.classList.add("armed"); el.textContent = "确认停用"; return; }
+      act(`/api/admin/users/${el.dataset.disable}/disable`, null, "已停用，对方已被登出");
+    }));
+    page.querySelectorAll("[data-reset]").forEach((el) => (el.onclick = () => {
+      const password = window.prompt("输入新密码（至少 8 位）。保存后对方需要用新密码重新登录。");
+      if (password) act(`/api/admin/users/${el.dataset.reset}/password`, { password }, "密码已重置");
+    }));
+  },
+
   jobs() {
     setToolbar("");
     const rows = state.history.map((j, i) => {
@@ -211,14 +266,14 @@ const VIEWS = {
     if (p.logged_in) return go(homeOf(p));
     const head = `<div class="crumbs"><span class="dot ${pid}"></span>${esc(p.name)}</div><h1 class="title">登录${/^[A-Za-z]/.test(p.short) ? " " : ""}${esc(p.short)}</h1>`;
     if (p.login === "qr") {
-      setPage(`${head}<p class="meta">用智慧树 App 扫描二维码，在手机上确认后，课程会出现在左侧。登录状态只保存在这台电脑上。</p>
+      setPage(`${head}<p class="meta">用智慧树 App 扫描二维码，在手机上确认后，课程会出现在左侧。${session.mode === "hosted" ? "登录状态保存在服务器上你自己的目录里。" : "登录状态只保存在这台电脑上。"}</p>
         <div class="card"><div class="qr_card"><div class="qr_empty">正在获取二维码…</div>
           <p class="qr_status"><b>等待扫码</b>打开智慧树 App，点右上角的扫一扫。二维码过期会自动刷新。</p></div>
           <div class="card_actions"><button class="button" data-start-login>刷新二维码</button></div></div>`);
       $("[data-start-login]", page).onclick = () => qrLogin(pid);
       qrLogin(pid);
     } else {
-      setPage(`${head}<p class="meta">${esc(p.name)} 使用职教云账号，通过浏览器授权登录。登录状态只保存在这台电脑上。</p>
+      setPage(`${head}<p class="meta">${esc(p.name)} 使用职教云账号，通过浏览器授权登录。${session.mode === "hosted" ? "登录状态保存在服务器上你自己的目录里。" : "登录状态只保存在这台电脑上。"}</p>
         <div class="card"><p class="qr_status" data-status><b>在浏览器中登录</b>点击下面的按钮会打开职教云登录页，在那里登录完成后，这里会自动继续。MOOC 和资源库需要分别授权一次。</p>
           <div class="card_actions"><button class="button primary" data-start-login>打开登录页</button></div></div>`);
       $("[data-start-login]", page).onclick = () => browserLogin(pid);
@@ -238,9 +293,20 @@ const VIEWS = {
     tab = ["account", "models", "study"].includes(tab) ? tab : "models";
     const tabs = `<div class="tabs" role="tablist">${[["account", "账号"], ["models", "AI 模型"], ["study", "学习"]].map(([k, label]) =>
       `<button class="tab" role="tab" aria-selected="${k === tab}" data-go="#/settings/${k}">${label}</button>`).join("")}</div>`;
-    const head = `<h1 class="title">设置</h1><p class="meta">所有设置只保存在这台电脑上。</p>${tabs}`;
+    const where = session.mode === "hosted" ? "设置只对你的账号生效，保存在服务器上你自己的目录里。" : "所有设置只保存在这台电脑上。";
+    const head = `<h1 class="title">设置</h1><p class="meta">${where}</p>${tabs}`;
     if (tab === "account") {
-      setPage(`${head}<div class="heading">平台账号</div>
+      const studia = session.user ? `<div class="heading">Studia 账号</div>
+        <div class="model"><span class="me big">${esc(session.user.username.slice(0, 1).toUpperCase())}</span>
+          <span class="model_body"><span class="model_name">${esc(session.user.username)}${session.user.role === "admin" ? '<span class="tag blue">管理员</span>' : ""}</span>
+          <span class="model_sub">修改密码后，其他设备上的登录会全部失效</span></span>
+          <button class="button" data-signout>${ICON.logout}退出 Studia</button></div>
+        <form class="form_card" data-password style="margin-top:6px"><h3>修改密码</h3>
+          <div class="field"><label>原密码</label><input name="old" type="password" autocomplete="current-password" required></div>
+          <div class="field"><label>新密码</label><input name="new" type="password" autocomplete="new-password" minlength="8" required></div>
+          <div class="field"><label>再输一次</label><input name="again" type="password" autocomplete="new-password" minlength="8" required></div>
+          <div class="row_buttons"><button class="button primary">保存新密码</button></div></form>` : "";
+      setPage(`${head}${studia}<div class="heading">平台账号</div>
         ${state.platforms.map((p) => `<div class="model"><span class="avatar ${p.id}" style="width:24px;height:24px;border-radius:6px;display:grid;place-items:center;color:#fff;font-size:12px;font-weight:700">${INITIAL[p.id]}</span>
           <span class="model_body"><span class="model_name">${esc(p.name)}</span><span class="model_sub">${esc(platformStatus(p))} · ${p.login === "qr" ? "App 扫码登录" : "职教云浏览器授权"}</span></span>
           ${p.logged_in ? `<button class="button danger" data-logout="${p.id}">${ICON.logout}退出</button>` : `<button class="button primary" data-go="#/login/${p.id}">登录</button>`}</div>`).join("")}`);
@@ -250,6 +316,16 @@ const VIEWS = {
         toast("已退出登录");
         VIEWS.settings("account");
       }));
+      const signout = $("[data-signout]", page);
+      if (signout) signout.onclick = async () => { try { await api("/api/auth/logout", { method: "POST" }); } catch { /* already gone */ } location.reload(); };
+      const form = $("[data-password]", page);
+      if (form) form.onsubmit = async (event) => {
+        event.preventDefault();
+        const data = Object.fromEntries(new FormData(form));
+        if (data.new !== data.again) { toast("两次输入的新密码不一致"); return; }
+        try { await api("/api/auth/password", { method: "POST", body: { old: data.old, new: data.new } }); await loadMe(); form.reset(); toast("密码已修改"); }
+        catch (e) { toast(e.message); }
+      };
       return;
     }
     setPage(`${head}<div class="empty">正在读取…</div>`);
@@ -474,7 +550,7 @@ function runCard() {
   const run = state.run;
   const pct = percent();
   return `<div class="card">
-    <div class="card_head"><span class="dot ${job.platform}"></span><span class="card_title">${esc(job.title)} · ${esc(job.course_name)}</span><span class="tag blue">进行中</span></div>
+    <div class="card_head"><span class="dot ${job.platform}"></span><span class="card_title">${esc(job.title)} · ${esc(job.course_name)}</span><span class="tag blue">${job.state === "queued" ? "排队中" : "进行中"}</span></div>
     <p class="card_text">${esc(run.detail || "准备中…")}</p>
     <div class="progress"><i style="width:${pct ?? 4}%"></i></div>
     ${run.sub ? `<p class="card_text" style="margin-top:6px;font-size:12.5px;color:var(--muted)">${esc(run.sub.name)} · ${run.sub.done}/${run.sub.total || "?"} ${esc(run.sub.unit || "")}</p>` : ""}
@@ -491,7 +567,7 @@ function renderJobbar() {
   if (job) {
     const pct = percent();
     jobbar.innerHTML = `<span class="dot ${job.platform}"></span><span class="title">${esc(job.title)} · ${esc(job.course_name)}</span>
-      <span class="detail">${esc(state.run.detail || "准备中…")}</span>
+      <span class="detail">${esc(job.state === "queued" ? "服务器繁忙，排队等待中…" : state.run.detail || "准备中…")}</span>
       <span class="track ${pct == null ? "indeterminate" : ""}"><i style="width:${pct ?? 0}%"></i></span><span class="pct">${pct == null ? "" : pct + "%"}</span>
       <button class="tool" data-go="#/jobs">查看</button><button class="tool" data-stop-bar>${ICON.stop}停止</button>`;
     $("[data-stop-bar]", jobbar).onclick = stopJob;
@@ -525,7 +601,9 @@ function pushLine(text, level = "", done = false) {
 function handleEvent(event) {
   const run = state.run;
   if (event.type === "job") {
-    if (event.state === "running") {
+    if (event.state === "queued" || (event.state === "running" && state.job?.id === event.id)) {
+      state.job = event;
+    } else if (event.state === "running") {
       state.job = event;
       state.run = freshRun();
       state.lastDone = null;
@@ -575,7 +653,7 @@ function repaint() {
 
 function connectEvents() {
   if (MOCK) { import("./mock.js").then((m) => m.subscribe(handleEvent)); return; }
-  const source = new EventSource(`/api/events?t=${encodeURIComponent(TOKEN)}`);
+  const source = new EventSource(session.mode === "hosted" ? "/api/events" : `/api/events?t=${encodeURIComponent(TOKEN)}`);
   source.onmessage = (message) => handleEvent(JSON.parse(message.data));
 }
 
@@ -608,8 +686,13 @@ async function browserLogin(pid) {
   const status = $("[data-status]", page), button = $("[data-start-login]", page);
   const say = (title, text) => { status.innerHTML = `<b>${esc(title)}</b>${esc(text)}`; };
   button.disabled = true;
-  try { say("等待浏览器登录", (await api(`/api/platforms/${pid}/login`, { method: "POST" })).message); }
-  catch (error) { say("无法开始登录", error.message); button.disabled = false; return; }
+  // Opened synchronously inside the click so popup blockers allow it; pointed at the SSO page below.
+  const tab = session.mode === "hosted" ? window.open("", "_blank") : null;
+  try {
+    const started = await api(`/api/platforms/${pid}/login`, { method: "POST" });
+    if (started.open && tab) tab.location = started.open; else if (started.open) location.href = started.open; else tab?.close();
+    say("等待职教云登录", started.message);
+  } catch (error) { tab?.close(); say("无法开始登录", error.message); button.disabled = false; return; }
   while (!token.cancelled) {
     await sleep(1500);
     if (token.cancelled || !status.isConnected) return;
@@ -659,7 +742,7 @@ function closeFinder() { overlay.classList.remove("open"); }
 function paintFinder() {
   const q = finderInput.value.trim().toLowerCase();
   const match = (text) => !q || text.toLowerCase().includes(q);
-  const pages = [["#/jobs", ICON.jobs, "任务"], ["#/settings", ICON.gear, "设置"],
+  const pages = [["#/jobs", ICON.jobs, "任务"], ["#/settings", ICON.gear, "设置"], ...(session.user?.role === "admin" ? [["#/admin", ICON.shield, "管理"]] : []),
     ...state.platforms.map((p) => [homeOf(p), `<span class="dot ${p.id}"></span>`, `切换到 ${p.name}`])]
     .filter(([, , label]) => match(label)).map(([hash, icon, label]) => ({ hash, icon, label, meta: "" }));
   const courses = state.platforms.flatMap((p) => (state.courses[p.id] || []).filter((c) => match(c.name))
@@ -711,12 +794,55 @@ function route() {
   $(".main_scroll").scrollTop = 0;
   if (name === "course") VIEWS.course(a, decodeURIComponent(b || ""), c);
   else if (name === "login") VIEWS.login(a);
+  else if (name === "admin" && session.user?.role !== "admin") go(homeOf(currentPlatform()));
   else if (VIEWS[name]) VIEWS[name]();
   else go(homeOf(currentPlatform()));
 }
 window.addEventListener("hashchange", route);
 
+function showAuth(tab = "login") {
+  document.body.classList.add("signed-out");
+  let box = $(".auth");
+  if (!box) { box = document.createElement("div"); box.className = "auth"; document.body.appendChild(box); }
+  box.innerHTML = `<form class="auth_card" data-auth>
+      <div class="auth_brand"><span class="avatar zhs" style="background:var(--blue-fill)">${ICON.tick}</span>Studia</div>
+      <div class="tabs" role="tablist">
+        <button type="button" class="tab" role="tab" aria-selected="${tab === "login"}" data-auth-tab="login">登录</button>
+        <button type="button" class="tab" role="tab" aria-selected="${tab === "register"}" data-auth-tab="register">用邀请码注册</button></div>
+      ${tab === "register" ? `<div class="field"><label>邀请码</label><input name="invite" placeholder="例如 3F2A-91BC-04DE" required autocomplete="off"></div>` : ""}
+      <div class="field"><label>用户名</label><input name="username" required autocomplete="username" autofocus></div>
+      <div class="field"><label>密码</label><input name="password" type="password" required minlength="${tab === "register" ? 8 : 1}" autocomplete="${tab === "register" ? "new-password" : "current-password"}"></div>
+      <p class="auth_error" role="alert"></p>
+      <button class="button primary auth_submit">${tab === "register" ? "注册并登录" : "登录"}</button>
+      <p class="auth_note">${tab === "register" ? "没有邀请码？请向管理员索取。" : "还没有账号？请向管理员要一个邀请码。"}</p></form>`;
+  box.querySelectorAll("[data-auth-tab]").forEach((el) => (el.onclick = () => showAuth(el.dataset.authTab)));
+  const form = $("[data-auth]", box);
+  form.querySelector("input").focus();
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const button = $(".auth_submit", form);
+    button.disabled = true;
+    try {
+      await api(tab === "register" ? "/api/auth/register" : "/api/auth/login", { method: "POST", body: Object.fromEntries(new FormData(form)) });
+      location.reload();
+    } catch (error) {
+      $(".auth_error", form).textContent = error.message;
+      button.disabled = false;
+    }
+  };
+}
+
+async function loadMe() {
+  try {
+    const me = await api("/api/auth/me");
+    Object.assign(session, { user: me.user, csrf: me.csrf });
+    return true;
+  } catch { return false; }
+}
+
 (async function boot() {
+  if (!MOCK) { try { session.mode = (await api("/api/mode")).mode; } catch { /* old server: local */ } }
+  if (session.mode === "hosted" && !(await loadMe())) { showAuth(); return; }
   await refreshState();
   connectEvents();
   await Promise.all(state.platforms.filter((p) => p.logged_in).map((p) => loadCourses(p.id)));

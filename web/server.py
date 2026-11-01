@@ -42,6 +42,7 @@ STATIC = Path(__file__).resolve().parent / "static"
 REVIEW_MINUTES = 30
 QR_REFRESHES = 5
 HISTORY = 20
+JOB_THREADS = {}
 logger = logging.getLogger(__name__)
 
 # Order is the sidebar order. "answer"/"review" mark what the web UI can run today.
@@ -86,12 +87,18 @@ class Platform:
 class Studia:
     """All state behind the web UI; one running job at a time across platforms."""
 
-    def __init__(self, store=None, oauth=oauth_login):
+    def __init__(self, store=None, oauth=oauth_login, *, reports_dir="ai_results", slots=None, oauth_url=None):
         self.store = store or SettingsStore()
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
         self.platforms = {pid: Platform(pid) for pid, spec in PLATFORMS.items() if not spec.get("hidden")}
         self.oauth = oauth
+        # Hosted mode: answer reports stay in the user's own directory, jobs share
+        # a site-wide slot pool, and browser login returns to the server instead
+        # of a localhost listener.
+        self.reports_dir = reports_dir
+        self.slots = slots
+        self.oauth_url = oauth_url
         self.job = None
         self.history = []
         self.subscribers = set()
@@ -165,6 +172,9 @@ class Studia:
                 qr_token, image = client.login_qr()
                 platform.login = {"client": client, "qr": qr_token, "refreshes": 0}
                 return {"qr": _data_url(image)}
+            if self.oauth_url is not None:
+                platform.login = {"status": "waiting", "message": "请在新打开的页面登录职教云，完成后会自动回到这里"}
+                return {"status": "waiting", "message": platform.login["message"], "open": self.oauth_url(pid)}
             if platform.login and platform.login.get("status") == "waiting":
                 return {"status": "waiting", "message": "已在浏览器打开登录页"}
             platform.login = {"status": "waiting", "message": "已在浏览器打开职教云登录页，登录完成后会自动回到这里"}
@@ -172,12 +182,18 @@ class Studia:
             return {"status": "waiting", "message": platform.login["message"]}
 
     def _browser_login(self, platform):
+        token = self.oauth(timeout=300)
+        if not token:
+            platform.login.update(status="failed", message="登录失败或超时，请重试")
+            return
+        self.finish_browser_login(platform.id, token)
+
+    def finish_browser_login(self, pid, token):
+        platform = self.platform(pid)
+        if platform.login is None:
+            platform.login = {"status": "waiting", "message": ""}
         state = platform.login
         try:
-            token = self.oauth(timeout=300)
-            if not token:
-                state.update(status="failed", message="登录失败或超时，请重试")
-                return
             client = platform.spec["api"](token=token)
             if not client.access_token:
                 raise PlatformUnavailable("未获取有效的平台登录状态，请重试")
@@ -352,7 +368,21 @@ class Studia:
     def _run_job(self, target, platform):
         state, summary = "done", ""
         job = self.job
+        JOB_THREADS[threading.get_ident()] = self
+        acquired = False
         try:
+            if self.slots is not None:
+                # Site-wide limit: wait (cancellably) for a free slot before touching any platform.
+                while not self.slots.acquire(timeout=1):
+                    if job["cancel"].is_set():
+                        raise KeyboardInterrupt
+                    if job["state"] != "queued":
+                        job["state"] = "queued"
+                        self.publish(dict(_job_public(job), type="job"))
+                acquired = True
+                if job["state"] == "queued":
+                    job["state"] = "running"
+                    self.publish(dict(_job_public(job), type="job"))
             summary = target() or "已完成"
             if job["cancel"].is_set():
                 state, summary = "stopped", "已停止"
@@ -365,6 +395,9 @@ class Studia:
             logger.exception("网页任务失败")
             state, summary = "error", str(exc) or "任务失败"
         finally:
+            if acquired:
+                self.slots.release()
+            JOB_THREADS.pop(threading.get_ident(), None)
             with self.lock:
                 job.update(state=state, summary=summary, ended=time.time())
                 self.history.insert(0, job)
@@ -413,8 +446,8 @@ class Studia:
                     memory=AnswerMemory(Path(self.store.path).parent / "zhs-answers.json", shared=SHARED_ANSWERS))
             else:
                 # No manual-answer or confirm callbacks: unanswerable papers stay unsubmitted.
-                runner = AnswerRunner(ExamAPI(self.client(platform)), ai, auto_submit=auto_submit,
-                                      on_progress=self.on_progress, max_workers=workers)
+                runner = AnswerRunner(ExamAPI(self.client(platform)), ai, output_dir=self.reports_dir,
+                                      auto_submit=auto_submit, on_progress=self.on_progress, max_workers=workers)
             self.progress_event("begin", "AI 答题", total=len(selected), unit="份试卷")
             done = 0
             for course, item, category in selected:
@@ -530,16 +563,19 @@ class _EventLogHandler(logging.Handler):
 
     PREFIXES = ("ZHSMain", "AIMoocMain", "ZYKMoocMain", "MoocMain", "ai.")
 
-    def __init__(self, app):
+    def __init__(self, app=None):
         super().__init__(logging.INFO)
         self.app = app
 
     def emit(self, record):
-        if not record.name.startswith(self.PREFIXES) or not self.app.job:
+        # Hosted mode has no single app: a line belongs to whichever user's job thread
+        # logged it. Lines from helper threads are dropped rather than risk a leak.
+        app = self.app or JOB_THREADS.get(record.thread)
+        if app is None or not record.name.startswith(self.PREFIXES) or not app.job:
             return
         try:
             level = "error" if record.levelno >= logging.ERROR else "warn" if record.levelno >= logging.WARNING else ""
-            self.app.publish({"type": "log", "text": record.getMessage(), "level": level})
+            app.publish({"type": "log", "text": record.getMessage(), "level": level})
         except Exception:
             pass
 
@@ -641,9 +677,48 @@ ROUTES = [
 ]
 
 
-def make_handler(app, port):
-    allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+class Reply:
+    """A response other than plain JSON 200: custom status, headers or content type."""
 
+    def __init__(self, body, status=200, headers=None, content_type="application/json; charset=utf-8"):
+        self.body, self.status, self.headers, self.content_type = body, status, headers or {}, content_type
+
+
+NOT_HANDLED = object()
+
+
+class LocalAccess:
+    """One person on this machine: loopback host names and a random token from the terminal."""
+
+    mode = "local"
+
+    def __init__(self, app, port):
+        self.app = app
+        self.allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+    def host_ok(self, host):
+        # DNS rebinding: only our own host names; cross-site calls lack the token.
+        return host in self.allowed_hosts
+
+    def headers(self):
+        return {}
+
+    def public(self, request, method, path, query, body):
+        if method == "GET" and path == "/api/mode":
+            return {"mode": self.mode}
+        return NOT_HANDLED
+
+    def authorize(self, request, method, query):
+        token = request.headers.get("X-Studia-Token") or (query.get("t") or [""])[0]
+        if not hmac.compare_digest(token.encode(), self.app.token.encode()):
+            raise HttpError(403, "访问令牌无效，请从终端给出的地址打开 Studia")
+        return {"app": self.app}
+
+    def private(self, request, method, path, query, body, ctx):
+        return NOT_HANDLED
+
+
+def make_handler(access):
     class Handler(BaseHTTPRequestHandler):
         server_version = "Studia"
 
@@ -658,18 +733,16 @@ def make_handler(app, port):
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
-            for key, value in (extra or {}).items():
+            for key, value in dict(access.headers(), **(extra or {})).items():
                 self.send_header(key, value)
             self.end_headers()
             self.wfile.write(data)
 
-        def _guard(self, query):
-            # DNS rebinding: only our own host names; cross-site calls lack the token.
-            if self.headers.get("Host") not in allowed_hosts:
-                raise HttpError(403, "forbidden")
-            token = self.headers.get("X-Studia-Token") or (query.get("t") or [""])[0]
-            if not hmac.compare_digest(token.encode(), app.token.encode()):
-                raise HttpError(403, "访问令牌无效，请从终端给出的地址打开 Studia")
+        def _reply(self, result):
+            if isinstance(result, Reply):
+                body = result.body if isinstance(result.body, (bytes, dict, list)) else str(result.body).encode("utf-8")
+                return self._send(result.status, body, result.content_type, result.headers)
+            return self._send(200, result)
 
         def _body(self):
             length = int(self.headers.get("Content-Length") or 0)
@@ -686,8 +759,6 @@ def make_handler(app, port):
             return body
 
         def _static(self, path):
-            if self.headers.get("Host") not in allowed_hosts:
-                raise HttpError(403, "forbidden")
             target = (STATIC / (path.lstrip("/") or "index.html")).resolve()
             if STATIC not in target.parents or not target.is_file() or target.name == "mock.js":
                 raise HttpError(404, "not found")
@@ -700,7 +771,7 @@ def make_handler(app, port):
                                            "connect-src 'self'; frame-ancestors 'none'",
             })
 
-        def _events(self):
+        def _events(self, app):
             subscriber = queue.Queue(maxsize=500)
             app.subscribers.add(subscriber)
             try:
@@ -725,18 +796,26 @@ def make_handler(app, port):
             url = urlsplit(self.path)
             query = parse_qs(url.query)
             try:
+                if not access.host_ok(self.headers.get("Host")):
+                    raise HttpError(403, "forbidden")
+                body = self._body() if method == "POST" else {}
+                result = access.public(self, method, url.path, query, body)
+                if result is not NOT_HANDLED:
+                    return self._reply(result)
                 if not url.path.startswith("/api/"):
                     if method != "GET":
                         raise HttpError(405, "method not allowed")
                     return self._static(url.path)
-                self._guard(query)
+                ctx = access.authorize(self, method, query)
                 if method == "GET" and url.path == "/api/events":
-                    return self._events()
-                body = self._body() if method == "POST" else {}
+                    return self._events(ctx["app"])
+                result = access.private(self, method, url.path, query, body, ctx)
+                if result is not NOT_HANDLED:
+                    return self._reply(result)
                 for route_method, pattern, handler in ROUTES:
                     match = re.fullmatch(pattern, url.path)
                     if route_method == method and match:
-                        return self._send(200, handler(app, match, query, body))
+                        return self._reply(handler(ctx["app"], match, query, body))
                 raise HttpError(404, "not found")
             except HttpError as exc:
                 self._send(exc.status, {"error": str(exc)})
@@ -762,7 +841,7 @@ def serve(port=0, open_browser=True, store=None):
     logging.getLogger().addHandler(_EventLogHandler(app))
     server = ThreadingHTTPServer(("127.0.0.1", port), None)
     server.daemon_threads = True
-    server.RequestHandlerClass = make_handler(app, server.server_address[1])
+    server.RequestHandlerClass = make_handler(LocalAccess(app, server.server_address[1]))
     url = "http://127.0.0.1:%d/?t=%s" % (server.server_address[1], app.token)
     print("Studia 网页版已启动：%s" % url)
     print("只有本机能访问；按 Ctrl+C 退出。")
