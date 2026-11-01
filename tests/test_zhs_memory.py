@@ -416,3 +416,35 @@ class MemoryPathTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DatabaseMemoryTest(unittest.TestCase):
+    def test_one_users_graded_answer_serves_everyone_and_survives_restart(self):
+        from ZHSMain.memory import DatabaseAnswerMemory
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "studia.db"
+            memory = DatabaseAnswerMemory(db)
+            question = prepared()
+            memory.remember(question, ["1"], False)        # alice got it wrong
+            memory.remember_correct(question, ["2"])       # bob got it right
+            memory.save()
+            self.assertEqual(memory.lookup(question)["correct"], ["2"])
+            restarted = DatabaseAnswerMemory(db)
+            self.assertEqual(restarted.lookup(question), {"correct": ["2"], "wrong": [["1"]]})
+            self.assertEqual(restarted.stats(), {"questions": 1, "confirmed": 1, "bundled": 0})
+
+    def test_legacy_user_files_merge_without_losing_either_side(self):
+        from ZHSMain.memory import DatabaseAnswerMemory
+        with tempfile.TemporaryDirectory() as directory:
+            question, other = prepared(), prepared(2, content="2+2=?")
+            alice = AnswerMemory(Path(directory) / "alice.json")
+            alice.remember(question, ["1"], False)
+            alice.remember_correct(other, ["2"])
+            alice.save()
+            shared = DatabaseAnswerMemory(Path(directory) / "studia.db")
+            shared.remember_correct(question, ["2"])
+            shared.save()
+            self.assertEqual(shared.merge_file(alice.path), 2)
+            again = DatabaseAnswerMemory(Path(directory) / "studia.db")
+            self.assertEqual(again.lookup(question), {"correct": ["2"], "wrong": [["1"]]})
+            self.assertEqual(again.lookup(other)["correct"], ["2"])

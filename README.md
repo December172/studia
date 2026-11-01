@@ -90,7 +90,7 @@ AI 答不出的题会在终端列出题目和选项，等你手动补答。补�
 | 课程结构导出 | `exports/structure/` |
 | 本机配置（登录令牌、API Key、并发等） | `~/.config/icve-ai-assistant/settings.json`（macOS / Linux） |
 | 智慧树答案记忆 | 与本机配置同目录的 `zhs-answers.json` |
-| 服务器模式 | 数据目录（Docker 是 `studia-data` 卷）：`studia.db` 账号数据库、`users/<用户 ID>/` 各人数据（登录信息和 Key 加密存放） |
+| 服务器模式 | 数据目录（Docker 是 `studia-data` 卷）：`studia.db` 是账号和全站共享的答案记忆，`users/<用户 ID>/` 是各人数据（登录信息和 Key 加密存放） |
 
 以上文件和日志都已被 Git 忽略。本机模式的配置文件是**未加密**的 JSON（macOS / Linux 权限为 `600`），里面有登录令牌和 Key，不要分享。
 

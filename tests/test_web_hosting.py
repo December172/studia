@@ -282,6 +282,21 @@ class IsolationUnitTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_key("")
 
+    def test_answer_memory_is_shared_and_old_user_files_are_merged(self):
+        from ZHSMain.answer import prepare
+        from ZHSMain.memory import AnswerMemory
+        question = prepare({"id": 1, "content": "1+1=?", "questionType": 1,
+                            "optionVos": [{"id": 1, "content": "1"}, {"id": 2, "content": "2"}]})
+        with tempfile.TemporaryDirectory() as directory:
+            legacy = AnswerMemory(Path(directory) / "users" / "u1" / "zhs-answers.json")
+            legacy.remember_correct(question, ["2"])
+            legacy.save()
+            hub = Hub(directory, "http://127.0.0.1:1", key=os.urandom(32))
+            self.assertIs(hub.app("u1").memory, hub.app("u2").memory)
+            self.assertEqual(hub.app("u2").memory.lookup(question)["correct"], ["2"])
+            self.assertFalse(legacy.path.exists())
+            self.assertTrue(legacy.path.with_name("zhs-answers.json.merged").exists())
+
     def test_data_root_is_private(self):
         with tempfile.TemporaryDirectory() as directory:
             hub = Hub(Path(directory) / "data", "http://127.0.0.1:1", key=os.urandom(32))

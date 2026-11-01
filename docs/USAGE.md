@@ -61,6 +61,7 @@ python StartWork.py --serve --data ~/.studia-hosted --port 8080 --public-url htt
 #### 其他
 
 - 每个用户自己最多同时开 4 个任务。
+- **答案记忆全站共享**：智慧树交卷后平台判定的对错存进 `studia.db`，所有用户共用。一个人答对的题，其他人再遇到时直接用，答错的会避开，不再调用 AI。管理页能看到记了多少题。平台登录、AI 模型和答题报告仍然各人分开。旧版本每人一份的 `zhs-answers.json` 会在启动时并入，原文件改名为 `zhs-answers.json.merged`。
 - MOOC 登录会在新标签页打开职教云，完成后跳回 `STUDIA_PUBLIC_URL`。
 - 管理员可以停用账号（对方立即被登出）、重置密码、停止任意任务。登录连续失败 5 次会锁定 15 分钟。
 - 旧版本存在 `accounts.json` 里的账号会在首次启动时自动导入数据库，原文件改名为 `accounts.json.migrated`。

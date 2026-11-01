@@ -22,6 +22,7 @@ from urllib.parse import urlencode, urlsplit
 from Crypto.Cipher import AES
 
 from NewMoocMain.oauth_login import SSO_AUTH_URL, SSO_SOURCE
+from ZHSMain.memory import SHARED as SHARED_ANSWERS, DatabaseAnswerMemory
 from settings import SettingsError, SettingsStore
 from web.accounts import AccountError, Accounts, Sessions, Throttle
 from web.server import NOT_HANDLED, HttpError, Reply, Studia, _EventLogHandler, make_handler
@@ -112,6 +113,17 @@ class Hub:
         self.data.chmod(0o700)  # mkdir(parents=True) leaves the root at the umask default
         self.accounts = Accounts(self.data)
         self.sessions = Sessions(self.accounts)
+        # Answers the platform has judged, shared by every user: one user's graded paper
+        # spares everyone else the AI call (and the wrong answer) next time.
+        self.memory = DatabaseAnswerMemory(self.accounts.path, shared=SHARED_ANSWERS)
+        for legacy in sorted((self.data / "users").glob("*/zhs-answers.json")):
+            try:
+                count = self.memory.merge_file(legacy)
+            except (OSError, ValueError, TypeError) as exc:
+                logger.warning("合并 %s 失败，保留原文件：%s", legacy, exc)
+                continue
+            legacy.replace(legacy.with_name("zhs-answers.json.merged"))
+            logger.info("已把 %s 的 %d 题并入共享答案记忆", legacy.parent.name, count)
         # Until an administrator exists, whoever reaches the site first could claim it; the
         # first-run page therefore also asks for this code, printed only in the server log.
         self.setup_code = None if self.accounts.has_admin() else "-".join(
@@ -132,7 +144,7 @@ class Hub:
                 directory.mkdir(mode=0o700, parents=True, exist_ok=True)
                 store = EncryptedSettingsStore(directory, self.key, uid)
                 store.ensure_default_model()
-                app = Studia(store, reports_dir=directory / "ai_results", slots=self.slots,
+                app = Studia(store, reports_dir=directory / "ai_results", slots=self.slots, memory=self.memory,
                              oauth_url=lambda pid, uid=uid: self.oauth_url(uid, pid))
                 self.apps[uid] = app
             return app
@@ -360,6 +372,8 @@ class HostedAccess:
             return {"users": hub.overview()}
         if method == "GET" and path == "/api/admin/invites":
             return {"invites": hub.accounts.invites()}
+        if method == "GET" and path == "/api/admin/memory":
+            return hub.memory.stats()
         if method == "POST" and path == "/api/admin/invites":
             days = min(max(int(body.get("days") or 7), 1), 30)
             return {"code": hub.accounts.create_invite(me["id"], ttl=days * 86400)}

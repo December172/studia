@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import tempfile
 import threading
 from datetime import datetime
@@ -26,6 +27,7 @@ class AnswerMemory:
         self._shared_items = None
         self._loaded = False
         self._dirty = False
+        self._changed = set()
 
     @staticmethod
     def key(prepared):
@@ -97,6 +99,7 @@ class AnswerMemory:
                 item["wrong"] = wrong[-MAX_WRONG:]
             item["updated"] = datetime.now().isoformat(timespec="seconds")
             self._dirty = True
+            self._changed.add(key)
 
     def remember_correct(self, prepared, answer_texts):
         self.remember(prepared, answer_texts, True)
@@ -147,11 +150,77 @@ class AnswerMemory:
                 os.fsync(stream.fileno())
             os.replace(temporary, self.path)
             self._dirty = False
+            self._changed.clear()
         except OSError as exc:
             logger.warning("保存本机答案记忆失败，本次记忆未写入：%s", exc)
         finally:
             if temporary and os.path.exists(temporary):
                 os.unlink(temporary)
+
+
+class DatabaseAnswerMemory(AnswerMemory):
+    """One memory for every user of a Studia server, in a table of its SQLite database.
+
+    Keep a single instance per process and hand it to every runner: lookups and updates
+    go through its lock, and save() writes only the questions that changed."""
+
+    def __init__(self, db_path, shared=None):
+        super().__init__(db_path, shared)
+        self.db = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None, timeout=10)
+        self.db.execute("CREATE TABLE IF NOT EXISTS zhs_answers ("
+                        "key TEXT PRIMARY KEY, correct TEXT, wrong TEXT NOT NULL, updated TEXT)")
+
+    def _load(self):
+        if self._loaded:
+            return
+        self._loaded = True
+        self._items = {}
+        for key, correct, wrong, updated in self.db.execute("SELECT key, correct, wrong, updated FROM zhs_answers"):
+            self._items[key] = {"correct": json.loads(correct) if correct else None,
+                                "wrong": json.loads(wrong)[-MAX_WRONG:], "updated": updated}
+
+    def _write(self):
+        rows = [(key, json.dumps(item["correct"], ensure_ascii=False) if item.get("correct") else None,
+                 json.dumps(item.get("wrong") or [], ensure_ascii=False), item.get("updated"))
+                for key, item in ((key, self._items.get(key)) for key in self._changed) if item]
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            self.db.executemany("INSERT OR REPLACE INTO zhs_answers VALUES (?,?,?,?)", rows)
+            self.db.execute("COMMIT")
+        except sqlite3.Error as exc:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            logger.warning("保存共享答案记忆失败，本次记忆未写入：%s", exc)
+            return
+        self._dirty = False
+        self._changed.clear()
+
+    def merge_file(self, path):
+        """Fold a per-user zhs-answers.json into the shared memory; returns how many questions it held."""
+        items = _read_items(_path(path))
+        with self._lock:
+            self._load()
+            for key, theirs in items.items():
+                mine = self._items.setdefault(key, {"correct": None, "wrong": [], "updated": None})
+                if theirs["correct"] and not mine.get("correct"):
+                    mine["correct"] = theirs["correct"]
+                for combo in theirs["wrong"]:
+                    if combo not in mine["wrong"] and combo != mine.get("correct"):
+                        mine["wrong"].append(combo)
+                mine["wrong"] = mine["wrong"][-MAX_WRONG:]
+                mine["updated"] = max(filter(None, (mine.get("updated"), theirs.get("updated"))), default=None)
+                self._changed.add(key)
+            self._dirty = bool(self._changed)
+            self.save()
+        return len(items)
+
+    def stats(self):
+        with self._lock:
+            self._load()
+            self._shared_correct("")  # loads the bundled file once
+            return {"questions": len(self._items),
+                    "confirmed": sum(1 for item in self._items.values() if item.get("correct")),
+                    "bundled": len(self._shared_items or {})}
 
 
 def _read_items(path):

@@ -95,7 +95,7 @@ class Platform:
 class Studia:
     """All state behind the web UI; one running job at a time across platforms."""
 
-    def __init__(self, store=None, oauth=oauth_login, *, reports_dir="ai_results", slots=None, oauth_url=None):
+    def __init__(self, store=None, oauth=oauth_login, *, reports_dir="ai_results", slots=None, oauth_url=None, memory=None):
         self.store = store or SettingsStore()
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
@@ -107,6 +107,8 @@ class Studia:
         self.reports_dir = reports_dir
         self.slots = slots
         self.oauth_url = oauth_url
+        # Hosted mode passes the site-wide memory; locally it lives next to the settings file.
+        self.memory = memory
         self.jobs = {}
         self.history = []
         self.subscribers = set()
@@ -486,7 +488,7 @@ class Studia:
                 runner = ZHSAnswerRunner(
                     self.client(platform), ai, auto_submit=auto_submit, on_progress=on_progress,
                     cancel_event=cancel, max_workers=workers,
-                    memory=AnswerMemory(Path(self.store.path).parent / "zhs-answers.json", shared=SHARED_ANSWERS))
+                    memory=self.memory or AnswerMemory(Path(self.store.path).parent / "zhs-answers.json", shared=SHARED_ANSWERS))
             else:
                 # No manual-answer or confirm callbacks: unanswerable papers stay unsubmitted.
                 runner = AnswerRunner(ExamAPI(self.client(platform)), ai, output_dir=self.reports_dir,
