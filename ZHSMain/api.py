@@ -309,8 +309,12 @@ class ZHSApi:
                          message=result.get("message") or result.get("msg") or "",
                          result=result, captcha=True)
             if self.pass_captcha(result):
-                result = self._request("POST", url, data=form) if method.upper() != "GET" else \
-                    self._request("GET", url, params=form)
+                if method.upper() == "GET":
+                    result = self._request("GET", url, params=form)
+                elif as_json:
+                    result = self._request("POST", url, json_body=form)
+                else:
+                    result = self._request("POST", url, data=form)
                 code = result.get("code", ok)
         if code != ok:
             message = result.get("message") or result.get("msg") or ""

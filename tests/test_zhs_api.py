@@ -82,6 +82,16 @@ class SecureTest(unittest.TestCase):
         self.assertIn("secretStr", kwargs["json"])
         self.assertIn("json", kwargs)
 
+    def test_captcha_retry_preserves_json_body(self):
+        client = make_api()
+        client.session.request.side_effect = [json_response({"code": -12}), json_response({"code": 200})]
+        with patch.object(client, "pass_captcha", return_value=True):
+            client.secure("https://x.test/path", {"a": 1}, key="ai", ok=200, as_json=True)
+        first, retry = client.session.request.call_args_list
+        self.assertEqual(first.kwargs["json"], retry.kwargs["json"])
+        self.assertIsNotNone(retry.kwargs["json"])
+        self.assertIsNone(retry.kwargs["data"])
+
     def test_captcha_and_api_error(self):
         client = make_api()
         client.session.request.return_value = json_response({"code": -12})
