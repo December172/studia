@@ -1,7 +1,7 @@
 [project]
 name = "icve-ai-assistant"
 version = "4.4.0"
-description = "智慧职教课程管理、题目导出与可配置 AI 答题工具"
+description = "智慧职教与智慧树的自动学习和 AI 答题工具，提供终端版、网页版和多人服务器模式"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [

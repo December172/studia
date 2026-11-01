@@ -23,6 +23,11 @@
 | `AIMoocMain/` | 当前 MOOC 平台接口、学习管理、题目导出与交卷协议 |
 | `ai/` | AI 服务配置、题型处理、答题与交卷流程 |
 | `ZYKMoocMain/` | 资源库平台接口与学习管理 |
+| `ZHSMain/` | 智慧树：扫码登录、接口加密、共享课/智慧课程学习、AI 答题与答案记忆（`shared_answers.json` 是随仓库分发的共享答案） |
+| `web/server.py` | 网页版后端：本机模式的 HTTP 接口、任务队列、SSE 事件推送 |
+| `web/hosting.py` | 服务器模式：多用户会话、CSRF、加密配置存储、审计日志、管理接口 |
+| `web/accounts.py` | 服务器模式的账号、邀请码、会话令牌与登录限流 |
+| `web/static/` | 网页前端（无构建步骤的原生 JS/CSS）；`mock.js` 只在 `?mock` 离线预览时加载，服务端不对外提供 |
 | `base/` | 共用 API 客户端与工具 |
 | `NewMoocMain/` | 浏览器 OAuth 登录与试卷 HTML 解析 |
 | `NewMoocMain/oauth_pages.py` | 浏览器登录回调的成功、等待、失败与 404 页面；纯内联资源，不接收令牌 |
@@ -60,7 +65,7 @@ python -m tools.ui_demo --native
 
 ## 界面与业务边界
 
-业务模块使用标准 logging 记录消息，通过可选 `on_progress(ProgressEvent)` 报告开始、总数增长、当前任务和结果。AI runner 另支持 `on_log`（旧 `output` 参数仍兼容）。回调错误被隔离，不影响请求与交卷。界面订阅日志和事件，不通过匹配日志文字推断成功。
+业务模块使用标准 logging 记录消息，通过可选 `on_progress(ProgressEvent)` 报告开始、总数增长、当前任务和结果；`Reporter.unit()` 另外报告单个学习单元的 running / done / failed，网页版据此实时更新课程点阵（终端界面忽略这类事件）。AI runner 另支持 `on_log`（旧 `output` 参数仍兼容）。回调错误被隔离，不影响请求与交卷。界面订阅日志和事件，不通过匹配日志文字推断成功。
 
 新增终端显示与输入：业务适配与 Rich 运行画面放在 `ui.py`，Rich 运行样式（颜色、图标、边框、刷新频率）放在 `theme.py`；原生键盘页面（选项菜单、选择器、确认、摘要/结果动作页、多选、模型/并发表单）由 `native_ui.py`、`checklist.py`、`model_ui.py`、`concurrency_ui.py` 等原生模块拥有，共享调色板、按钮行和页面框架由 `terminal_widgets.py` 提供。`ui.py` 不再承载键盘控件的键位与布局，只把业务值（含 `0`/`False`、动作字符串、`Back`/`Cancelled` 语义）在原生返回值与既有流程之间转换；原生控件只返回值，绝不直接执行业务。业务模块不直接调用 `print` / `input`。`TerminalUI.session()` 管理日志订阅，`activity()` 管理可清除的动态区域。主流程在动态区域之外提问；旧脚本输入适配器会暂停动态显示再读取输入。文件日志独立保留。
 
@@ -74,7 +79,7 @@ Chat Completions 请求使用 `messages`；Responses 请求使用 `instructions`
 
 AI 配置与连接健康状态独立保存；健康记录绑定 endpoint、模型和 Key 的指纹，配置变化后失效。`verify_ai()` 发送固定的合成题验证连接和答案格式，必须先于读取平台试卷。单题生成中，`AITransientServiceError`（网络、408/429、5xx）和 `AIResponseError`（响应格式异常）允许最多 2 次重试，间隔 1、2 秒，每次请求前检查时限。重试耗尽的格式/结构错误按单题失败记入本地报告（`needs_review`），不影响其他题目，也不询问人工；重试耗尽的 `AIServiceError` 和鉴权错误按全局故障处理，保存已生成的题目后停止队列（`ai_error`）。可提交的答案必须通过 `answer_record` 结构校验；`AIClient` 只要求响应包含 `answer` 和字符串 `explanation`，模型请求的 JSON schema 也不再包含 `confidence`；若响应仍带有合法数字的 `confidence` 则作为报告元数据保留，缺失、null、字符串、布尔、NaN 或越界的 `confidence` 一律忽略，不阻止采用有效答案。平台读取、计时、交卷不由此重放，错误信息不包含 Key 或服务商原始响应。
 
-每次启动答题都重新调用 AI 生成全部答案，不读取旧报告中的答案或题库答案。报告仅用于查阅和交卷状态保护；本次运行内仅重试失败的单题，失败题目保持“未完成”且不推进已处理题数，不会被猜测答案补齐。交卷前仍复查平台记录，结果未知的提交不自动重发。
+MOOC 只在同一份试卷、同一轮作答内复用上一轮已校验的答案，不读取题库答案；智慧树另有按题目哈希保存的答案记忆（本机 `zhs-answers.json` 和仓库里的 `ZHSMain/shared_answers.json`），只复用平台判定正确的答案。报告仅用于查阅和交卷状态保护；本次运行内仅重试失败的单题，失败题目保持“未完成”且不推进已处理题数，不会被猜测答案补齐。交卷前仍复查平台记录，结果未知的提交不自动重发。
 
 任务列表的列宽由全部行统一计算，按终端字符宽度处理中文，表头固定在滚动区域上方。成绩与次数的单位放在表头，`?` 表示未知、`--` 表示暂无成绩，真实零值必须保留。`task_metrics.py` 只读取平台目录中的成绩和剩余次数，不根据历史记录推算。
 
