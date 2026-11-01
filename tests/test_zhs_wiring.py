@@ -238,11 +238,13 @@ class WiringTests(unittest.TestCase):
     def test_course_workspace_platform_two_uses_zhs_api(self):
         app = Mock()
         app.view = Mock()
+        app.store.session.return_value = None
+        app.view.choose_platform.return_value = 2
         workspace = CourseWorkspace(app)
-        workspace.platform = 2
         with patch.object(app, "client_and_courses", side_effect=Cancelled) as load:
             with self.assertRaises(Cancelled):
                 workspace.run()
+        app.view.choose_platform.assert_called_once_with(0)
         self.assertIs(load.call_args[0][0], ZHSApi)
 
 

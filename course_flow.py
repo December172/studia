@@ -23,7 +23,7 @@ class CourseWorkspace:
         self.app = application
         self.view = application.view
         self.store = application.store
-        self.platform = 0
+        self.platform = None
         self.client = None
         self.rows = []
         self.library_state = {}
@@ -36,6 +36,10 @@ class CourseWorkspace:
         self.view.workspace = True
         while True:
             try:
+                if self.platform is None:
+                    saved = [index for index, name in enumerate(("mooc", "zyk", "zhs"))
+                             if self.store.session(name)]
+                    self.platform = saved[0] if len(saved) == 1 else self.view.choose_platform(0)
                 if self.client is None:
                     try:
                         cls = {1: ZYKMoocApi, 2: ZHSApi}.get(self.platform, AIMoocApi)
