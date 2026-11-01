@@ -20,7 +20,8 @@ const tasks = [
   { id: "t5", name: "第十章单元测试", category: "作业", status: "已提交", score: 8, available: true, hint: "剩余重做 3 次", redo_left: 3 },
   { id: "t4", name: "新一代信息技术导论教程考试", category: "考试", status: "未开考", score: null, available: false, reason: "考试需要先在网页上手动开考" },
 ];
-let job = null, polls = 0;
+const jobs = {};
+let polls = 0;
 const models = [
   { id: "builtin-default", provider: "默认供应商", model: "gemini-3.8-flash", base_url: "https://mochif.com/v1", key_hint: "sk-…gTjW", active: true, health: "ok", health_message: "", deletable: false },
   { id: "legacy", provider: "mochif", model: "gemini-3.8-flash", base_url: "https://mochif.com/v1", key_hint: "sk-…PJlj", active: false, health: "", health_message: "", deletable: true },
@@ -51,58 +52,67 @@ const units = {
   "ai-1": chapters([["信道与编码", 5], ["网络体系结构", 6]], 7),
 };
 
+const GROUP = { study: "learn", review: "learn", answer: "answer" };
 function fakeJob(body) {
   const course = courses[body.platform].find((c) => c.id === body.course);
+  for (const o of Object.values(jobs)) {
+    if (GROUP[o.kind] !== GROUP[body.type] || o.platform !== body.platform) continue;
+    if (o.course === body.course) throw new Error(`这门课正在${o.title}，请等它结束或先停止`);
+    if (body.platform === "zhs" && GROUP[body.type] === "learn") throw new Error(`智慧树同一账号同时只能播放一个视频，请等「${o.course_name}」的${o.title}结束`);
+  }
   const title = { study: "自动学习", review: "每日复习", answer: "AI 答题" }[body.type];
-  job = { type: "job", id: "j" + Date.now(), title, course: body.course, course_name: course.name, platform: body.platform,
+  const job = { type: "job", kind: body.type, id: "j" + Date.now().toString(16), title, course: body.course, course_name: course.name, platform: body.platform,
     state: "running", summary: "", started: Date.now() / 1000, ended: null, lines: [] };
-  emit(job);
+  jobs[job.id] = job;
+  emit(Object.assign({}, job));
+  const alive = () => jobs[job.id];
+  const send = (event) => alive() && emit(Object.assign(event, { job: job.id }));
   const finish = (state, summary) => {
-    if (!job) return;
-    const finished = Object.assign({}, job, { state, summary, ended: Date.now() / 1000 });
-    job = null;
+    if (!alive()) return;
+    const finished = Object.assign({}, alive(), { state, summary, ended: Date.now() / 1000 });
+    delete jobs[job.id];
     history.unshift(finished);
     emit(finished);
   };
   if (body.type === "answer") {
     const steps = (body.tasks || []).map((id) => tasks.find((t) => t.id === id)?.name || "试卷");
-    emit({ type: "progress", kind: "begin", name: title, total: steps.length, unit: "份试卷" });
+    send({ type: "progress", kind: "begin", name: title, total: steps.length, unit: "份试卷" });
     steps.forEach((step, i) => setTimeout(() => {
-      if (!job) return;
-      emit({ type: "progress", kind: "detail", name: step });
-      emit({ type: "progress", kind: "questions", name: step, completed: 10, total: 10, unit: "题" });
-      emit({ type: "progress", kind: "result", name: step, status: body.auto_submit ? "submitted" : "preview" });
+      send({ type: "progress", kind: "detail", name: step });
+      send({ type: "progress", kind: "questions", name: step, completed: 10, total: 10, unit: "题" });
+      send({ type: "progress", kind: "result", name: step, status: body.auto_submit ? "submitted" : "preview" });
       if (i === steps.length - 1) setTimeout(() => finish("done", `处理完成 ${steps.length}/${steps.length} 份试卷`), 800);
     }, 1500 * (i + 1)));
-    return;
+    return job.id;
   }
   const todo = units[body.course].flatMap((ch) => ch.units).filter((u) => u.state === "queued" || u.state === "failed");
   const total = units[body.course].flatMap((ch) => ch.units).length;
-  emit({ type: "progress", kind: "begin", name: title, total: 1, unit: "门课程" });
+  send({ type: "progress", kind: "begin", name: title, total: 1, unit: "门课程" });
   let i = 0, ticks = 0;
   const step = () => {
-    if (!job) { clearInterval(timer); return; }
+    if (!alive()) { clearInterval(timer); return; }
     const u = todo[i];
-    if (!u) { clearInterval(timer); emit({ type: "progress", kind: "result", name: course.name, status: "success" }); finish("done", "学习完成"); return; }
+    if (!u) { clearInterval(timer); send({ type: "progress", kind: "result", name: course.name, status: "success" }); finish("done", "学习完成"); return; }
     if (ticks === 0) {
       u.state = "running";
-      emit({ type: "progress", kind: "unit", key: u.id, name: u.name, status: "running" });
-      emit({ type: "log", text: `开始：${u.name}`, level: "" });
+      send({ type: "progress", kind: "unit", key: u.id, name: u.name, status: "running" });
+      send({ type: "log", text: `开始：${u.name}`, level: "" });
     }
     ticks += 1;
     const length = u.minutes ? 4 : 1;
-    emit({ type: "progress", kind: "detail", name: `${course.name} · ${u.name} · ${ticks}/${length}` });
+    send({ type: "progress", kind: "detail", name: `${course.name} · ${u.name} · ${ticks}/${length}` });
     if (ticks >= length) {
       u.state = Math.random() < 0.08 ? "failed" : "done";
-      emit({ type: "progress", kind: "unit", key: u.id, name: u.name, status: u.state });
-      emit({ type: "log", text: u.state === "done" ? `已完成：${u.name}` : `${u.name}：上报失败`, level: u.state === "done" ? "" : "error" });
-      if (Math.random() < 0.12) emit({ type: "log", text: "讨论区发帖频率限制，等待 60 秒", level: "warn" });
+      send({ type: "progress", kind: "unit", key: u.id, name: u.name, status: u.state });
+      send({ type: "log", text: u.state === "done" ? `已完成：${u.name}` : `${u.name}：上报失败`, level: u.state === "done" ? "" : "error" });
+      if (Math.random() < 0.12) send({ type: "log", text: "讨论区发帖频率限制，等待 60 秒", level: "warn" });
       i += 1; ticks = 0;
       const doneCount = total - todo.length + i;
-      emit({ type: "progress", kind: "resources", name: `${course.name} · ${u.name}`, completed: doneCount, total, unit: "项资源" });
+      send({ type: "progress", kind: "resources", name: `${course.name} · ${u.name}`, completed: doneCount, total, unit: "项资源" });
     }
   };
   const timer = setInterval(step, 700);
+  return job.id;
 }
 
 export function subscribe(listener) { listeners.add(listener); }
@@ -110,7 +120,7 @@ export function subscribe(listener) { listeners.add(listener); }
 export async function request(path, method, body) {
   await new Promise((resolve) => setTimeout(resolve, 200));
   let m;
-  if (path === "/api/state") return { platforms, job, history };
+  if (path === "/api/state") return { platforms, jobs: Object.values(jobs), history };
   if ((m = path.match(/^\/api\/platforms\/(\w+)\/login$/))) {
     const p = platforms.find((x) => x.id === m[1]);
     if (method === "POST") {
@@ -128,11 +138,14 @@ export async function request(path, method, body) {
   if ((m = path.match(/^\/api\/platforms\/(\w+)\/courses$/))) return { courses: courses[m[1]] };
   if (path.match(/^\/api\/platforms\/(\w+)\/tasks/)) return { tasks };
   if ((m = path.match(/^\/api\/platforms\/\w+\/units\?course=(.+)$/))) return { chapters: units[decodeURIComponent(m[1])] || [] };
-  if (path === "/api/jobs" && method === "POST") { fakeJob(body); return { ok: true }; }
+  if (path === "/api/jobs" && method === "POST") return { ok: true, id: fakeJob(body) };
   if (path === "/api/jobs/stop") {
+    const job = jobs[body?.id];
+    if (!job) return {};
     Object.values(units).forEach((list) => list.forEach((ch) => ch.units.forEach((u) => { if (u.state === "running") u.state = "queued"; })));
+    delete jobs[job.id];
     const stopped = Object.assign({}, job, { state: "stopped", summary: "已停止", ended: Date.now() / 1000 });
-    job = null; history.unshift(stopped); emit(stopped); return {};
+    history.unshift(stopped); emit(stopped); return {};
   }
   if (path === "/api/settings") return { models, concurrency: { ai: 8, study: 8 } };
   if (path === "/api/settings/models/activate") { models.forEach((x) => (x.active = x.id === body.id)); return {}; }

@@ -14,7 +14,7 @@ import web.accounts
 from web.accounts import Accounts, Throttle
 from settings import SettingsError
 from web.hosting import COOKIE, EncryptedSettingsStore, HostedAccess, Hub, load_key, main
-from web.server import JOB_THREADS, Studia, _EventLogHandler, make_handler
+from web.server import JOBS, Studia, _EventLogHandler, make_handler
 
 
 class HostedServerTest(unittest.TestCase):
@@ -170,17 +170,18 @@ class IsolationUnitTest(unittest.TestCase):
     def test_log_lines_go_only_to_the_job_thread_owner(self):
         alice, bob = Studia.__new__(Studia), Studia.__new__(Studia)
         for app in (alice, bob):
-            app.job, app.lines = {"lines": []}, []
+            app.lines = []
             app.publish = app.lines.append
         handler = _EventLogHandler()
         record = logging.LogRecord("ZHSMain.main", logging.INFO, __file__, 1, "进度", None, None)
-        JOB_THREADS[record.thread] = alice
+        JOBS["a1"] = alice
         try:
-            handler.emit(record)
+            for name in ("studia-job-a1", "studia-job-a1/study_3", "MainThread", "studia-job-b2"):
+                record.threadName = name
+                handler.emit(record)
         finally:
-            JOB_THREADS.pop(record.thread, None)
-        handler.emit(record)
-        self.assertEqual(len(alice.lines), 1)
+            JOBS.pop("a1", None)
+        self.assertEqual([line["job"] for line in alice.lines], ["a1", "a1"])
         self.assertEqual(bob.lines, [])
 
     def test_jobs_queue_when_the_site_is_busy(self):
@@ -189,9 +190,10 @@ class IsolationUnitTest(unittest.TestCase):
         app = Studia.__new__(Studia)
         app.lock, app.slots, app.history, app.events = threading.RLock(), slots, [], []
         app.publish = app.events.append
-        app.job = {"id": "j", "title": "t", "course": "c", "course_name": "c", "platform": "zhs", "state": "running",
+        job = {"id": "j", "title": "t", "course": "c", "course_name": "c", "platform": "zhs", "state": "running",
                    "summary": "", "started": 0, "ended": None, "lines": [], "cancel": threading.Event()}
-        runner = threading.Thread(target=app._run_job, args=(lambda: "完成", None))
+        app.jobs = {"j": job}
+        runner = threading.Thread(target=app._run_job, args=(job, lambda: "完成", None))
         runner.start()
         time.sleep(1.3)
         self.assertEqual(app.events[0]["state"], "queued")

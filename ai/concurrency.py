@@ -6,6 +6,7 @@ import time
 
 from ai.client import AIClient, AIError, AIServiceError
 from ai.questions import model_question, prepare_question
+from reporting import child_thread_name
 
 
 def prepared_items(raw_questions):
@@ -44,7 +45,7 @@ class ParallelAnswers:
         self.max_workers = max_workers
         self.clock = clock
         self.fatal_error = None
-        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='ai-answer')
+        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=child_thread_name('ai-answer'))
         self.stopped = threading.Event()
         self.cooldown_lock = threading.Lock()
         self.cooldown_until = 0.0

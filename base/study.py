@@ -4,7 +4,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from base.api_client import RequestRateLimited
 from base.auth import AuthenticationExpired
-from reporting import Reporter
+from reporting import Reporter, child_thread_name
 
 
 def check_study_response(response, *, parsed=False):
@@ -107,7 +107,7 @@ def run_resources(handler, resources, course_name='课程'):
             observe(args[0], status)
         return
 
-    pool = ThreadPoolExecutor(max_workers=handler.max_workers, thread_name_prefix='study')
+    pool = ThreadPoolExecutor(max_workers=handler.max_workers, thread_name_prefix=child_thread_name('study'))
     pending = {}
 
     def collect(future, node):

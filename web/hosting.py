@@ -23,7 +23,7 @@ from Crypto.Cipher import AES
 from NewMoocMain.oauth_login import SSO_AUTH_URL, SSO_SOURCE
 from settings import SettingsError, SettingsStore
 from web.accounts import AccountError, Accounts, Sessions, Throttle
-from web.server import NOT_HANDLED, HttpError, Reply, Studia, _EventLogHandler, _job_public, make_handler
+from web.server import NOT_HANDLED, HttpError, Reply, Studia, _EventLogHandler, make_handler
 
 COOKIE = "studia_session"
 OAUTH_TTL = 600
@@ -174,7 +174,7 @@ class Hub:
         users = self.accounts.users()
         for user in users:
             app = self.apps.get(user["id"])
-            user["job"] = _job_public(app.job) if app and app.job else None
+            user["jobs"] = app._running() if app else []
         return users
 
     def disable(self, uid):

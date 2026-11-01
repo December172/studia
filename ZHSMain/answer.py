@@ -13,7 +13,7 @@ from AIMoocMain.export_questions import clean_html_text
 from ai.client import AIError, AITransientServiceError
 from base.auth import AuthenticationExpired, PlatformUnavailable
 from MoocMain.log import Logger
-from reporting import Reporter
+from reporting import Reporter, child_thread_name
 from task_metrics import nonnegative_number
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit
 
@@ -657,7 +657,7 @@ class ZHSAnswerRunner:
         # as_completed never wakes for futures cancelled by executor.shutdown.
         stop = threading.Event()
         control_error = None
-        with ThreadPoolExecutor(max_workers=min(self.max_workers, total)) as executor:
+        with ThreadPoolExecutor(max_workers=min(self.max_workers, total), thread_name_prefix=child_thread_name('zhs-answer')) as executor:
             futures = {
                 executor.submit(solve, index, prepared, stop): index
                 for index, (_, prepared) in enumerate(questions)
@@ -913,7 +913,7 @@ class ZHSAnswerRunner:
                 except Exception:
                     continue
 
-        self._heartbeat_thread = threading.Thread(target=beat, daemon=True)
+        self._heartbeat_thread = threading.Thread(target=beat, daemon=True, name=child_thread_name('heartbeat'))
         self._heartbeat_thread.start()
 
     def _stop_heartbeat(self):

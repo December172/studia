@@ -8,7 +8,7 @@ from pathlib import Path
 
 from AIMoocMain.exam_api import ExamError, ExamServiceError, TaskUnavailableError
 from AIMoocMain.export_questions import get_questions_from_paper, paper_display_name, paper_exam_id, safe_filename
-from reporting import Reporter, log_callback
+from reporting import Reporter, child_thread_name, log_callback
 from ai.client import AIError, AIServiceError
 from ai.concurrency import ParallelAnswers, prepared_items
 from base.concurrency import validate_workers
@@ -28,7 +28,7 @@ class AttemptClock:
 
     def start(self):
         if self.enabled:
-            self.thread = threading.Thread(target=self._loop, daemon=True)
+            self.thread = threading.Thread(target=self._loop, daemon=True, name=child_thread_name('exam-clock'))
             self.thread.start()
         return self
 

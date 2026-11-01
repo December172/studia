@@ -70,10 +70,30 @@ async function api(path, { method = "GET", body } = {}) {
 
 const state = {
   platforms: [], courses: {}, papers: {}, units: {}, selected: {},
-  job: null, run: freshRun(), history: [], view: "", loginToken: { cancelled: true }, lastDone: null,
+  jobs: [], runs: {}, focus: null, history: [], view: "", loginToken: { cancelled: true }, lastDone: null,
   current: store.get("studia-platform", ""), menuOpen: false, logFilter: "all",
 };
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
+const runOf = (id) => (state.runs[id] = state.runs[id] || freshRun());
+// Mirrors the server's rules (web/server.py _check_conflicts) so buttons say why before you click.
+const MAX_JOBS = 4;
+const GROUP = { study: "learn", review: "learn", answer: "answer" };
+const jobType = (j) => j.kind || { 自动学习: "study", 每日复习: "review", "AI 答题": "answer" }[j.title];
+function blocker(pid, cid, type) {
+  for (const o of state.jobs) {
+    if (GROUP[jobType(o)] !== GROUP[type] || o.platform !== pid) continue;
+    if (o.course === cid) return o.state === "queued" ? `正在排队（${o.title}）` : `正在${o.title}…`;
+    if (pid === "zhs" && GROUP[type] === "learn") return `智慧树一次只能播一个视频，等「${o.course_name}」的${o.title}结束`;
+  }
+  return state.jobs.length >= MAX_JOBS ? `最多同时运行 ${MAX_JOBS} 个任务` : "";
+}
+// The job the player and focus view follow: the one picked, else one on the open course, else the newest.
+function focusedJob() {
+  const [, pid, cid] = state.view.match(/^#\/course\/([^/]+)\/([^/]+)/) || [];
+  return state.jobs.find((j) => j.id === state.focus)
+    || state.jobs.find((j) => j.platform === pid && j.course === decodeURIComponent(cid || ""))
+    || state.jobs[state.jobs.length - 1] || null;
+}
 const platformOf = (pid) => state.platforms.find((p) => p.id === pid);
 const key = (pid, cid) => `${pid}:${cid}`;
 const selectedOf = (k) => (state.selected[k] = state.selected[k] || new Set());
@@ -140,7 +160,7 @@ function switchPlatform(pid, navigate = true) {
 }
 
 function jobPill() {
-  if (state.job) return state.job.state === "queued" ? '<span class="live">排队中</span>' : '<span class="live">进行中</span>';
+  if (state.jobs.length) return state.jobs.every((j) => j.state === "queued") ? '<span class="live">排队中</span>' : `<span class="live">${state.jobs.length} 个进行中</span>`;
   if (state.history[0]?.state === "waiting") return '<span class="live waiting">等你操作</span>';
   return state.history.length ? `<span class="count">${state.history.length}</span>` : "";
 }
@@ -158,7 +178,7 @@ function renderSidebar() {
     ${state.menuOpen ? `<div class="menu" role="menu">${state.platforms.map((x, i) => `
       <button class="menu_row" role="menuitem" data-switch="${x.id}"><span class="plat ${x.id}">${INITIAL[x.id]}</span>
         <span class="who"><b>${esc(x.name)}</b><small>${esc(platformStatus(x))}</small></span>
-        ${state.job?.platform === x.id ? '<span class="live">进行中</span>' : ""}
+        ${state.jobs.some((j) => j.platform === x.id) ? '<span class="live">进行中</span>' : ""}
         ${x.id === p.id ? `<span class="tick">${ICON.tick}</span>` : `<span class="kbd">⌘${i + 1}</span>`}</button>`).join("")}</div>` : ""}`;
 
   let html = item("#/jobs", ICON.pulse, "任务", jobPill());
@@ -167,7 +187,7 @@ function renderSidebar() {
   if (!p.logged_in) html += item(`#/login/${p.id}`, ICON.login, `登录${/^[A-Za-z]/.test(p.short) ? " " : ""}${p.short}`);
   else if (!state.courses[p.id]) html += `<div class="nav_item quiet"><span class="label">正在读取课程…</span></div>`;
   else html += state.courses[p.id].map((c) => {
-    const busy = state.job && state.job.platform === p.id && state.job.course === c.id;
+    const busy = state.jobs.some((j) => j.platform === p.id && j.course === c.id);
     return item(`#/course/${p.id}/${c.id}`, ring(c.progress, COLOR[p.id]), c.name,
       busy ? '<span class="live"></span>' : c.progress == null ? "" : `<span class="count">${esc(c.progress)}%</span>`);
   }).join("") || `<div class="nav_item quiet"><span class="label">没有课程</span></div>`;
@@ -277,8 +297,8 @@ const VIEWS = {
       <div class="section"><h3>用户</h3><span class="aside">${users.length} 人</span></div>
       <div class="models">${users.map((u) => `<div class="model"><span class="avatar big">${esc(u.username.slice(0, 1).toUpperCase())}</span>
           <span class="m1"><b>${esc(u.username)}</b>${u.role === "admin" ? '<span class="pill blue">管理员</span>' : ""}${u.disabled ? '<span class="pill red">已停用</span>' : ""}
-          <small class="sans">${u.job ? `${esc(u.job.title)} · ${esc(u.job.course_name)} · ${u.job.state === "queued" ? "排队中" : "运行中"}` : u.last_login ? `上次登录 ${ago(u.last_login)}` : "还没登录过"}</small></span><span></span>
-          <span class="row_btns">${u.job ? `<button class="btn small danger" data-stop-user="${u.id}">停止任务</button>` : ""}
+          <small class="sans">${u.jobs?.length ? u.jobs.map((j) => `${esc(j.title)} · ${esc(j.course_name)}${j.state === "queued" ? "（排队）" : ""}`).join("；") : u.last_login ? `上次登录 ${ago(u.last_login)}` : "还没登录过"}</small></span><span></span>
+          <span class="row_btns">${u.jobs?.length ? `<button class="btn small danger" data-stop-user="${u.id}">停止全部任务</button>` : ""}
             <button class="btn small" data-reset="${u.id}">重置密码</button>
             ${u.id === session.user.id ? "" : u.disabled ? `<button class="btn small" data-enable="${u.id}">启用</button>` : `<button class="btn small danger" data-disable="${u.id}">停用</button>`}</span></div>`).join("")}</div>`);
     const act = async (path, body, message) => {
@@ -304,13 +324,12 @@ const VIEWS = {
 
   jobs() {
     const open = new Set([...page.querySelectorAll(".run_lines:not([hidden])")].map((el) => el.dataset.lines));
-    const job = state.job;
-    const live = job ? `<div class="section"><h3>进行中</h3></div>
-      <div class="runs"><div class="run">${ICON.running}
-        <span class="t1">${esc(job.title)} · ${esc(job.course_name)}<small>${esc(job.state === "queued" ? "服务器繁忙，排队等待中…" : state.run.unit?.name || state.run.detail || "准备中…")}</small></span>
-        <span class="fix"><button class="btn small" data-open>展开 <span class="kbd">F</span></button></span>
-        <span class="state running">${STATE_WORD[job.state] || "进行中"}<span class="mono" data-elapsed>${duration(elapsed(job))}</span></span>
-        <span class="when">${ago(job.started)}</span></div></div>` : "";
+    const live = state.jobs.length ? `<div class="section"><h3>进行中</h3><span class="aside">${state.jobs.length} / ${MAX_JOBS} 个</span></div>
+      <div class="runs">${state.jobs.map((job) => { const run = runOf(job.id); return `<div class="run">${ICON.running}
+        <span class="t1">${esc(job.title)} · ${esc(job.course_name)}<small>${esc(platformOf(job.platform)?.short || "")} · ${esc(job.state === "queued" ? "服务器繁忙，排队等待中…" : run.unit?.name || run.detail || "准备中…")}</small></span>
+        <span class="fix"><button class="btn small" data-open="${job.id}">展开</button><button class="btn small danger" data-stop="${job.id}">停止</button></span>
+        <span class="state running">${STATE_WORD[job.state] || "进行中"}<span class="mono" data-elapsed="${job.id}">${duration(elapsed(job))}</span></span>
+        <span class="when">${ago(job.started)}</span></div>`; }).join("")}</div>` : "";
     const rows = state.history.map((j, i) => `<div class="run" data-history="${i}">${ICON[j.state] || ICON.stopped}
         <span class="t1">${esc(j.title)} · ${esc(j.course_name)}<small>${esc(platformOf(j.platform)?.short || "")} · ${esc(j.summary)}</small></span>
         <span class="fix">${fixButtons(j, i)}</span>
@@ -318,7 +337,7 @@ const VIEWS = {
         <span class="when">${ago(j.ended || j.started)}</span></div>
       <div class="run_lines" data-lines="${i}" ${open.has(String(i)) ? "" : "hidden"}>${logHtml(j.lines || [])}</div>`).join("");
     setPage(`<h1 class="title">任务</h1>
-      <p class="sub">${session.mode === "hosted" ? "任务在服务器上运行，关掉网页也不会中断。" : "任务在这台电脑上运行，关掉网页不会中断，关掉终端才会停止。"}同一时间只跑一个任务。</p>
+      <p class="sub">${session.mode === "hosted" ? "任务在服务器上运行，关掉网页也不会中断。" : "任务在这台电脑上运行，关掉网页不会中断，关掉终端才会停止。"}不同课程可以同时学习和答题，最多 ${MAX_JOBS} 个。</p>
       ${live}
       <div class="section"><h3>历史</h3><span class="aside">只有失败和需要你处理的任务才有按钮，点一行看日志</span></div>
       ${rows ? `<div class="runs">${rows}</div>` : `<div class="empty">还没有运行过任务</div>`}`);
@@ -531,8 +550,7 @@ function renderCourse(p, c, tab, full = false) {
   const open = (papers || []).filter((x) => x.available && !x.done).length;
   const chapters = unitsOf(k);
   const t = chapters && tally(chapters);
-  const busy = Boolean(state.job);
-  const jobHere = busy && state.job.platform === p.id && state.job.course === c.id;
+  const answerBlock = blocker(p.id, c.id, "answer");
   const last = state.history.find((j) => j.platform === p.id && j.course === c.id);
   const head = `
     <div class="crumb"><span class="dot ${p.id}"></span>${esc(p.name)}<span>›</span>${esc(c.name)}</div>
@@ -552,9 +570,9 @@ function renderCourse(p, c, tab, full = false) {
   if (tab === "study") {
     body = `<div class="acts">${studyActions(p, c).map(([type, icon, label, text], i) => {
       const lastOf = lastRun(p.id, c.id, type);
-      const foot = jobHere && state.job.title === label ? "正在运行…" : busy ? "有任务在运行，结束后才能开始"
-        : lastOf ? `上次 ${ago(lastOf.ended || lastOf.started)} · ${lastOf.summary}` : "还没有运行过";
-      return `<button class="act" data-start="${type}" ${busy ? "disabled" : ""}><span class="act_head"><span class="glyph">${icon}</span>${label}</span>
+      const block = blocker(p.id, c.id, type);
+      const foot = block || (lastOf ? `上次 ${ago(lastOf.ended || lastOf.started)} · ${lastOf.summary}` : "还没有运行过");
+      return `<button class="act" data-start="${type}" ${block ? "disabled" : ""}><span class="act_head"><span class="glyph">${icon}</span>${label}</span>
         <p>${text}</p><span class="foot"><span>${esc(foot)}</span>${i === 0 ? '<span class="kbd">S</span>' : ""}</span></button>`;
     }).join("")}</div>
       <div class="section"><h3>学习单元</h3><span class="aside">每格一个单元，悬停查看</span></div>
@@ -586,9 +604,9 @@ function renderCourse(p, c, tab, full = false) {
       return `<div class="section"><h3>${esc(label)}</h3><span class="aside">${list.filter((x) => x.available).length} / ${list.length} 份可选</span></div>
         <div class="papers">${list.map(row).join("")}</div>`;
     }).join("") || `<div class="empty">这门课没有作业、测验或考试</div>`;
-    if (categories.length) body += `<div class="dock"><span class="info">${busy ? "有任务在运行，结束后才能作答" : n ? `已选 <b>${n}</b> 份 · 交卷前会再确认一次` : "勾选要作答的试卷"}</span>
-      <button class="btn" data-save ${n && !busy ? "" : "disabled"}>仅生成答案</button>
-      <button class="btn primary" data-submit ${n && !busy ? "" : "disabled"}>AI 作答并交卷</button></div>`;
+    if (categories.length) body += `<div class="dock"><span class="info">${answerBlock ? esc(answerBlock) : n ? `已选 <b>${n}</b> 份 · 交卷前会再确认一次` : "勾选要作答的试卷"}</span>
+      <button class="btn" data-save ${n && !answerBlock ? "" : "disabled"}>仅生成答案</button>
+      <button class="btn primary" data-submit ${n && !answerBlock ? "" : "disabled"}>AI 作答并交卷</button></div>`;
   }
   if (full) setPage(head + body); else { quiet = true; setPage(head + body); quiet = false; }
 
@@ -662,15 +680,16 @@ function recentCells(k) {
 
 const player = $(".player"), sheet = $(".sheet");
 const LIVE_WORD = { 自动学习: "正在学习", 每日复习: "正在复习", "AI 答题": "正在答题" };
-const recentlyDone = () => (!state.job && state.lastDone && Date.now() - state.lastDone.shownAt < 60000 ? state.lastDone : null);
+const recentlyDone = () => (!state.jobs.length && state.lastDone && Date.now() - state.lastDone.shownAt < 60000 ? state.lastDone : null);
 
 function renderPlayer() {
-  const job = state.job, done = recentlyDone();
+  const job = focusedJob(), done = recentlyDone();
   if (!job && !done) { player.hidden = true; return; }
   if (player.hidden) { player.hidden = false; player.classList.remove("enter"); void player.offsetWidth; player.classList.add("enter"); }
   if (job) {
-    const run = state.run, queued = job.state === "queued";
+    const run = runOf(job.id), queued = job.state === "queued";
     const { pct, label } = progressOf(run);
+    const others = state.jobs.length - 1;
     player.classList.remove("ended");
     player.innerHTML = `
       <div class="np"><span class="art">${job.title === "AI 答题" ? ICON.pen : job.title === "每日复习" ? ICON.repeat : ICON.play}</span>
@@ -678,7 +697,8 @@ function renderPlayer() {
         <b>${esc(queued ? "服务器繁忙，等前面的任务结束" : run.unit?.name || run.detail || "准备中…")}</b></span></div>
       <div class="scrub"><span class="track ${pct == null ? "unknown" : ""}"><i style="width:${pct ?? 0}%"></i></span><span class="t">${esc(label || clock(elapsed(job)))}</span></div>
       <div class="np_meta">${recentCells(key(job.platform, job.course))}
-        <button class="btn" data-open>展开 <span class="kbd">F</span></button><button class="icon_btn" data-stop title="停止 ⇧S" aria-label="停止">${ICON.stop}</button></div>`;
+        ${others ? `<button class="btn" data-go="#/jobs" title="查看全部任务">另有 ${others} 个</button>` : ""}
+        <button class="btn" data-open="${job.id}">展开 <span class="kbd">F</span></button><button class="icon_btn" data-stop="${job.id}" title="停止 ⇧S" aria-label="停止">${ICON.stop}</button></div>`;
   } else {
     player.classList.add("ended");
     player.innerHTML = `
@@ -690,19 +710,25 @@ function renderPlayer() {
 }
 
 function renderFocus() {
-  const job = state.job || state.lastDone;
+  const live = focusedJob();
+  const job = live || state.lastDone;
   const body = $(".sheet_body", sheet);
-  $(".sheet_tag", sheet).innerHTML = state.job ? `<span class="live">${LIVE_WORD[job.title] || "进行中"}</span>` : "";
-  $("[data-stop]", sheet).hidden = !state.job;
+  // With several jobs, the bar doubles as a switcher between them.
+  $(".sheet_tag", sheet).innerHTML = state.jobs.length > 1
+    ? state.jobs.map((j) => `<button class="chip" data-focus="${j.id}" aria-pressed="${j.id === live.id}">${esc(j.title)} · ${esc(j.course_name)}</button>`).join("")
+    : live ? `<span class="live">${LIVE_WORD[live.title] || "进行中"}</span>` : "";
+  const stop = $("[data-stop]", sheet);
+  stop.hidden = !live;
+  if (live) stop.dataset.stop = live.id;
   if (!job) { body.innerHTML = `<div class="focus"><div><div class="clock">—</div><p class="of">现在没有任务。</p></div></div>`; return; }
-  const run = state.run;
+  const run = live ? runOf(live.id) : freshRun();
   const { pct, label } = progressOf(run);
   const k = key(job.platform, job.course);
   const logScroll = $(".log_body", body)?.scrollTop;
   const grid = job.title !== "AI 答题" && unitsOf(k)
     ? `<div class="section" style="margin-top:34px"><h3>整门课</h3><span class="aside mono">${tally(unitsOf(k)).done}/${tally(unitsOf(k)).all}</span></div>${gridHtml(k)}` : "";
-  const headline = state.job
-    ? `<div class="clock" data-clock>${clock(elapsed(job))}<small>已用时</small></div>
+  const headline = live
+    ? `<div class="clock" data-clock="${live.id}">${clock(elapsed(job))}<small>已用时</small></div>
        <div class="now">${esc(run.unit?.name || run.detail || "准备中…")}</div><div class="of">${esc(run.detail && run.unit ? run.detail : job.course_name)}</div>
        <div class="track ${pct == null ? "unknown" : ""}"><i style="width:${pct ?? 0}%"></i></div>
        <div class="ticks"><span>开始</span><span>${esc(label)}</span><span>结束</span></div>`
@@ -711,56 +737,66 @@ function renderFocus() {
   body.innerHTML = `<div class="focus"><div>${headline}${grid}</div>
     <div class="log"><div class="log_head"><span class="grow">日志</span>
       ${[["all", "全部"], ["warn", "提醒"], ["err", "错误"]].map(([f, l]) => `<button class="chip" data-filter="${f}" aria-pressed="${state.logFilter === f}">${l}</button>`).join("")}</div>
-      <div class="log_body">${logHtml(state.job ? run.lines : job.lines || run.lines, state.logFilter)}</div></div></div>`;
+      <div class="log_body">${logHtml(live ? run.lines : job.lines || [], state.logFilter)}</div></div></div>`;
   if (logScroll != null) $(".log_body", body).scrollTop = logScroll;
 }
-function openSheet() { if (!state.job && !state.lastDone) return; renderFocus(); sheet.classList.add("open"); }
+function openSheet(id) {
+  if (id) state.focus = id;
+  if (!focusedJob() && !state.lastDone) return;
+  renderFocus();
+  renderPlayer();
+  sheet.classList.add("open");
+}
 function closeSheet() { sheet.classList.remove("open"); }
 
 setInterval(() => {
-  if (!state.job) return;
-  document.querySelectorAll("[data-clock]").forEach((el) => (el.firstChild.textContent = clock(elapsed(state.job))));
-  document.querySelectorAll("[data-elapsed]").forEach((el) => (el.textContent = duration(elapsed(state.job))));
+  const byId = (id) => state.jobs.find((j) => j.id === id);
+  document.querySelectorAll("[data-clock]").forEach((el) => { const j = byId(el.dataset.clock); if (j) el.firstChild.textContent = clock(elapsed(j)); });
+  document.querySelectorAll("[data-elapsed]").forEach((el) => { const j = byId(el.dataset.elapsed); if (j) el.textContent = duration(elapsed(j)); });
 }, 1000);
 
 /* ---------------------------------------------------------------- jobs */
 
 async function startJob(body) {
   try {
-    await api("/api/jobs", { method: "POST", body });
+    const started = await api("/api/jobs", { method: "POST", body });
+    if (started.id) state.focus = started.id;
     if (body.type === "answer") { delete state.papers[key(body.platform, body.course)]; state.selected[key(body.platform, body.course)] = new Set(); }
   } catch (error) { toast(error.message); }
 }
-async function stopJob() {
-  if (!state.job) return;
-  try { await api("/api/jobs/stop", { method: "POST" }); toast("正在停止…"); } catch (error) { toast(error.message); }
+async function stopJob(id) {
+  if (!id) return;
+  try { await api("/api/jobs/stop", { method: "POST", body: { id } }); toast("正在停止…"); } catch (error) { toast(error.message); }
 }
 
 const STATUS = { success: "完成", skipped: "跳过", error: "出错", submitted: "已交卷", saved: "已保存答案", preview: "已生成答案", paused: "已暂停", ai_error: "AI 出错", submission_unknown: "交卷结果未知", waiting: "等你操作" };
-function pushLine(text, level = "", done = false) {
-  state.run.lines.unshift({ text, level, done, time: new Date().toTimeString().slice(0, 5) });
-  state.run.lines.length = Math.min(state.run.lines.length, 200);
+function pushLine(run, text, level = "", done = false) {
+  run.lines.unshift({ text, level, done, time: new Date().toTimeString().slice(0, 5) });
+  run.lines.length = Math.min(run.lines.length, 200);
 }
 
 function finishUnits(job) {
   const k = key(job.platform, job.course);
   for (const ch of unitsOf(k) || []) for (const u of ch.units) if (u.state === "running") u.state = job.state === "waiting" ? "waiting" : "queued";
   // The platform is the source of truth once the job is over; a waiting job keeps its marks until the user acts.
-  if (job.state !== "waiting" && job.title !== "AI 答题") loadUnits(job.platform, job.course, true);
+  if (job.state !== "waiting" && jobType(job) !== "answer") loadUnits(job.platform, job.course, true);
 }
 
 function handleEvent(event) {
-  const run = state.run;
   if (event.type === "job") {
-    if (event.state === "queued" || (event.state === "running" && state.job?.id === event.id)) {
-      state.job = event;
-    } else if (event.state === "running") {
-      state.job = event;
-      state.run = freshRun();
-      state.lastDone = null;
-      if (event.title !== "AI 答题") loadUnits(event.platform, event.course);
+    const at = state.jobs.findIndex((j) => j.id === event.id);
+    if (event.state === "running" || event.state === "queued") {
+      if (at >= 0) state.jobs[at] = event;
+      else {
+        state.jobs.push(event);
+        runOf(event.id);
+        state.lastDone = null;
+        if (jobType(event) !== "answer") loadUnits(event.platform, event.course);
+      }
     } else {
-      state.job = null;
+      if (at >= 0) state.jobs.splice(at, 1);
+      delete state.runs[event.id];
+      if (state.focus === event.id) state.focus = null;
       state.history = [event, ...state.history.filter((j) => j.id !== event.id)].slice(0, 20);
       state.lastDone = Object.assign({}, event, { shownAt: Date.now() });
       toast(`${event.title} · ${event.summary || STATE_WORD[event.state] || "结束"}`);
@@ -769,21 +805,25 @@ function handleEvent(event) {
       loadCourses(event.platform);
       setTimeout(repaint, 61000);
     }
-  } else if (event.type === "progress") {
-    if (event.kind === "begin") run.overall = { name: event.name, total: event.total || 0, done: 0, unit: event.unit };
+  } else if (event.type === "progress" || event.type === "log") {
+    const job = state.jobs.find((j) => j.id === event.job);
+    if (!job) return;
+    const run = runOf(job.id);
+    if (event.type === "log") pushLine(run, event.text, event.level);
+    else if (event.kind === "begin") run.overall = { name: event.name, total: event.total || 0, done: 0, unit: event.unit };
     else if (event.kind === "add_total" && run.overall) run.overall.total += event.total || 0;
     else if (event.kind === "detail") run.detail = event.name;
     else if (event.kind === "unit") {
-      const u = state.job && findUnit(key(state.job.platform, state.job.course), event.key);
+      const u = findUnit(key(job.platform, job.course), event.key);
       if (u) u.state = event.status;
       if (event.status === "running") run.unit = { name: event.name, key: event.key };
     } else if (event.kind === "result") {
       if (run.overall) run.overall.done += 1;
-      pushLine(`${event.name} · ${STATUS[event.status] || event.status || ""}`, event.status === "error" || event.status === "ai_error" ? "error" : event.status === "waiting" ? "warn" : "", true);
+      pushLine(run, `${event.name} · ${STATUS[event.status] || event.status || ""}`, event.status === "error" || event.status === "ai_error" ? "error" : event.status === "waiting" ? "warn" : "", true);
     } else if (event.kind === "resources" || event.kind === "questions") {
       run.sub = { name: event.name, done: event.completed || 0, total: event.total || 0, unit: event.unit === "项资源" ? "项" : event.unit };
     }
-  } else if (event.type === "log") pushLine(event.text, event.level);
+  }
   repaint();
 }
 
@@ -880,10 +920,11 @@ async function refreshState() {
     const data = await api("/api/state");
     state.platforms = data.platforms;
     state.history = data.history || [];
-    if (data.job && !state.job) {
-      state.job = data.job;
-      state.run.lines = data.job.lines || [];
-      if (data.job.title !== "AI 答题") loadUnits(data.job.platform, data.job.course);
+    for (const job of data.jobs || []) {
+      if (state.jobs.some((j) => j.id === job.id)) continue;
+      state.jobs.push(job);
+      runOf(job.id).lines = job.lines || [];
+      if (jobType(job) !== "answer") loadUnits(job.platform, job.course);
     }
     for (const p of state.platforms) if (!p.logged_in) delete state.courses[p.id];
   } catch (error) { toast(error.message); }
@@ -934,9 +975,10 @@ document.addEventListener("click", (event) => {
   const target = t.closest("[data-go]"); if (target) { closeSheet(); go(target.dataset.go); }
   if (t.closest("[data-find]")) openFinder();
   if (t.closest("[data-theme]")) toggleTheme();
-  if (t.closest("[data-open]")) openSheet();
+  const open = t.closest("[data-open]"); if (open) openSheet(open.dataset.open);
   if (t.closest("[data-close]")) closeSheet();
-  if (t.closest("[data-stop]")) stopJob();
+  const stop = t.closest("[data-stop]"); if (stop) stopJob(stop.dataset.stop);
+  const focus = t.closest("[data-focus]"); if (focus) { state.focus = focus.dataset.focus; renderFocus(); renderPlayer(); }
   if (t.closest("[data-dismiss]")) { state.lastDone = null; repaint(); }
   const filter = t.closest("[data-filter]"); if (filter) { state.logFilter = filter.dataset.filter; renderFocus(); }
   const retry = t.closest("[data-units-retry]");
@@ -959,9 +1001,9 @@ window.addEventListener("keydown", (event) => {
   if (mod && event.key.toLowerCase() === "j") { event.preventDefault(); toggleTheme(); return; }
   if (event.key === "Escape") { if (state.menuOpen) { state.menuOpen = false; renderSidebar(); } else closeSheet(); return; }
   if (mod || event.altKey || event.target.closest("input, textarea, select") || document.body.classList.contains("signed-out")) return;
-  if (event.key === "S" && event.shiftKey) { stopJob(); return; }
+  if (event.key === "S" && event.shiftKey) { stopJob(focusedJob()?.id); return; }
   if (event.key === "f") { openSheet(); return; }
-  if (event.key === "s" && !state.job) $('[data-start]:not([disabled])', page)?.click();
+  if (event.key === "s") $('[data-start]:not([disabled])', page)?.click();
 });
 
 /* ---------------------------------------------------------------- router */

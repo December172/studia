@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from typing import Optional
 import logging
+import threading
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,11 @@ class Reporter:
     def unit(self, key, name, state):
         """One learning unit changed state: running, done, skipped or failed."""
         self.emit("unit", name, status=state, key=key)
+
+
+def child_thread_name(kind):
+    """Name a helper thread after the thread starting it, so the web UI can tell which job logged a line."""
+    return f"{threading.current_thread().name}/{kind}"
 
 
 def log_callback(callback, message):

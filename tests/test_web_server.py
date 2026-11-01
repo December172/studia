@@ -8,6 +8,7 @@ import unittest.mock
 from http.server import ThreadingHTTPServer
 from unittest.mock import Mock
 
+from reporting import ProgressEvent
 from settings import SettingsStore
 from web.server import LocalAccess, Studia, _course, make_handler
 
@@ -47,7 +48,7 @@ class WebServerTest(unittest.TestCase):
         state = json.loads(body)
         self.assertEqual([p["id"] for p in state["platforms"]], ["mooc", "zhs"])
         self.assertFalse(any(p["logged_in"] for p in state["platforms"]))
-        self.assertIsNone(state["job"])
+        self.assertEqual(state["jobs"], [])
 
     def test_static_files_stay_inside_the_bundle(self):
         self.assertEqual(self.request("GET", "/")[0], 200)
@@ -63,28 +64,42 @@ class WebServerTest(unittest.TestCase):
         self.assertEqual(self.request("GET", "/api/platforms/zyk/courses")[0], 404)
         self.assertEqual(self.request("GET", "/api/platforms/mooc/tasks?course=x")[0], 401)
 
-    def test_second_job_is_refused_while_one_runs(self):
+    def test_jobs_run_in_parallel_except_on_the_same_course_or_zhs_video(self):
         self.app.platforms["zhs"].rows = [{"courseName": "课", "zhs": {"kind": "shared", "courseId": 1}}]
-        self.app.job = {"title": "running", "cancel": threading.Event()}
-        status, body = self.request("POST", "/api/jobs", body={"platform": "zhs", "type": "study", "course": "shared-1"})
+        running = {"id": "a1", "kind": "study", "title": "自动学习", "platform": "zhs", "course": "shared-1",
+                   "course_name": "网络课", "started": 0, "cancel": threading.Event()}
+        self.app.jobs = {"a1": running}
+        status, body = self.request("POST", "/api/jobs", body={"platform": "zhs", "type": "review", "course": "shared-1"})
         self.assertEqual(status, 409)
-        self.assertIn("已有任务", json.loads(body)["error"])
+        self.assertIn("正在自动学习", json.loads(body)["error"])
+        check = self.app._check_conflicts
+        with self.assertRaisesRegex(Exception, "只能播放一个视频"):
+            check("zhs", "shared-2", "study")
+        check("zhs", "shared-1", "answer")       # answering the same course is fine
+        check("mooc", "m1", "study")             # other platforms are independent
+        self.app.jobs = {"a1": dict(running, platform="mooc", course="m1")}
+        check("mooc", "m2", "study")             # MOOC courses study side by side
+        with self.assertRaisesRegex(Exception, "正在自动学习"):
+            check("mooc", "m1", "study")
+        self.app.jobs = {str(i): dict(running, id=str(i), platform="mooc", course=str(i)) for i in range(4)}
+        with self.assertRaisesRegex(Exception, "最多同时运行"):
+            check("mooc", "m9", "answer")
 
     def test_finished_job_lands_in_history_with_its_lines(self):
         platform = self.app.platforms["zhs"]
         platform.rows = [{"courseName": "网络课", "zhs": {"kind": "ai", "courseId": "c1"}}]
         platform.client = Mock()
-        platform.spec = dict(platform.spec, handler=lambda **kwargs: self.app.publish(
-            {"type": "log", "text": "第一节完成", "level": ""}))
+        platform.spec = dict(platform.spec, handler=lambda **kwargs: kwargs["on_progress"](
+            ProgressEvent("result", "第一节", status="success")))
         self.assertEqual(self.request("POST", "/api/jobs", body={"platform": "zhs", "type": "study", "course": "ai-c1"})[0], 200)
         for _ in range(50):
-            if self.app.job is None:
+            if not self.app.jobs:
                 break
             time.sleep(0.02)
         history = json.loads(self.request("GET", "/api/jobs")[1])["history"]
         self.assertEqual(history[0]["state"], "done")
         self.assertEqual((history[0]["platform"], history[0]["course_name"]), ("zhs", "网络课"))
-        self.assertEqual(history[0]["lines"][0]["text"], "第一节完成")
+        self.assertEqual(history[0]["lines"][0]["text"], "第一节 · 完成")
 
     def test_captcha_leaves_the_job_waiting_for_the_user(self):
         from ZHSMain.api import CaptchaRequired
@@ -98,7 +113,7 @@ class WebServerTest(unittest.TestCase):
         self.assertEqual(self.request("GET", "/api/platforms/zyk/units?course=x")[0], 404)
         self.assertEqual(self.request("POST", "/api/jobs", body={"platform": "zhs", "type": "study", "course": "ai-c1"})[0], 200)
         for _ in range(50):
-            if self.app.job is None:
+            if not self.app.jobs:
                 break
             time.sleep(0.02)
         job = json.loads(self.request("GET", "/api/jobs")[1])["history"][0]

@@ -42,7 +42,15 @@ STATIC = Path(__file__).resolve().parent / "static"
 REVIEW_MINUTES = 30
 QR_REFRESHES = 5
 HISTORY = 20
-JOB_THREADS = {}
+# ponytail: per-user cap on parallel jobs; hosted mode additionally shares the site-wide --max-jobs slots.
+MAX_JOBS = 4
+LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题"}
+# Jobs that play course content conflict with each other; answering is separate.
+GROUP = {"study": "learn", "review": "learn", "answer": "answer"}
+# Running job id -> its Studia app. A job thread is named "studia-job-<id>" and passes that
+# name on to the helper threads it starts, so a log line can be traced back to its job.
+JOBS = {}
+JOB_THREAD = re.compile(r"studia-job-([0-9a-f]+)")
 logger = logging.getLogger(__name__)
 
 # Order is the sidebar order. "answer"/"review" mark what the web UI can run today.
@@ -99,14 +107,14 @@ class Studia:
         self.reports_dir = reports_dir
         self.slots = slots
         self.oauth_url = oauth_url
-        self.job = None
+        self.jobs = {}
         self.history = []
         self.subscribers = set()
 
     # ------------------------------------------------------------ events
 
     def publish(self, event):
-        job = self.job
+        job = self.jobs.get(event.get("job"))
         if job is not None and event.get("type") in ("log", "progress"):
             line = _history_line(event)
             if line:
@@ -118,12 +126,13 @@ class Studia:
             except queue.Full:
                 pass
 
-    def on_progress(self, event):
-        self.publish(dict(asdict(event), type="progress"))
+    def progress_of(self, job):
+        """The on_progress callback for one job's business code."""
+        return lambda event: self.publish(dict(asdict(event), type="progress", job=job["id"]))
 
-    def progress_event(self, kind, name, *, total=None, status="", unit="项"):
+    def progress_event(self, job, kind, name, *, total=None, status="", unit="项"):
         self.publish({"type": "progress", "kind": kind, "name": name, "total": total,
-                      "status": status, "unit": unit, "completed": None})
+                      "status": status, "unit": unit, "completed": None, "job": job["id"]})
 
     # ------------------------------------------------------------ state
 
@@ -138,7 +147,7 @@ class Studia:
 
     def state(self):
         return {"platforms": [p.public(self.logged_in(p)) for p in self.platforms.values()],
-                "job": _job_public(self.job), "history": [_job_public(j) for j in self.history]}
+                "jobs": self._running(), "history": [_job_public(j) for j in self.history]}
 
     def client(self, platform):
         with self.lock:
@@ -345,31 +354,48 @@ class Studia:
             raise HttpError(400, "这个平台暂不支持该操作")
         row = self.find_row(platform, course_id)
         with self.lock:
-            if self.job:
-                raise HttpError(409, "已有任务在运行，请先停止")
-            cancel = threading.Event()
-            label = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题"}[kind]
+            self._check_conflicts(platform.id, course_id, kind)
+            job = {"id": secrets.token_hex(4), "kind": kind, "title": LABEL[kind], "course": course_id,
+                   "platform": platform.id, "course_name": row.get("courseName") or "课程", "cancel": threading.Event(),
+                   "state": "running", "summary": "", "started": time.time(), "ended": None, "lines": []}
             if kind == "answer":
                 selected = self._selected(platform, course_id, body.get("tasks") or [])
-                target = lambda: self._answer(platform, selected, bool(body.get("auto_submit")), cancel)
+                target = lambda: self._answer(platform, selected, bool(body.get("auto_submit")), job)
             else:
                 minutes = REVIEW_MINUTES if kind == "review" else 0
-                target = lambda: self._study(platform, row, minutes, cancel)
-            self.job = {"id": secrets.token_hex(4), "title": label, "course": course_id, "platform": platform.id,
-                        "course_name": row.get("courseName") or "课程", "cancel": cancel, "state": "running",
-                        "summary": "", "started": time.time(), "ended": None, "lines": []}
-        self.publish(dict(_job_public(self.job), type="job"))
-        threading.Thread(target=self._run_job, args=(target, platform), daemon=True, name="studia-job").start()
-        return {"ok": True}
+                target = lambda: self._study(platform, row, minutes, job)
+            self.jobs[job["id"]] = job
+            JOBS[job["id"]] = self
+        self.publish(dict(_job_public(job), type="job"))
+        threading.Thread(target=self._run_job, args=(job, target, platform), daemon=True,
+                         name="studia-job-%s" % job["id"]).start()
+        return {"ok": True, "id": job["id"]}
 
-    def stop_job(self):
-        job = self.job
-        if job:
-            job["cancel"].set()
+    def _check_conflicts(self, pid, course_id, kind):
+        if len(self.jobs) >= MAX_JOBS:
+            raise HttpError(409, "最多同时运行 %d 个任务，请等其中一个结束" % MAX_JOBS)
+        for other in self.jobs.values():
+            if GROUP[other["kind"]] != GROUP[kind] or other["platform"] != pid:
+                continue
+            if other["course"] == course_id:
+                raise HttpError(409, "这门课正在%s，请等它结束或先停止" % other["title"])
+            if pid == "zhs" and GROUP[kind] == "learn":
+                # Zhihuishu treats two videos playing on one account as multiple windows.
+                raise HttpError(409, "智慧树同一账号同时只能播放一个视频，请等「%s」的%s结束"
+                                % (other["course_name"], other["title"]))
+
+    def stop_job(self, job_id=None):
+        """Stop one job, or every running job when no id is given."""
+        for job in list(self.jobs.values()):
+            if job_id in (None, job["id"]):
+                job["cancel"].set()
         return {}
 
-    def jobs(self):
-        return {"job": _job_public(self.job), "history": [_job_public(j) for j in self.history]}
+    def _running(self):
+        return [_job_public(job) for job in sorted(self.jobs.values(), key=lambda j: j["started"])]
+
+    def jobs_state(self):
+        return {"jobs": self._running(), "history": [_job_public(j) for j in self.history]}
 
     def _selected(self, platform, course_id, task_ids):
         entries = platform.entries.get(course_id) or {}
@@ -378,10 +404,8 @@ class Studia:
             raise HttpError(400, "请先选择试卷（试卷列表可能已过期，请刷新）")
         return selected
 
-    def _run_job(self, target, platform):
+    def _run_job(self, job, target, platform):
         state, summary = "done", ""
-        job = self.job
-        JOB_THREADS[threading.get_ident()] = self
         acquired = False
         try:
             if self.slots is not None:
@@ -413,13 +437,13 @@ class Studia:
         finally:
             if acquired:
                 self.slots.release()
-            JOB_THREADS.pop(threading.get_ident(), None)
             with self.lock:
                 job.update(state=state, summary=summary, ended=time.time())
                 self.history.insert(0, job)
                 del self.history[HISTORY:]
-                self.job = None
+                self.jobs.pop(job["id"], None)
             self.publish(dict(_job_public(job), type="job"))
+            JOBS.pop(job["id"], None)
 
     def _ai(self, cancel_message):
         config = self.store.ai_config()
@@ -435,10 +459,10 @@ class Studia:
         self.store.save_ai_health(config, "ok")
         return ai
 
-    def _study(self, platform, row, minutes, cancel):
+    def _study(self, platform, row, minutes, job):
         spec = platform.spec
-        kwargs = {"client": self.client(platform), "course_rows": [row], "on_progress": self.on_progress,
-                  "cancel_event": cancel, "max_workers": self.store.concurrency()["study"]}
+        kwargs = {"client": self.client(platform), "course_rows": [row], "on_progress": self.progress_of(job),
+                  "cancel_event": job["cancel"], "max_workers": self.store.concurrency()["study"]}
         ai = None
         if spec["needs_ai"]:
             ai = kwargs["activity_ai"] = self._ai("MOOC 学习会自动参与讨论和评价，请先在设置里添加 AI 模型")
@@ -453,20 +477,21 @@ class Studia:
                 ai.session.close()
         return "今日复习完成" if minutes else "学习完成"
 
-    def _answer(self, platform, selected, auto_submit, cancel):
+    def _answer(self, platform, selected, auto_submit, job):
+        cancel, on_progress = job["cancel"], self.progress_of(job)
         ai = self._ai("请先在设置里添加 AI 模型")
         try:
             workers = self.store.concurrency()["ai"]
             if platform.id == "zhs":
                 runner = ZHSAnswerRunner(
-                    self.client(platform), ai, auto_submit=auto_submit, on_progress=self.on_progress,
+                    self.client(platform), ai, auto_submit=auto_submit, on_progress=on_progress,
                     cancel_event=cancel, max_workers=workers,
                     memory=AnswerMemory(Path(self.store.path).parent / "zhs-answers.json", shared=SHARED_ANSWERS))
             else:
                 # No manual-answer or confirm callbacks: unanswerable papers stay unsubmitted.
                 runner = AnswerRunner(ExamAPI(self.client(platform)), ai, output_dir=self.reports_dir,
-                                      auto_submit=auto_submit, on_progress=self.on_progress, max_workers=workers)
-            self.progress_event("begin", "AI 答题", total=len(selected), unit="份试卷")
+                                      auto_submit=auto_submit, on_progress=on_progress, max_workers=workers)
+            self.progress_event(job, "begin", "AI 答题", total=len(selected), unit="份试卷")
             done = 0
             for course, item, category in selected:
                 if cancel.is_set():
@@ -475,7 +500,7 @@ class Studia:
                 try:
                     result = runner.run_paper(course, item, category)
                 except (CaptchaRequired, StudyTimeLimit):
-                    self.progress_event("result", name, status="waiting")
+                    self.progress_event(job, "result", name, status="waiting")
                     raise
                 except TaskUnavailableError as exc:
                     result = {"status": "skipped", "message": str(exc)}
@@ -484,9 +509,9 @@ class Studia:
                 status = result["status"]
                 if status == "ai_error":
                     self.store.save_ai_health(ai.config, "error", result.get("message", "AI 服务失败"))
-                self.progress_event("result", name, status=status)
+                self.progress_event(job, "result", name, status=status)
                 if result.get("message"):
-                    self.publish({"type": "log", "text": f"{name}：{result['message']}",
+                    self.publish({"type": "log", "text": f"{name}：{result['message']}", "job": job["id"],
                                   "level": "error" if status in ("error", "ai_error") else ""})
                 done += status in ("submitted", "saved", "preview")
                 if result.get("stop_queue") or status in ("ai_error", "submission_unknown", "submitting", "paused"):
@@ -585,14 +610,15 @@ class _EventLogHandler(logging.Handler):
         self.app = app
 
     def emit(self, record):
-        # Hosted mode has no single app: a line belongs to whichever user's job thread
-        # logged it. Lines from helper threads are dropped rather than risk a leak.
-        app = self.app or JOB_THREADS.get(record.thread)
-        if app is None or not record.name.startswith(self.PREFIXES) or not app.job:
+        # A line belongs to the job whose thread (or a helper thread it named) logged it;
+        # lines from any other thread are dropped rather than risk a leak between users.
+        match = JOB_THREAD.match(record.threadName or "")
+        app = JOBS.get(match[1]) if match else None
+        if app is None or (self.app is not None and app is not self.app) or not record.name.startswith(self.PREFIXES):
             return
         try:
             level = "error" if record.levelno >= logging.ERROR else "warn" if record.levelno >= logging.WARNING else ""
-            app.publish({"type": "log", "text": record.getMessage(), "level": level})
+            app.publish({"type": "log", "text": record.getMessage(), "level": level, "job": match[1]})
         except Exception:
             pass
 
@@ -644,7 +670,7 @@ def _history_line(event):
 def _job_public(job):
     if job is None:
         return None
-    return {key: job[key] for key in ("id", "title", "course", "course_name", "platform", "state",
+    return {key: job.get(key) for key in ("id", "kind", "title", "course", "course_name", "platform", "state",
                                       "summary", "started", "ended", "lines")}
 
 
@@ -682,9 +708,9 @@ ROUTES = [
     ("GET", r"/api/platforms/(\w+)/courses", lambda app, m, q, b: app.courses(m[1])),
     ("GET", r"/api/platforms/(\w+)/units", lambda app, m, q, b: app.units(m[1], (q.get("course") or [""])[0])),
     ("GET", r"/api/platforms/(\w+)/tasks", lambda app, m, q, b: app.tasks(m[1], (q.get("course") or [""])[0])),
-    ("GET", r"/api/jobs", lambda app, m, q, b: app.jobs()),
+    ("GET", r"/api/jobs", lambda app, m, q, b: app.jobs_state()),
     ("POST", r"/api/jobs", lambda app, m, q, b: app.start_job(b)),
-    ("POST", r"/api/jobs/stop", lambda app, m, q, b: app.stop_job()),
+    ("POST", r"/api/jobs/stop", lambda app, m, q, b: app.stop_job((b or {}).get("id"))),
     ("GET", r"/api/settings", lambda app, m, q, b: app.settings()),
     ("POST", r"/api/settings/models", lambda app, m, q, b: app.add_model(b)),
     ("POST", r"/api/settings/models/activate", lambda app, m, q, b: app.activate_model(b)),
