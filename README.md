@@ -32,6 +32,8 @@ uv run StartWork.py
 
 uv 会自动准备 Python 3.12 和依赖，不需要手动建虚拟环境。启动后在浏览器完成平台登录，再回到终端操作；之后会自动恢复登录。
 
+**网页版**：执行 `uv run StartWork.py --web`，会在浏览器打开图形界面，支持 MOOC 和智慧树，详见[使用指南](docs/USAGE.md#网页版)。
+
 **以后启动**：在项目目录执行 `uv run StartWork.py`。执行过 `uv sync` 后，macOS / Linux 也可以直接用 `.venv/bin/python StartWork.py`。
 
 **更新**：先退出程序，再执行：

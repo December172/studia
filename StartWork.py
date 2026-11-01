@@ -55,4 +55,9 @@ def main(view=None):
 
 
 if __name__ == '__main__':
-    main()
+    import sys
+    if '--web' in sys.argv[1:]:
+        from web.server import serve
+        serve()
+    else:
+        main()
