@@ -302,6 +302,16 @@ class ZHSApi:
             result = self._request("POST", url, data=form)
 
         code = result.get("code", ok)
+        if code != ok and code == -12:
+            # 先把平台真实返回记下来：验证类型决定能不能自动通过，
+            # 没这条日志就只能靠猜。
+            _log_failure(method, url, getattr(result, "http_status", None), code=code,
+                         message=result.get("message") or result.get("msg") or "",
+                         result=result, captcha=True)
+            if self.pass_captcha(result):
+                result = self._request("POST", url, data=form) if method.upper() != "GET" else \
+                    self._request("GET", url, params=form)
+                code = result.get("code", ok)
         if code != ok:
             message = result.get("message") or result.get("msg") or ""
             _log_failure(method, url, getattr(result, "http_status", None), code=code, message=message,
@@ -310,6 +320,32 @@ class ZHSApi:
                 raise CaptchaRequired("智慧树要求验证码，请到网页完成验证后重试")
             raise ZHSApiError(code, message)
         return result
+
+    def pass_captcha(self, result):
+        """按平台报出的验证类型自动通过。目前只实现了易盾滑块（jigsaw）。"""
+        from ZHSMain import slider
+
+        kind = _captcha_type(result)
+        if "jigsaw" not in kind and "slider" not in kind:
+            logger.warning("验证类型 %s 暂不支持自动通过，需要人工处理", kind)
+            return False
+        cookies = [
+            {"name": c.name, "value": c.value, "domain": c.domain or "", "path": c.path or "/"}
+            for c in self.session.cookies
+        ]
+        try:
+            validate, fresh = slider.solve(cookies, page_url=EXAM_PAGE)
+        except Exception as exc:
+            logger.warning("滑块自动验证未完成：%s", exc)
+            return False
+        for cookie in fresh:
+            if cookie.get("domain") and "zhihuishu" in cookie["domain"]:
+                self.session.cookies.set(cookie["name"], cookie["value"],
+                                         domain=cookie["domain"], path=cookie.get("path") or "/")
+        if validate:
+            logger.info("滑块验证已通过，已换回浏览器 cookie")
+            return True
+        return False
 
     def login_qr(self):
         self._request(

@@ -184,3 +184,7 @@ tiku/
 # 本机登录与模型配置（默认存放在仓库外）
 settings.json
 .settings-*
+
+# 本机 Claude/DeepSeek 分工配置
+CLAUDE.local.md
+.claude/ds
