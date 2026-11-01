@@ -38,7 +38,9 @@ uv 会自动准备 Python 3.12 和依赖，不需要手动建虚拟环境。启�
 **服务器部署（Docker）**：给多人共用，有账号、邀请码和管理页，每人的数据分开加密存放。
 
 ```bash
-STUDIA_PUBLIC_URL=http://服务器IP:8080 docker compose up -d --build
+mkdir studia && cd studia
+curl -fsSLO https://raw.githubusercontent.com/yijunjie07/studia/main/docker-compose.yml
+STUDIA_PUBLIC_URL=http://服务器IP:8080 docker compose up -d
 docker compose logs studia   # 日志里有首次设置用的「设置码」
 ```
 

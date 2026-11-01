@@ -38,7 +38,7 @@
 | `tools/native_demo.py` | 真实终端中的原生键盘控件预览，只用合成数据，不访问平台 / AI / 配置 |
 | `tests/` | 离线自动化测试 |
 | `docs/` | 当前使用指南、开发说明与接口说明 |
-| `.github/` | CI：Python 3.9 / 3.12 单元测试，以及 Docker 镜像构建和首次设置的冒烟测试 |
+| `.github/` | CI：Python 3.9 / 3.12 单元测试，Docker 镜像构建和首次设置的冒烟测试；main 更新后把镜像发布到 `ghcr.io/yijunjie07/studia` |
 | `Dockerfile`、`docker-compose.yml` | 服务器模式的容器部署；数据卷挂在 `/data` |
 
 `MoocMain/`、`NewMoocMain/` 只剩当前入口在用的模块，不能仅凭名称删除。运行命令均从仓库根目录执行。

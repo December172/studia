@@ -1,8 +1,10 @@
 # docker compose up -d，然后看日志里的设置码：docker compose logs studia
+# 更新：docker compose pull && docker compose up -d
 services:
   studia:
-    build: .
-    image: studia
+    # 镜像由仓库的 GitHub Actions 构建发布，服务器只需拉取。自己改了代码想本地构建：
+    # docker build -t ghcr.io/yijunjie07/studia:latest .
+    image: ghcr.io/yijunjie07/studia:latest
     restart: unless-stopped
     ports:
       - "8080:8080"
