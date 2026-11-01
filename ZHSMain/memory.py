@@ -164,18 +164,20 @@ class DatabaseAnswerMemory(AnswerMemory):
     Keep a single instance per process and hand it to every runner: lookups and updates
     go through its lock, and save() writes only the questions that changed."""
 
+    TABLE = "zhs_answers"
+
     def __init__(self, db_path, shared=None):
         super().__init__(db_path, shared)
         self.db = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None, timeout=10)
-        self.db.execute("CREATE TABLE IF NOT EXISTS zhs_answers ("
-                        "key TEXT PRIMARY KEY, correct TEXT, wrong TEXT NOT NULL, updated TEXT)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS %s ("
+                        "key TEXT PRIMARY KEY, correct TEXT, wrong TEXT NOT NULL, updated TEXT)" % self.TABLE)
 
     def _load(self):
         if self._loaded:
             return
         self._loaded = True
         self._items = {}
-        for key, correct, wrong, updated in self.db.execute("SELECT key, correct, wrong, updated FROM zhs_answers"):
+        for key, correct, wrong, updated in self.db.execute("SELECT key, correct, wrong, updated FROM %s" % self.TABLE):
             self._items[key] = {"correct": json.loads(correct) if correct else None,
                                 "wrong": json.loads(wrong)[-MAX_WRONG:], "updated": updated}
 
@@ -185,7 +187,7 @@ class DatabaseAnswerMemory(AnswerMemory):
                 for key, item in ((key, self._items.get(key)) for key in self._changed) if item]
         try:
             self.db.execute("BEGIN IMMEDIATE")
-            self.db.executemany("INSERT OR REPLACE INTO zhs_answers VALUES (?,?,?,?)", rows)
+            self.db.executemany("INSERT OR REPLACE INTO %s VALUES (?,?,?,?)" % self.TABLE, rows)
             self.db.execute("COMMIT")
         except sqlite3.Error as exc:
             if self.db.in_transaction:

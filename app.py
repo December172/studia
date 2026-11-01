@@ -18,6 +18,7 @@ from ZHSMain.memory import SHARED as SHARED_ANSWERS, AnswerMemory
 from ZHSMain.login import qr_login
 from NewMoocMain.oauth_login import oauth_login
 from ai.client import AIClient, AIError
+from ai.memory import MoocAnswerMemory
 from ai.runner import AnswerRunner
 from reporting import Reporter
 from base.auth import AuthenticationExpired, PlatformUnavailable
@@ -371,7 +372,8 @@ class Application:
                         runner = AnswerRunner(api, ai_client, auto_submit=auto_submit,
                                               on_progress=self.view.on_progress, max_workers=max_workers,
                                               manual_answer=getattr(self.view, "manual_answer", None),
-                                              confirm_submit=getattr(self.view, "confirm_submit", None))
+                                              confirm_submit=getattr(self.view, "confirm_submit", None),
+                                              memory=MoocAnswerMemory(Path(self.store.path).parent / "mooc-answers.json"))
                     result = runner.run_paper(course, item, category)
                     results.append(result)
                 except TaskUnavailableError as exc:

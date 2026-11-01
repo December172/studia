@@ -35,6 +35,7 @@ from ZHSMain.answer import ZHSAnswerRunner, catalog
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi, ZHSError
 from ZHSMain.main import ZHSHandler, course_units as zhs_units
 from ZHSMain.memory import SHARED as SHARED_ANSWERS, AnswerMemory
+from ai.memory import MoocAnswerMemory
 from ZYKMoocMain.api import ZYKMoocApi
 from ZYKMoocMain.main import ZYKMoocHandler
 
@@ -95,7 +96,7 @@ class Platform:
 class Studia:
     """All state behind the web UI; one running job at a time across platforms."""
 
-    def __init__(self, store=None, oauth=oauth_login, *, reports_dir="ai_results", slots=None, oauth_url=None, memory=None):
+    def __init__(self, store=None, oauth=oauth_login, *, reports_dir="ai_results", slots=None, oauth_url=None, memory=None, mooc_memory=None):
         self.store = store or SettingsStore()
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
@@ -109,6 +110,7 @@ class Studia:
         self.oauth_url = oauth_url
         # Hosted mode passes the site-wide memory; locally it lives next to the settings file.
         self.memory = memory
+        self.mooc_memory = mooc_memory
         self.jobs = {}
         self.history = []
         self.subscribers = set()
@@ -492,7 +494,8 @@ class Studia:
             else:
                 # No manual-answer or confirm callbacks: unanswerable papers stay unsubmitted.
                 runner = AnswerRunner(ExamAPI(self.client(platform)), ai, output_dir=self.reports_dir,
-                                      auto_submit=auto_submit, on_progress=on_progress, max_workers=workers)
+                                      auto_submit=auto_submit, on_progress=on_progress, max_workers=workers,
+                                      memory=self.mooc_memory or MoocAnswerMemory(Path(self.store.path).parent / "mooc-answers.json"))
             self.progress_event(job, "begin", "AI 答题", total=len(selected), unit="份试卷")
             done = 0
             for course, item, category in selected:

@@ -9,6 +9,7 @@ from pathlib import Path
 from AIMoocMain.exam_api import ExamError, ExamServiceError, TaskUnavailableError
 from AIMoocMain.export_questions import get_questions_from_paper, paper_display_name, paper_exam_id, safe_filename
 from reporting import Reporter, child_thread_name, log_callback
+from ai.memory import learn as learn_answers, remembered_value, scope as answer_scope
 from ai.client import AIError, AIServiceError
 from ai.concurrency import ParallelAnswers, prepared_items
 from base.concurrency import validate_workers
@@ -185,7 +186,7 @@ def pending_row(row, q):
 
 
 class AnswerRunner:
-    def __init__(self, api, ai, output_dir="ai_results", auto_submit=False, output=None, clock_factory=AttemptClock, *, on_log=None, on_progress=None, max_workers=1, manual_answer=None, confirm_submit=None):
+    def __init__(self, api, ai, output_dir="ai_results", auto_submit=False, output=None, clock_factory=AttemptClock, *, on_log=None, on_progress=None, max_workers=1, manual_answer=None, confirm_submit=None, memory=None):
         self.max_workers = validate_workers(max_workers)
         self.api, self.ai, self.output_dir = api, ai, output_dir
         self.auto_submit = auto_submit
@@ -196,6 +197,25 @@ class AnswerRunner:
         self.service_cooldown_until = 0.0
         self.manual_answer = manual_answer
         self.confirm_submit = confirm_submit
+        # Standard answers the platform revealed for submitted attempts (ai.memory).
+        self.memory = memory
+        self.learned = set()
+
+    def learn(self, course, exam_id, task_ids):
+        """Learn the standard answers of submitted attempts; never lets a failure stop the paper."""
+        if self.memory is None:
+            return
+        for task_id in task_ids:
+            if (exam_id, task_id) in self.learned:
+                continue
+            self.learned.add((exam_id, task_id))
+            try:
+                count = learn_answers(self.api, self.memory, course, exam_id, task_id)
+            except Exception as exc:
+                self.output("读取已交卷记录的标准答案失败，本次不记：%s" % exc)
+                continue
+            if count:
+                self.output("从已交卷记录记下 %s 题标准答案" % count)
 
     def wait_for_ai(self, clock, delay):
         """Keep deadlines responsive during provider cooldowns and retries."""
@@ -290,6 +310,8 @@ class AnswerRunner:
             # The browser uses this same paper endpoint for '再次答题'. Older
             # submitted attempts must not prevent opening a fresh draft.
             records = self.api.records(exam_id)
+            self.learn(course, exam_id, [str(r.get("id") or r.get("taskId")) for r in records
+                                         if str(r.get("status")) == "2" and (r.get("id") or r.get("taskId"))])
             availability = task_availability(item, category)
             if not availability.available:
                 raise TaskUnavailableError(availability.reason)
@@ -388,6 +410,27 @@ class AnswerRunner:
                                "question_fingerprint": question_fingerprint(q)}
                 save_answer(position, item_report)
                 reuse_count += 1
+            memory_count = 0
+            memory_scope = answer_scope(course, exam_id)
+            for position, (_, q, preparation_error) in enumerate(items):
+                if self.memory is None or preparation_error is not None or position in entries or position in pending_positions:
+                    continue
+                known = self.memory.lookup(dict(q, scope=memory_scope)).get("correct")
+                value = remembered_value(q, known) if known else None
+                if value is None:
+                    continue
+                try:
+                    entry = answer_record(q, value)
+                except (ValueError, TypeError):
+                    continue
+                entries[position] = entry
+                save_answer(position, {"title": q["title"], "question_number": position + 1,
+                                       "options": model_question(q)["options"], "answer": value, "confidence": None,
+                                       "explanation": "平台公布过的标准答案（答案记忆）", "record": entry,
+                                       "source": "memory", "question_fingerprint": question_fingerprint(q)})
+                memory_count += 1
+            if memory_count:
+                self.output("答案记忆命中 %s 题，这些题不再调用 AI" % memory_count)
             completed = len(entries)
             if reusing:
                 self.progress.detail("复用上一轮答案：" + report["paper"])
@@ -572,6 +615,7 @@ class AnswerRunner:
                 if self.api.verify_submitted(exam_id, task_id):
                     submitted_task_ids.append(str(task_id))
                     report.update(status="submitted", message="平台作答记录已确认交卷")
+                    self.learn(course, exam_id, [str(task_id)])
                 else:
                     report.update(status="submission_unknown", message="请求已发送但未确认已交卷状态，请在网页核对；不会自动重发")
         except TaskUnavailableError as exc:

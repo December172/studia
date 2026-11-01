@@ -22,6 +22,7 @@
 | `base/auth.py` | 有超时且禁止重定向的只读认证检查；区分 401 与网络/服务异常 |
 | `AIMoocMain/` | 当前 MOOC 平台接口、学习管理、题目导出与交卷协议 |
 | `ai/` | AI 服务配置、题型处理、答题与交卷流程 |
+| `ai/memory.py` | MOOC 答案记忆：从已交卷记录（`/course/exam/record/getInfo`）学习标准答案，按课程和试卷限定范围复用 |
 | `ZYKMoocMain/` | 资源库平台接口与学习管理 |
 | `ZHSMain/` | 智慧树：扫码登录、接口加密、共享课/智慧课程学习、AI 答题与答案记忆（`shared_answers.json` 是随仓库分发的共享答案） |
 | `web/server.py` | 网页版后端：本机模式的 HTTP 接口、任务队列、SSE 事件推送 |

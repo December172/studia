@@ -198,6 +198,7 @@ class ObservationTests(unittest.TestCase):
         selected = [(course, {"id": "a", "name": "A"}, 1), (course, {"id": "b", "name": "B"}, 1)]
         store = Mock()
         store.concurrency.return_value = {'ai': 8, 'study': 8}
+        store.path = 'settings.json'
         from ai.client import AIConfig
         store.ai_config.return_value = AIConfig('https://example.org/v1', 'test-model', 'synthetic-key')
         app = Application(ui, store=store)
@@ -206,7 +207,8 @@ class ObservationTests(unittest.TestCase):
         with patch.object(app, 'client_and_courses', return_value=(Mock(), [course])), \
              patch.object(ui, 'categories', return_value=[1]), patch.object(ui, 'papers', return_value=selected), \
              patch.object(ui, 'ai_config', return_value=Mock()), patch.object(ui, 'answer_settings', return_value=(True, .8)), \
-             patch('app.ExamAPI') as api_cls, patch('app.AIClient'), patch('app.AnswerRunner', return_value=runner):
+             patch('app.ExamAPI') as api_cls, patch('app.AIClient'), patch('app.AnswerRunner', return_value=runner), \
+             patch('app.MoocAnswerMemory'):
             api_cls.return_value.catalog.return_value = []
             app.ai()
         runner.run_paper.assert_called_once()
