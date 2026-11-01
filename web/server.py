@@ -47,6 +47,8 @@ HISTORY = 20
 MAX_JOBS = 4
 # ponytail: running plus waiting jobs per person, so one browser cannot pile up threads.
 MAX_PENDING = 20
+# The platform's unit and paper lists take seconds to tens of seconds; reuse them for a while.
+CACHE_TTL = 600
 LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题"}
 # Jobs that play course content conflict with each other; answering is separate.
 GROUP = {"study": "learn", "review": "learn", "answer": "answer"}
@@ -87,6 +89,8 @@ class Platform:
         self.client = None
         self.rows = []
         self.entries = {}
+        # (kind, course id) -> (time, value) for the slow unit and paper lists.
+        self.cache = {}
         self.login = None
 
     def public(self, logged_in):
@@ -171,7 +175,7 @@ class Studia:
         with self.lock:
             if platform.client is not None and hasattr(platform.client, "close"):
                 platform.client.close()
-            platform.client, platform.rows, platform.entries = None, [], {}
+            platform.client, platform.rows, platform.entries, platform.cache = None, [], {}, {}
 
     def expire(self, platform):
         self.store.clear_session(platform.id)
@@ -296,11 +300,26 @@ class Studia:
                 return row
         raise HttpError(404, "没有找到这门课程，请刷新课程列表")
 
-    def tasks(self, pid, course_id):
+    def _cached(self, platform, key, fresh, load):
+        hit = platform.cache.get(key)
+        if hit and not fresh and time.time() - hit[0] < CACHE_TTL:
+            return hit[1]
+        value = load()
+        platform.cache[key] = (time.time(), value)
+        return value
+
+    def tasks(self, pid, course_id, fresh=False):
         platform = self.platform(pid)
         if not platform.spec["answer"]:
             raise HttpError(400, "%s 的网页版答题还在接入中，请先用终端版" % platform.spec["name"])
         row = self.find_row(platform, course_id)
+        listed, result = self._cached(platform, ("tasks", course_id), fresh, lambda: self._read_tasks(platform, row))
+        with self.lock:
+            platform.entries[course_id] = listed
+        return {"tasks": result}
+
+    def _read_tasks(self, platform, row):
+        pid = platform.id
         client = self.client(platform)
         try:
             entries = catalog(client, row) if pid == "zhs" else _mooc_catalog(client, row)
@@ -335,18 +354,17 @@ class Studia:
                 "hint": item.get("_hint", ""),
                 "redo_left": item.get("answerCount") if item.get("_redo") else None,
             })
-        with self.lock:
-            platform.entries[course_id] = listed
-        return {"tasks": result}
+        return listed, result
 
-    def units(self, pid, course_id):
+    def units(self, pid, course_id, fresh=False):
         """Every learning unit of one course by chapter, for the course grid."""
         platform = self.platform(pid)
         if platform.spec["units"] is None:
             raise HttpError(400, "%s 暂不支持查看学习单元" % platform.spec["name"])
         row = self.find_row(platform, course_id)
         try:
-            return {"chapters": platform.spec["units"](self.client(platform), row)}
+            return {"chapters": self._cached(platform, ("units", course_id), fresh,
+                                             lambda: platform.spec["units"](self.client(platform), row))}
         except AuthenticationExpired:
             raise self.expire(platform)
         except CaptchaRequired as exc:
@@ -455,6 +473,10 @@ class Studia:
             logger.exception("网页任务失败")
             state, summary = "error", str(exc) or "任务失败"
         finally:
+            if platform is not None:
+                # The job changed this course's progress and papers; read them afresh next time.
+                platform.cache.pop(("units", job["course"]), None)
+                platform.cache.pop(("tasks", job["course"]), None)
             with self.lock:
                 job.update(state=state, summary=summary, ended=time.time())
                 self.history.insert(0, job)
@@ -725,8 +747,8 @@ ROUTES = [
     ("GET", r"/api/platforms/(\w+)/login", lambda app, m, q, b: app.login_status(m[1])),
     ("POST", r"/api/platforms/(\w+)/logout", lambda app, m, q, b: app.logout(m[1])),
     ("GET", r"/api/platforms/(\w+)/courses", lambda app, m, q, b: app.courses(m[1])),
-    ("GET", r"/api/platforms/(\w+)/units", lambda app, m, q, b: app.units(m[1], (q.get("course") or [""])[0])),
-    ("GET", r"/api/platforms/(\w+)/tasks", lambda app, m, q, b: app.tasks(m[1], (q.get("course") or [""])[0])),
+    ("GET", r"/api/platforms/(\w+)/units", lambda app, m, q, b: app.units(m[1], (q.get("course") or [""])[0], (q.get("fresh") or [""])[0] == "1")),
+    ("GET", r"/api/platforms/(\w+)/tasks", lambda app, m, q, b: app.tasks(m[1], (q.get("course") or [""])[0], (q.get("fresh") or [""])[0] == "1")),
     ("GET", r"/api/jobs", lambda app, m, q, b: app.jobs_state()),
     ("POST", r"/api/jobs", lambda app, m, q, b: app.start_job(b)),
     ("POST", r"/api/jobs/stop", lambda app, m, q, b: app.stop_job((b or {}).get("id"))),

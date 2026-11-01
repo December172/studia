@@ -3,9 +3,11 @@ import base64
 import random
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
 from base.auth import AuthenticationExpired, PlatformUnavailable
+from base.concurrency import INTERACTIVE_WORKERS
 from MoocMain.log import Logger
 from reporting import Reporter
 from ZHSMain.api import (
@@ -45,7 +47,10 @@ def ai_groups(client, row):
     course_id, class_id = row["zhs"]["courseId"], row["zhs"]["classId"]
     basic = client.ai_course_basic(course_id, class_id) or {}
     points = [point for theme in basic.get("cakeThemeList") or [] for point in theme.get("knowledgeList") or []]
-    return [(point, client.ai_resources(course_id, class_id, point["knowledgeId"]) or []) for point in points]
+    # Each knowledge point is its own slow read; ask for all of them at once.
+    with ThreadPoolExecutor(INTERACTIVE_WORKERS) as pool:
+        resources = list(pool.map(lambda point: client.ai_resources(course_id, class_id, point["knowledgeId"]) or [], points))
+    return list(zip(points, resources))
 
 
 def shared_context(client, row, log):

@@ -2,11 +2,12 @@ import json
 import random
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any
 
 from base.api_client import RequestRateLimited
 from base.auth import AuthenticationExpired
-from base.concurrency import validate_workers
+from base.concurrency import INTERACTIVE_WORKERS, validate_workers
 from base.study import run_resources, check_study_response
 from reporting import Reporter
 from MoocMain.log import Logger
@@ -19,23 +20,26 @@ SKIPPED_TYPES = ("作业", "考试", "测验", "子节点", "文件夹")
 
 
 def course_units(client, course):
-    """Chapters with their leaf resources and how far each one is, without studying."""
+    """Chapters with their leaf resources and how far each one is, without studying.
+
+    The platform takes seconds per list, so the chapter list, the completion record and
+    every chapter's cells are requested at the same time (reads only)."""
     info_id, course_id = course.get("id"), course.get("courseId")
-    done = set(client.study_record_list(info_id, course_id) or ())
+    with ThreadPoolExecutor(INTERACTIVE_WORKERS) as pool:
+        records = pool.submit(client.study_record_list, info_id, course_id)
+        design = client.study_design_list(info_id, course_id) or []
+        cells = list(pool.map(lambda chapter: client.get_cell_list(info_id, course_id, chapter.get("id")) or [], design))
+        done = set(records.result() or ())
 
     def leaves(nodes):
         for node in nodes:
             yield from leaves(node["children"]) if node.get("children") else (node,)
 
-    chapters = []
-    for chapter in client.study_design_list(info_id, course_id) or []:
-        cells = client.get_cell_list(info_id, course_id, chapter.get("id")) or []
-        chapters.append({"name": chapter.get("name") or "未命名章节", "units": [{
-            "id": str(node.get("id")), "name": node.get("name") or "资源", "kind": node.get("fileType") or "",
-            "state": "done" if node.get("id") in done else
-                     "skipped" if node.get("fileType") in SKIPPED_TYPES else "queued",
-        } for node in leaves(cells)]})
-    return chapters
+    return [{"name": chapter.get("name") or "未命名章节", "units": [{
+        "id": str(node.get("id")), "name": node.get("name") or "资源", "kind": node.get("fileType") or "",
+        "state": "done" if node.get("id") in done else
+                 "skipped" if node.get("fileType") in SKIPPED_TYPES else "queued",
+    } for node in leaves(chapter_cells)]} for chapter, chapter_cells in zip(design, cells)]
 
 
 class AIMoocHandler:

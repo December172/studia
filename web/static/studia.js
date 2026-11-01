@@ -288,7 +288,7 @@ async function loadUnits(pid, cid, force = false) {
   const k = key(pid, cid);
   if (loadingUnits.has(k) || (state.units[k] && !force)) return;
   loadingUnits.add(k);
-  try { state.units[k] = { chapters: (await api(`/api/platforms/${pid}/units?course=${encodeURIComponent(cid)}`)).chapters }; }
+  try { state.units[k] = { chapters: (await api(`/api/platforms/${pid}/units?course=${encodeURIComponent(cid)}${force ? "&fresh=1" : ""}`)).chapters }; }
   catch (error) { if (!state.units[k]?.chapters) state.units[k] = { error: error.message }; }
   finally { loadingUnits.delete(k); }
   repaint();
@@ -319,6 +319,8 @@ const VIEWS = {
   async admin(refresh = false) {
     clearTimeout(adminTimer);
     const head = `<h1 class="title">管理</h1><p class="sub">全站任务、每人任务上限、账号和邀请码、日志导出。</p>`;
+    // Show the page at once; the five lists fill it in when they arrive.
+    if (!refresh && !$("[data-save-limit]", page)) setPage(`${head}<div class="empty">正在读取…</div>`);
     let users, invites, memory, jobs, settings;
     try {
       [users, invites, memory, jobs, settings] = await Promise.all(["users", "invites", "memory", "jobs", "settings"].map((x) => api(`/api/admin/${x}`)));
@@ -332,7 +334,7 @@ const VIEWS = {
     const local = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const kept = (name, fallback) => $(`[name="${name}"]`, page)?.value || fallback;
-    quiet = refresh;
+    quiet = true;
     setPage(`${head}
       <div class="section"><h3>全站任务</h3><span class="aside">${running} 个运行中 · ${jobs.length - running} 个排队 · 每 5 秒刷新</span></div>
       <div class="runs">${jobs.map((j) => `<div class="run">${j.state === "queued" ? ICON.waiting : ICON.running}
@@ -1026,7 +1028,26 @@ async function loadCourses(pid) {
   catch (error) { toast(error.message); state.courses[pid] = state.courses[pid] || []; }
   repaint();
   const p = platformOf(pid);
-  if (p?.features.answer) for (const c of state.courses[pid] || []) if (!state.papers[key(pid, c.id)]) loadPapers(p, c);
+  // Warm every course's papers and units so a later click finds them ready.
+  for (const c of state.courses[pid] || []) {
+    if (p?.features.answer) inBackground(() => (state.papers[key(pid, c.id)] ? null : loadPapers(p, c)));
+    inBackground(() => loadUnits(pid, c.id));
+  }
+}
+
+// The platform answers these reads in seconds to tens of seconds. Run at most two at a time,
+// so a click never waits behind them for one of the browser's few connections to this server.
+const background = { running: 0, waiting: [] };
+function inBackground(task) {
+  background.waiting.push(task);
+  pumpBackground();
+}
+function pumpBackground() {
+  while (background.running < 2 && background.waiting.length) {
+    const task = background.waiting.shift();
+    background.running += 1;
+    Promise.resolve().then(task).catch(() => {}).finally(() => { background.running -= 1; pumpBackground(); });
+  }
 }
 
 async function refreshState() {
