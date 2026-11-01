@@ -35,7 +35,14 @@ uv 会自动准备 Python 3.12 和依赖，不需要手动建虚拟环境。启�
 
 **网页版**：执行 `uv run StartWork.py --web`，会在浏览器打开图形界面，支持 MOOC 和智慧树：课程页按章节显示每个学习单元的进度，运行时底部有进度条，可展开看日志。详见[使用指南](docs/USAGE.md#网页版)。
 
-**服务器模式**：`uv run StartWork.py --serve` 给多人共用，有账号、邀请码和管理页，每人的数据分开加密存放。HTTPS 部署还在准备中，见[使用指南](docs/USAGE.md#服务器模式开发中)。
+**服务器部署（Docker）**：给多人共用，有账号、邀请码和管理页，每人的数据分开加密存放。
+
+```bash
+STUDIA_PUBLIC_URL=http://服务器IP:8080 docker compose up -d --build
+docker compose logs studia   # 日志里有首次设置用的「设置码」
+```
+
+打开地址，第一次进入会让你填设置码并创建管理员账号。详见[使用指南](docs/USAGE.md#docker-部署)。
 
 **以后启动**：在项目目录执行 `uv run StartWork.py`。执行过 `uv sync` 后，macOS / Linux 也可以直接用 `.venv/bin/python StartWork.py`。
 
@@ -47,7 +54,7 @@ uv sync --locked
 uv run StartWork.py
 ```
 
-源码运行时显示 `pyproject.toml` 里的版本号，不会自动下载更新。
+项目不再发布打包好的版本，都从源码运行；版本号见 `pyproject.toml`。
 
 ## 操作
 
@@ -83,7 +90,7 @@ AI 答不出的题会在终端列出题目和选项，等你手动补答。补�
 | 课程结构导出 | `exports/structure/` |
 | 本机配置（登录令牌、API Key、并发等） | `~/.config/icve-ai-assistant/settings.json`（macOS / Linux） |
 | 智慧树答案记忆 | 与本机配置同目录的 `zhs-answers.json` |
-| 服务器模式的用户数据 | `数据目录/users/<用户 ID>/`（登录信息和 Key 加密存放） |
+| 服务器模式 | 数据目录（Docker 是 `studia-data` 卷）：`studia.db` 账号数据库、`users/<用户 ID>/` 各人数据（登录信息和 Key 加密存放） |
 
 以上文件和日志都已被 Git 忽略。本机模式的配置文件是**未加密**的 JSON（macOS / Linux 权限为 `600`），里面有登录令牌和 Key，不要分享。
 

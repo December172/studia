@@ -8,9 +8,10 @@ import json
 import os
 import re
 import secrets
-import tempfile
+import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 ITERATIONS = 600_000  # PBKDF2-SHA256, OWASP 2023; scrypt is missing from LibreSSL builds
@@ -52,149 +53,178 @@ def _validate(username, password):
 
 
 class Accounts:
-    """Users and invites persisted in one JSON file (mode 600, atomic replace)."""
+    """Users, invites and sessions in one SQLite file (mode 600) inside the data directory."""
+
+    SCHEMA = """
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password TEXT NOT NULL,
+            role TEXT NOT NULL, disabled INTEGER NOT NULL DEFAULT 0, created REAL, last_login REAL);
+        CREATE TABLE IF NOT EXISTS invites (
+            code TEXT PRIMARY KEY, created REAL, created_by TEXT, expires REAL, used_by TEXT);
+        CREATE TABLE IF NOT EXISTS sessions (
+            key TEXT PRIMARY KEY, uid TEXT NOT NULL, csrf TEXT NOT NULL, expires REAL NOT NULL);
+    """
 
     def __init__(self, directory):
         self.directory = Path(directory)
-        self.path = self.directory / "accounts.json"
-        self.lock = threading.RLock()
-
-    # ------------------------------------------------------------ storage
-
-    def _read(self):
-        if not self.path.exists():
-            return {"users": {}, "invites": {}}
-        data = json.loads(self.path.read_text(encoding="utf-8"))
-        data.setdefault("users", {})
-        data.setdefault("invites", {})
-        return data
-
-    def _write(self, data):
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(prefix=".accounts-", dir=self.directory)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                os.chmod(temporary, 0o600)
-                json.dump(data, stream, ensure_ascii=False, indent=2)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        self.path = self.directory / "studia.db"
+        # Create the file 600 first: SQLite gives its journal the same mode as the database.
+        os.close(os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600))
+        # ponytail: one connection behind one lock; fine for a handful of users, use a pool if it ever isn't.
+        self.db = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None)
+        self.db.row_factory = sqlite3.Row
+        self.lock = threading.RLock()
+        with self.lock:
+            self.db.executescript(self.SCHEMA)
+        self._import_json()
+
+    def _import_json(self):
+        """One-time move from the accounts.json used before the database."""
+        legacy = self.directory / "accounts.json"
+        if not legacy.exists():
+            return
+        data = json.loads(legacy.read_text(encoding="utf-8"))
+        with self.transaction():
+            for uid, u in (data.get("users") or {}).items():
+                self.db.execute("INSERT OR IGNORE INTO users VALUES (?,?,?,?,?,?,?)",
+                                (uid, u["username"], u["password"], u["role"], int(bool(u.get("disabled"))),
+                                 u.get("created"), u.get("last_login")))
+            for code, i in (data.get("invites") or {}).items():
+                self.db.execute("INSERT OR IGNORE INTO invites VALUES (?,?,?,?,?)",
+                                (code, i.get("created"), i.get("created_by"), i.get("expires"), i.get("used_by")))
+        legacy.replace(legacy.with_name("accounts.json.migrated"))
+
+    @contextmanager
+    def transaction(self):
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+            self.db.execute("COMMIT")
+
+    def _one(self, sql, *args):
+        with self.lock:
+            return self.db.execute(sql, args).fetchone()
 
     @staticmethod
-    def public(uid, user):
-        return {"id": uid, "username": user["username"], "role": user["role"], "disabled": user.get("disabled", False),
-                "created": user.get("created"), "last_login": user.get("last_login")}
+    def public(row):
+        return {"id": row["id"], "username": row["username"], "role": row["role"], "disabled": bool(row["disabled"]),
+                "created": row["created"], "last_login": row["last_login"]}
 
     # ------------------------------------------------------------ users
 
     def create_user(self, username, password, role="user"):
         _validate(username, password)
-        with self.lock:
-            data = self._read()
-            if any(u["username"].lower() == username.lower() for u in data["users"].values()):
-                raise AccountError("用户名已被使用")
-            uid = secrets.token_hex(8)
-            data["users"][uid] = {"username": username, "password": hash_password(password), "role": role,
-                                  "disabled": False, "created": time.time(), "last_login": None}
-            self._write(data)
-            return uid
+        uid = secrets.token_hex(8)
+        try:
+            with self.transaction():
+                self.db.execute("INSERT INTO users VALUES (?,?,?,?,0,?,NULL)",
+                                (uid, username, hash_password(password), role, time.time()))
+        except sqlite3.IntegrityError:
+            raise AccountError("用户名已被使用")
+        return uid
+
+    def setup_admin(self, username, password):
+        """Create the first administrator; refused once any administrator exists."""
+        _validate(username, password)
+        uid = secrets.token_hex(8)
+        with self.transaction():
+            if self.db.execute("SELECT 1 FROM users WHERE role = 'admin'").fetchone():
+                raise AccountError("管理员已经设置过了，请直接登录")
+            self.db.execute("INSERT INTO users VALUES (?,?,?,'admin',0,?,NULL)",
+                            (uid, username, hash_password(password), time.time()))
+        return uid
 
     def user(self, uid):
-        user = self._read()["users"].get(uid)
-        return self.public(uid, user) if user else None
+        row = self._one("SELECT * FROM users WHERE id = ?", uid)
+        return self.public(row) if row else None
 
     def users(self):
-        return [self.public(uid, user) for uid, user in self._read()["users"].items()]
+        with self.lock:
+            return [self.public(row) for row in self.db.execute("SELECT * FROM users ORDER BY created")]
 
     def has_admin(self):
-        return any(u["role"] == "admin" for u in self._read()["users"].values())
+        return self._one("SELECT 1 FROM users WHERE role = 'admin'") is not None
 
     def authenticate(self, username, password):
-        with self.lock:
-            data = self._read()
-            uid, user = next(((k, v) for k, v in data["users"].items()
-                              if v["username"].lower() == (username or "").lower()), (None, None))
-            if not check_password(password or "", user["password"] if user else _DUMMY) or user is None:
-                return None
-            if user.get("disabled"):
-                raise AccountError("这个账号已被停用，请联系管理员")
-            user["last_login"] = time.time()
-            self._write(data)
-            return self.public(uid, user)
+        row = self._one("SELECT * FROM users WHERE username = ?", username or "")
+        if not check_password(password or "", row["password"] if row else _DUMMY) or row is None:
+            return None
+        if row["disabled"]:
+            raise AccountError("这个账号已被停用，请联系管理员")
+        with self.transaction():
+            self.db.execute("UPDATE users SET last_login = ? WHERE id = ?", (time.time(), row["id"]))
+        return self.user(row["id"])
 
     def set_password(self, uid, password, old_password=None):
         if len(password or "") < MIN_PASSWORD:
             raise AccountError("密码至少 %d 位" % MIN_PASSWORD)
-        with self.lock:
-            data = self._read()
-            user = data["users"].get(uid)
-            if user is None:
-                raise AccountError("用户不存在")
-            if old_password is not None and not check_password(old_password, user["password"]):
-                raise AccountError("原密码不正确")
-            user["password"] = hash_password(password)
-            self._write(data)
+        row = self._one("SELECT password FROM users WHERE id = ?", uid)
+        if row is None:
+            raise AccountError("用户不存在")
+        if old_password is not None and not check_password(old_password, row["password"]):
+            raise AccountError("原密码不正确")
+        with self.transaction():
+            self.db.execute("UPDATE users SET password = ? WHERE id = ?", (hash_password(password), uid))
 
     def set_disabled(self, uid, disabled):
-        with self.lock:
-            data = self._read()
-            user = data["users"].get(uid)
-            if user is None:
+        with self.transaction():
+            row = self.db.execute("SELECT role FROM users WHERE id = ?", (uid,)).fetchone()
+            if row is None:
                 raise AccountError("用户不存在")
-            if disabled and user["role"] == "admin" and sum(
-                    1 for u in data["users"].values() if u["role"] == "admin" and not u.get("disabled")) <= 1:
+            admins = self.db.execute("SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0").fetchone()[0]
+            if disabled and row["role"] == "admin" and admins <= 1:
                 raise AccountError("不能停用最后一个管理员")
-            user["disabled"] = bool(disabled)
-            self._write(data)
+            self.db.execute("UPDATE users SET disabled = ? WHERE id = ?", (int(bool(disabled)), uid))
 
     # ------------------------------------------------------------ invites
 
     def create_invite(self, created_by, ttl=INVITE_TTL):
-        with self.lock:
-            data = self._read()
-            code = "-".join(secrets.token_hex(2).upper() for _ in range(3))
-            data["invites"][code] = {"created": time.time(), "created_by": created_by,
-                                     "expires": time.time() + ttl, "used_by": None}
-            self._write(data)
-            return code
+        code = "-".join(secrets.token_hex(2).upper() for _ in range(3))
+        with self.transaction():
+            self.db.execute("INSERT INTO invites VALUES (?,?,?,?,NULL)", (code, time.time(), created_by, time.time() + ttl))
+        return code
 
     def invites(self):
         now = time.time()
-        return [{"code": code, "created": i["created"], "expires": i["expires"], "used_by": i["used_by"],
-                 "state": "used" if i["used_by"] else "expired" if i["expires"] < now else "open"}
-                for code, i in sorted(self._read()["invites"].items(), key=lambda kv: -kv[1]["created"])]
+        with self.lock:
+            rows = self.db.execute("SELECT * FROM invites ORDER BY created DESC").fetchall()
+        return [{"code": r["code"], "created": r["created"], "expires": r["expires"], "used_by": r["used_by"],
+                 "state": "used" if r["used_by"] else "expired" if r["expires"] < now else "open"} for r in rows]
 
     def revoke_invite(self, code):
-        with self.lock:
-            data = self._read()
-            if data["invites"].pop(code, None) is None:
+        with self.transaction():
+            if self.db.execute("DELETE FROM invites WHERE code = ?", (code,)).rowcount == 0:
                 raise AccountError("邀请码不存在")
-            self._write(data)
 
     def register(self, code, username, password):
         _validate(username, password)
-        with self.lock:
-            data = self._read()
-            invite = data["invites"].get((code or "").strip().upper())
+        code = (code or "").strip().upper()
+        uid = secrets.token_hex(8)
+        with self.transaction():
+            invite = self.db.execute("SELECT * FROM invites WHERE code = ?", (code,)).fetchone()
             if invite is None or invite["used_by"] or invite["expires"] < time.time():
                 raise AccountError("邀请码无效或已过期")
-            uid = self.create_user(username, password)
-            data = self._read()
-            data["invites"][code.strip().upper()]["used_by"] = uid
-            self._write(data)
-            return uid
+            try:
+                self.db.execute("INSERT INTO users VALUES (?,?,?,'user',0,?,NULL)",
+                                (uid, username, hash_password(password), time.time()))
+            except sqlite3.IntegrityError:
+                raise AccountError("用户名已被使用")
+            self.db.execute("UPDATE invites SET used_by = ? WHERE code = ?", (uid, code))
+        return uid
 
 
 class Sessions:
-    """In-memory sessions keyed by the SHA-256 of the cookie value; a restart signs everyone out."""
+    """Sessions stored in the accounts database, keyed by the SHA-256 of the cookie value,
+    so a restart (or a container update) does not sign everyone out."""
 
-    def __init__(self, ttl=SESSION_TTL):
+    def __init__(self, accounts, ttl=SESSION_TTL):
+        self.accounts = accounts
         self.ttl = ttl
-        self.items = {}
-        self.lock = threading.Lock()
 
     @staticmethod
     def _key(token):
@@ -202,28 +232,27 @@ class Sessions:
 
     def create(self, uid):
         token = secrets.token_urlsafe(32)
-        with self.lock:
-            self.items[self._key(token)] = {"uid": uid, "csrf": secrets.token_urlsafe(24), "expires": time.time() + self.ttl}
+        with self.accounts.transaction():
+            self.accounts.db.execute("DELETE FROM sessions WHERE expires < ?", (time.time(),))
+            self.accounts.db.execute("INSERT INTO sessions VALUES (?,?,?,?)",
+                                     (self._key(token), uid, secrets.token_urlsafe(24), time.time() + self.ttl))
         return token
 
     def get(self, token):
         if not token:
             return None
-        with self.lock:
-            session = self.items.get(self._key(token))
-            if session and session["expires"] < time.time():
-                del self.items[self._key(token)]
-                return None
-            return session
+        row = self.accounts._one("SELECT uid, csrf, expires FROM sessions WHERE key = ?", self._key(token))
+        if row is None or row["expires"] < time.time():
+            return None
+        return {"uid": row["uid"], "csrf": row["csrf"], "expires": row["expires"]}
 
     def drop(self, token):
-        with self.lock:
-            self.items.pop(self._key(token or ""), None)
+        with self.accounts.transaction():
+            self.accounts.db.execute("DELETE FROM sessions WHERE key = ?", (self._key(token or ""),))
 
     def drop_user(self, uid):
-        with self.lock:
-            for key in [k for k, s in self.items.items() if s["uid"] == uid]:
-                del self.items[key]
+        with self.accounts.transaction():
+            self.accounts.db.execute("DELETE FROM sessions WHERE uid = ?", (uid,))
 
 
 class Throttle:

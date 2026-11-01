@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+venv
+__pycache__
+*.pyc
+*.log
+tiku/
+ai_results/
+exports/
+design-research/
+tests/
+docs/
+.claude/
+CLAUDE.local.md
+.env

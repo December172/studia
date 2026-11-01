@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import secrets
+import signal
 import threading
 import time
 from http.cookies import SimpleCookie
@@ -110,7 +111,11 @@ class Hub:
         (self.data / "users").mkdir(mode=0o700, parents=True, exist_ok=True)
         self.data.chmod(0o700)  # mkdir(parents=True) leaves the root at the umask default
         self.accounts = Accounts(self.data)
-        self.sessions = Sessions()
+        self.sessions = Sessions(self.accounts)
+        # Until an administrator exists, whoever reaches the site first could claim it; the
+        # first-run page therefore also asks for this code, printed only in the server log.
+        self.setup_code = None if self.accounts.has_admin() else "-".join(
+            secrets.token_hex(2).upper() for _ in range(3))
         self.throttle = Throttle()
         self.public_url = public_url.rstrip("/")
         self.trust_proxy = trust_proxy
@@ -242,7 +247,26 @@ class HostedAccess:
     def public(self, request, method, path, query, body):
         hub = self.hub
         if method == "GET" and path == "/api/mode":
-            return {"mode": self.mode}
+            return {"mode": self.mode, "setup": not hub.accounts.has_admin()}
+        if method == "POST" and path == "/api/auth/setup":
+            ip = self._ip(request)
+            key = "ip:" + ip
+            if hub.accounts.has_admin():
+                raise HttpError(409, "管理员已经设置过了，请直接登录")
+            if hub.throttle.blocked(key):
+                raise HttpError(429, "尝试次数太多，请稍后再试")
+            code = str(body.get("code", "")).strip().upper()
+            if not hub.setup_code or not hmac.compare_digest(code.encode(), hub.setup_code.encode()):
+                hub.throttle.fail(key)
+                hub.audit("setup", ip=ip, ok=False)
+                raise HttpError(403, "设置码不正确，请在服务器日志里查看")
+            try:
+                uid = hub.accounts.setup_admin(str(body.get("username", "")).strip(), str(body.get("password", "")))
+            except AccountError as exc:
+                raise HttpError(400, str(exc))
+            hub.setup_code = None
+            hub.audit("setup", actor=hub.accounts.user(uid)["username"], ip=ip)
+            return self._signed_in(uid)
         if method == "POST" and path == "/api/auth/login":
             username = str(body.get("username", "")).strip()
             keys = ("ip:" + self._ip(request), "user:" + username.lower())
@@ -382,14 +406,38 @@ def serve_hosted(hub, host, port):
         server.server_close()
 
 
+def _interrupt(*_):
+    raise KeyboardInterrupt
+
+
+def _key_file(path):
+    """The key text from a file, generated on first start so a fresh deployment needs no setup."""
+    if not path.exists():
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            stream.write(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=") + "\n")
+        print("已生成主密钥：%s 。请把它另外备份一份；丢了它，用户保存的平台登录和 API Key 就解不开了。" % path)
+    return path.read_text().strip()
+
+
 def main(argv):
-    parser = argparse.ArgumentParser(prog="StartWork.py --serve", description="Studia 服务器模式（多用户）")
-    parser.add_argument("--host", default="127.0.0.1", help="监听地址，放在反向代理后面时保持 127.0.0.1")
-    parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--data", default="~/.studia-hosted", help="数据目录，每个用户一个子目录")
-    parser.add_argument("--public-url", help="浏览器访问用的地址，例如 https://studia.example.com")
-    parser.add_argument("--max-jobs", type=int, default=4, help="全站同时运行的任务数")
-    parser.add_argument("--trust-proxy", action="store_true", help="信任反向代理传来的 X-Forwarded-For")
+    env = os.environ.get
+    parser = argparse.ArgumentParser(prog="StartWork.py --serve", description="Studia 服务器模式（多用户）。"
+                                     "每个选项也可以用括号里的环境变量设置，Docker 部署时就是这样用的。")
+    parser.add_argument("--host", default=env("STUDIA_HOST", "127.0.0.1"),
+                        help="监听地址，放在反向代理后面时保持 127.0.0.1（STUDIA_HOST）")
+    parser.add_argument("--port", type=int, default=int(env("STUDIA_PORT", "8080")), help="（STUDIA_PORT）")
+    parser.add_argument("--data", default=env("STUDIA_DATA", "~/.studia-hosted"),
+                        help="数据目录：数据库和每个用户的子目录（STUDIA_DATA）")
+    parser.add_argument("--public-url", default=env("STUDIA_PUBLIC_URL"),
+                        help="浏览器访问用的地址，例如 https://studia.example.com（STUDIA_PUBLIC_URL）")
+    parser.add_argument("--max-jobs", type=int, default=int(env("STUDIA_MAX_JOBS", "4")),
+                        help="全站同时运行的任务数（STUDIA_MAX_JOBS）")
+    parser.add_argument("--trust-proxy", action="store_true", default=env("STUDIA_TRUST_PROXY", "") in ("1", "true", "yes"),
+                        help="信任反向代理传来的 X-Forwarded-For（STUDIA_TRUST_PROXY=1）")
+    parser.add_argument("--key-file", default=env("STUDIA_KEY_FILE"),
+                        help="没有设置 %s 时，从这个文件读主密钥，文件不存在就生成；默认是数据目录下的 secret.key（STUDIA_KEY_FILE）" % KEY_ENV)
     parser.add_argument("--create-admin", metavar="USERNAME", help="创建管理员账号后退出")
     parser.add_argument("--gen-key", action="store_true", help="生成加密用户数据的主密钥后退出")
     args = parser.parse_args(argv)
@@ -398,7 +446,7 @@ def main(argv):
         print("把它设成环境变量 %s 后再启动；丢失这个密钥，用户保存的平台登录和 API Key 将无法解密。" % KEY_ENV)
         return 0
     try:
-        key = load_key(os.environ.get(KEY_ENV))
+        key = load_key(os.environ.get(KEY_ENV) or _key_file(Path(args.key_file or Path(args.data).expanduser() / "secret.key")))
     except ValueError as exc:
         if not args.create_admin:
             print("缺少或无效的加密密钥：%s" % exc)
@@ -418,8 +466,13 @@ def main(argv):
             return 1
         print("管理员 %s 已创建。" % args.create_admin)
         return 0
-    if not hub.accounts.has_admin():
-        print("还没有管理员账号，请先运行：python StartWork.py --serve --create-admin 你的用户名")
-        return 1
+    if hub.setup_code:
+        print("=" * 48)
+        print("还没有管理员。打开 %s ，用下面的设置码创建管理员账号：" % hub.public_url)
+        print("    设置码：%s" % hub.setup_code)
+        print("（每次启动都会换一个，创建完管理员后失效）")
+        print("=" * 48, flush=True)
+    # `docker stop` sends SIGTERM: shut down like Ctrl+C so running jobs get their stop signal.
+    signal.signal(signal.SIGTERM, _interrupt)
     serve_hosted(hub, args.host, args.port)
     return 0

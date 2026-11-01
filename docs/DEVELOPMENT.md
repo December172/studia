@@ -26,7 +26,7 @@
 | `ZHSMain/` | 智慧树：扫码登录、接口加密、共享课/智慧课程学习、AI 答题与答案记忆（`shared_answers.json` 是随仓库分发的共享答案） |
 | `web/server.py` | 网页版后端：本机模式的 HTTP 接口、任务队列、SSE 事件推送 |
 | `web/hosting.py` | 服务器模式：多用户会话、CSRF、加密配置存储、审计日志、管理接口 |
-| `web/accounts.py` | 服务器模式的账号、邀请码、会话令牌与登录限流 |
+| `web/accounts.py` | 服务器模式的账号、邀请码、登录会话（SQLite：`数据目录/studia.db`）与登录限流 |
 | `web/static/` | 网页前端（无构建步骤的原生 JS/CSS）；`mock.js` 只在 `?mock` 离线预览时加载，服务端不对外提供 |
 | `base/` | 共用 API 客户端与工具 |
 | `NewMoocMain/` | 浏览器 OAuth 登录与试卷 HTML 解析 |
@@ -36,14 +36,13 @@
 | `tools/ui_demo.py` | 离线界面预览：编号输入静态样例、HTML 快照，或转交原生预览 |
 | `tools/native_demo.py` | 真实终端中的原生键盘控件预览，只用合成数据，不访问平台 / AI / 配置 |
 | `tests/` | 离线自动化测试 |
-| `assets/` | 应用图标 |
 | `docs/` | 当前使用指南、开发说明与接口说明 |
-| `.github/` | 测试、打包、发布工作流与脚本 |
-| `StartWorkLite.spec` | Windows PyInstaller 打包配置，从仓库根目录调用 |
+| `.github/` | CI：Python 3.9 / 3.12 单元测试，以及 Docker 镜像构建和首次设置的冒烟测试 |
+| `Dockerfile`、`docker-compose.yml` | 服务器模式的容器部署；数据卷挂在 `/data` |
 
 `MoocMain/`、`NewMoocMain/` 只剩当前入口在用的模块，不能仅凭名称删除。运行命令均从仓库根目录执行。
 
-版本变更需同步 `pyproject.toml` 与 `uv.lock` 中项目自身的版本（当前 4.4.0）。`StartWork.py` 源码模式从前者读取版本，不检查打包发布更新；发布构建显示 CI 注入的标签。修改源码本身不会自动增加版本号，源码用户按 README 的 Git 更新步骤更新。
+项目不再打包发布可执行文件，也没有自动更新。版本变更需同步 `pyproject.toml` 与 `uv.lock` 中项目自身的版本（当前 4.4.0），`StartWork.py` 从前者读取并显示。
 
 ## 辅助工具
 

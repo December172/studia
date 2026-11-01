@@ -17,23 +17,53 @@
 
 网页服务只监听本机 `127.0.0.1`，每次启动生成新的访问令牌，只有终端里给出的地址能打开。网页版不支持终端版的手动补答：AI 答不出的题会让该试卷停在未提交，可以改用终端版补答。
 
-### 服务器模式（开发中）
+### 服务器模式
 
-多人共用一台服务器时使用。账号、数据隔离和加密存储已经完成，HTTPS 部署还在准备中，目前适合在本机或内网试用。
+多人共用一台服务器时使用：账号、邀请码、管理页，每个人的数据分开存放，平台登录和 API Key 加密保存。推荐用 Docker 部署。
+
+#### Docker 部署
 
 ```bash
-python StartWork.py --serve --gen-key                   # 生成主密钥，自己保存好
-export STUDIA_SECRET_KEY=上一步输出的那串字符
-python StartWork.py --serve --create-admin 你的用户名   # 第一次：创建管理员（会提示输入密码）
-python StartWork.py --serve --data ~/.studia-hosted --port 8080
+git clone https://github.com/yijunjie07/studia.git && cd studia
+STUDIA_PUBLIC_URL=http://服务器IP:8080 docker compose up -d --build
+docker compose logs studia        # 找到「设置码」
 ```
 
-- 打开 `http://127.0.0.1:8080`，用管理员登录。在「管理」页生成邀请码发给别人，对方在登录页选「用邀请码注册」。
-- 每个用户的平台登录、AI 模型、答案记忆和答题报告都放在 `数据目录/users/<用户 ID>/`，互相看不到。其中保存平台登录和 API Key 的配置用主密钥加密（AES-256-GCM）。**密钥丢了这些配置就解不开**，用户需要重新登录平台、重新填 API Key；密钥不要和数据目录放在一起备份。
-- 全站同时运行的任务数由 `--max-jobs` 控制（默认 4），超出的会显示「排队中」；每个用户自己最多同时开 4 个任务。
-- MOOC 登录会在新标签页打开职教云，完成后跳回服务器，要用 `--public-url` 指定浏览器访问的地址。
+1. 浏览器打开 `STUDIA_PUBLIC_URL` 的地址，第一次进入是「创建管理员」页面：填日志里的设置码、管理员用户名和密码（至少 8 位）。设置码每次启动都会换，管理员创建后失效，用来防止别人抢先占用刚部署好的站点。
+2. 之后用管理员登录，在「管理」页生成邀请码发给别人，对方在登录页点「用邀请码注册」。
+3. **`STUDIA_PUBLIC_URL` 必须和浏览器地址栏完全一致**（协议、域名或 IP、端口）。不一致时网页会拒绝访问，MOOC 登录跳回来也会失败。可以写在同目录的 `.env` 文件里，不用每次带在命令前面。
+
+可用的环境变量（都写在 `docker-compose.yml` 里，也可以放 `.env`）：
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `STUDIA_PUBLIC_URL` | `http://localhost:8080` | 浏览器访问的地址 |
+| `STUDIA_MAX_JOBS` | `4` | 全站同时运行的任务数，超出的显示「排队中」 |
+| `STUDIA_TRUST_PROXY` | `0` | 放在 Nginx / Caddy 等反向代理后面时设为 `1`，按代理传来的真实 IP 限制登录尝试 |
+| `STUDIA_SECRET_KEY` | 空 | 主密钥。不设置时首次启动在数据卷里生成 `secret.key` |
+
+数据都在 Docker 卷 `studia-data`（容器内 `/data`）里：`studia.db` 是账号、邀请码和登录会话的 SQLite 数据库，`users/<用户 ID>/` 是每个人的平台登录、AI 模型、答案记忆和答题报告，`audit.log` 是登录和管理操作记录（不含密码和令牌），`secret.key` 是自动生成的主密钥。
+
+- **主密钥丢了，加密的配置就解不开**，用户需要重新登录平台、重新填 API Key。把 `secret.key` 另外备份一份；更稳妥的做法是用 `python StartWork.py --serve --gen-key` 生成密钥，写进 `.env` 的 `STUDIA_SECRET_KEY`，这样密钥不和数据放在一起。
+- 更新：`git pull && docker compose up -d --build`，数据卷保留，登录会话也保留。
+- 备份：`docker compose stop`，再备份 `studia-data` 卷。
+- 智慧树的接口不接受境外网络访问，服务器要放在国内，或者让 `zhihuishu.com` 走国内线路。
+- 对公网开放时请在前面加 HTTPS 反向代理（Caddy、Nginx 等），把 `STUDIA_PUBLIC_URL` 改成 `https://你的域名`，并设置 `STUDIA_TRUST_PROXY=1`。
+
+#### 不用 Docker
+
+```bash
+python StartWork.py --serve --data ~/.studia-hosted --port 8080 --public-url http://127.0.0.1:8080
+```
+
+首次启动同样会在终端打印设置码，主密钥默认生成在数据目录的 `secret.key`。所有选项见 `python StartWork.py --serve --help`，每个选项都有对应的 `STUDIA_*` 环境变量。也可以不经网页，直接用 `--create-admin 用户名` 在终端创建管理员。
+
+#### 其他
+
+- 每个用户自己最多同时开 4 个任务。
+- MOOC 登录会在新标签页打开职教云，完成后跳回 `STUDIA_PUBLIC_URL`。
 - 管理员可以停用账号（对方立即被登出）、重置密码、停止任意任务。登录连续失败 5 次会锁定 15 分钟。
-- 登录、注册、修改密码和管理员的操作都记在 `数据目录/audit.log`，不含密码和令牌。
+- 旧版本存在 `accounts.json` 里的账号会在首次启动时自动导入数据库，原文件改名为 `accounts.json.migrated`。
 
 ## 支持范围
 

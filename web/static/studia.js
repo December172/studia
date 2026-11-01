@@ -1067,34 +1067,97 @@ function route() {
 }
 window.addEventListener("hashchange", route);
 
-function showAuth(tab = "login") {
+// The sign-in page's left half: a course grid quietly studying itself.
+function authGrid() {
+  const rows = [9, 7, 11, 8, 10, 6];
+  let n = 0;
+  return rows.map((count) => `<span class="cells">${Array.from({ length: count }, () => {
+    n += 1;
+    const state = n % 13 === 0 ? "skipped" : n < 34 ? "done" : "queued";
+    return `<i class="cell ${state}"></i>`;
+  }).join("")}</span>`).join("");
+}
+let authTimer = 0;
+function animateAuthGrid(box) {
+  clearInterval(authTimer);
+  authTimer = setInterval(() => {
+    if (!box.isConnected) { clearInterval(authTimer); return; }
+    const running = $(".auth_grid .cell.running", box);
+    if (running) running.className = "cell done";
+    const next = $(".auth_grid .cell.queued", box);
+    if (next) next.className = "cell running";
+    else box.querySelectorAll(".auth_grid .cell.done").forEach((c, i) => { if (i > 20) c.className = "cell queued"; });
+  }, 900);
+}
+
+const AUTH = {
+  login: { title: "登录", lead: "欢迎回来。", button: "登录", switch: ["还没有账号？", "用邀请码注册", "register"] },
+  register: { title: "注册", lead: "邀请码向管理员要，每个只能用一次。", button: "注册并登录", switch: ["已经有账号？", "去登录", "login"] },
+  setup: { title: "创建管理员", lead: "这是新部署的 Studia。设置码在服务器日志里，Docker 部署可以运行 docker compose logs studia 查看。", button: "创建并进入" },
+};
+function showAuth(mode = "login") {
   document.body.classList.add("signed-out");
   let box = $(".auth");
   if (!box) { box = document.createElement("div"); box.className = "auth"; document.body.appendChild(box); }
-  box.innerHTML = `<form class="auth_card" data-auth>
+  const text = AUTH[mode];
+  const field = (name, label, attrs) => `<label class="auth_field"><span>${label}</span>${attrs.includes("password")
+    ? `<span class="pw"><input name="${name}" ${attrs}><button type="button" class="pw_eye" data-reveal aria-label="显示密码">显示</button></span>`
+    : `<input name="${name}" ${attrs}>`}</label>`;
+  box.innerHTML = `
+    <section class="auth_art" aria-hidden="true">
       <div class="brand"><span class="seal">S</span><b>Studia</b></div>
-      <div class="tabs" role="tablist">
-        <button type="button" class="tab" role="tab" aria-selected="${tab === "login"}" data-auth-tab="login">登录</button>
-        <button type="button" class="tab" role="tab" aria-selected="${tab === "register"}" data-auth-tab="register">用邀请码注册</button></div>
-      ${tab === "register" ? `<div class="field"><label>邀请码</label><input name="invite" placeholder="例如 3F2A-91BC-04DE" required autocomplete="off"></div>` : ""}
-      <div class="field"><label>用户名</label><input name="username" required autocomplete="username"></div>
-      <div class="field"><label>密码</label><input name="password" type="password" required minlength="${tab === "register" ? 8 : 1}" autocomplete="${tab === "register" ? "new-password" : "current-password"}"></div>
-      <p class="auth_error" role="alert"></p>
-      <button class="btn primary auth_submit">${tab === "register" ? "注册并登录" : "登录"}</button>
-      <p class="auth_note">${tab === "register" ? "没有邀请码？请向管理员索取。" : "还没有账号？请向管理员要一个邀请码。"}</p></form>`;
-  box.querySelectorAll("[data-auth-tab]").forEach((el) => (el.onclick = () => showAuth(el.dataset.authTab)));
+      <div class="auth_pitch"><h1>课程、视频和作业，<br>摊在一张书桌上。</h1>
+        <p>自动学习还没学完的单元，AI 帮你作答试卷；每一格都看得见进度。</p></div>
+      <div class="auth_grid">${authGrid()}</div>
+      <p class="auth_foot">MOOC · 智慧树</p>
+    </section>
+    <section class="auth_side">
+      <form class="auth_card" data-auth novalidate>
+        <div class="brand auth_mobile_brand"><span class="seal">S</span><b>Studia</b></div>
+        <h2>${text.title}</h2><p class="auth_lead">${esc(text.lead)}</p>
+        ${mode === "setup" ? field("code", "设置码", 'required autocomplete="off" autocapitalize="characters" placeholder="例如 2593-2D9E-D41F"') : ""}
+        ${mode === "register" ? field("invite", "邀请码", 'required autocomplete="off" autocapitalize="characters" placeholder="例如 3F2A-91BC-04DE"') : ""}
+        ${field("username", mode === "setup" ? "管理员用户名" : "用户名", `required autocomplete="username" autocapitalize="off" ${mode === "login" ? "" : 'minlength="2" maxlength="32"'}`)}
+        ${field("password", "密码", `type="password" required autocomplete="${mode === "login" ? "current-password" : "new-password"}" ${mode === "login" ? "" : 'minlength="8" placeholder="至少 8 位"'}`)}
+        ${mode === "setup" ? field("again", "再输一次密码", 'type="password" required autocomplete="new-password" minlength="8"') : ""}
+        <p class="auth_error" role="alert"></p>
+        <button class="btn primary auth_submit">${text.button}</button>
+        ${text.switch ? `<p class="auth_note">${text.switch[0]}<button type="button" class="link" data-auth-mode="${text.switch[2]}">${text.switch[1]}</button></p>` : ""}
+      </form>
+    </section>`;
+  animateAuthGrid(box);
+  box.querySelectorAll("[data-auth-mode]").forEach((el) => (el.onclick = () => showAuth(el.dataset.authMode)));
+  box.querySelectorAll("[data-reveal]").forEach((el) => (el.onclick = () => {
+    const input = el.previousElementSibling, show = input.type === "password";
+    input.type = show ? "text" : "password";
+    el.textContent = show ? "隐藏" : "显示";
+    el.setAttribute("aria-label", show ? "隐藏密码" : "显示密码");
+  }));
   const form = $("[data-auth]", box);
-  form.querySelector("input").focus();
+  const error = $(".auth_error", form);
+  if (!TOUCH) form.querySelector("input").focus();  // on a phone this would pop the keyboard over the page
+  form.oninput = () => { error.textContent = ""; };
   form.onsubmit = async (event) => {
     event.preventDefault();
+    const missing = [...form.querySelectorAll("input")].find((input) => !input.checkValidity());
+    if (missing) {
+      const label = missing.closest("label").firstElementChild.textContent;
+      error.textContent = missing.validity.tooShort ? `${label}至少 ${missing.minLength} 位` : `请填写${label}`;
+      missing.focus();
+      return;
+    }
+    const body = Object.fromEntries(new FormData(form));
+    if (mode === "setup" && body.password !== body.again) { error.textContent = "两次输入的密码不一致"; return; }
     const button = $(".auth_submit", form);
     button.disabled = true;
+    button.textContent = "请稍候…";
     try {
-      await api(tab === "register" ? "/api/auth/register" : "/api/auth/login", { method: "POST", body: Object.fromEntries(new FormData(form)) });
+      await api(`/api/auth/${mode}`, { method: "POST", body });
       location.reload();
-    } catch (error) {
-      $(".auth_error", form).textContent = error.message;
+    } catch (failure) {
+      error.textContent = failure.message;
       button.disabled = false;
+      button.textContent = text.button;
     }
   };
 }
@@ -1108,7 +1171,10 @@ async function loadMe() {
 }
 
 (async function boot() {
-  if (!MOCK) { try { session.mode = (await api("/api/mode")).mode; } catch { /* old server: local */ } }
+  let setup = false;
+  if (!MOCK) { try { ({ mode: session.mode, setup } = await api("/api/mode")); } catch { /* old server: local */ } }
+  if (MOCK && params.has("auth")) { showAuth(params.get("auth") || "login"); return; }
+  if (setup) { showAuth("setup"); return; }
   if (session.mode === "hosted" && !(await loadMe())) { showAuth(); return; }
   await refreshState();
   connectEvents();

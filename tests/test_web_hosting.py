@@ -11,9 +11,9 @@ from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 
 import web.accounts
-from web.accounts import Accounts, Throttle
+from web.accounts import AccountError, Accounts, Sessions, Throttle
 from settings import SettingsError
-from web.hosting import COOKIE, EncryptedSettingsStore, HostedAccess, Hub, load_key, main
+from web.hosting import COOKIE, EncryptedSettingsStore, HostedAccess, Hub, _key_file, load_key, main
 from web.server import JOBS, Studia, _EventLogHandler, make_handler
 
 
@@ -55,6 +55,19 @@ class HostedServerTest(unittest.TestCase):
             payload = raw.decode()
         return response.status, payload, token, set_cookie
 
+    def test_first_visit_sets_up_the_admin_with_the_logged_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hub = Hub(directory, "http://127.0.0.1:%d" % self.port, key=os.urandom(32))
+            self.server.RequestHandlerClass = make_handler(HostedAccess(hub, self.port))
+            self.assertTrue(self.request("GET", "/api/mode")[1]["setup"])
+            form = {"username": "owner", "password": "owner-password"}
+            self.assertEqual(self.request("POST", "/api/auth/setup", dict(form, code="0000-0000-0000"))[0], 403)
+            status, payload, token, _ = self.request("POST", "/api/auth/setup", dict(form, code=hub.setup_code.lower()))
+            self.assertEqual((status, payload["user"]["role"]), (200, "admin"))
+            self.assertTrue(token)
+            self.assertFalse(self.request("GET", "/api/mode")[1]["setup"])
+            self.assertEqual(self.request("POST", "/api/auth/setup", dict(form, code="x"))[0], 409)
+
     def login(self, username, password):
         status, _, token, _ = self.request("POST", "/api/auth/login", {"username": username, "password": password})
         self.assertEqual(status, 200)
@@ -62,7 +75,7 @@ class HostedServerTest(unittest.TestCase):
         return token, csrf
 
     def test_everything_but_login_needs_a_session(self):
-        self.assertEqual(self.request("GET", "/api/mode")[1], {"mode": "hosted"})
+        self.assertEqual(self.request("GET", "/api/mode")[1], {"mode": "hosted", "setup": False})
         self.assertEqual(self.request("GET", "/api/state")[0], 401)
         self.assertEqual(self.request("GET", "/")[0], 200)
         self.assertEqual(self.request("GET", "/api/mode", host="evil.example")[0], 403)
@@ -215,7 +228,23 @@ class IsolationUnitTest(unittest.TestCase):
             accounts = Accounts(directory)
             accounts.create_user("alice", "alice-password")
             self.assertEqual(oct(accounts.path.stat().st_mode & 0o777), "0o600")
-            self.assertNotIn("alice-password", accounts.path.read_text())
+            self.assertNotIn(b"alice-password", accounts.path.read_bytes())
+
+    def test_sessions_survive_a_restart_and_json_accounts_migrate(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(web.accounts, "ITERATIONS", 1000):
+            legacy = {"users": {"u1": {"username": "alice", "password": web.accounts.hash_password("alice-password"),
+                                       "role": "admin", "disabled": False, "created": 1, "last_login": None}},
+                      "invites": {"AAAA-BBBB-CCCC": {"created": 1, "created_by": "u1", "expires": 9e9, "used_by": None}}}
+            Path(directory, "accounts.json").write_text(json.dumps(legacy))
+            accounts = Accounts(directory)
+            self.assertEqual(accounts.authenticate("ALICE", "alice-password")["id"], "u1")
+            self.assertEqual([i["state"] for i in accounts.invites()], ["open"])
+            self.assertTrue(Path(directory, "accounts.json.migrated").exists())
+            token = Sessions(accounts).create("u1")
+            restarted = Accounts(directory)
+            self.assertEqual(Sessions(restarted).get(token)["uid"], "u1")
+            with self.assertRaises(AccountError):
+                restarted.setup_admin("mallory", "mallory-password")
 
     def test_encrypted_store_round_trip_and_tamper_checks(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -245,6 +274,11 @@ class IsolationUnitTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"STUDIA_SECRET_KEY": "short"}):
             self.assertEqual(main(["--data", directory]), 1)
         self.assertEqual(len(load_key("A" * 43)), 32)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "keys" / "secret.key"
+            first = _key_file(path)
+            self.assertEqual((len(load_key(first)), _key_file(path)), (32, first))
+            self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
         with self.assertRaises(ValueError):
             load_key("")
 

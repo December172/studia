@@ -842,7 +842,8 @@ def make_handler(access):
             query = parse_qs(url.query)
             try:
                 if not access.host_ok(self.headers.get("Host")):
-                    raise HttpError(403, "forbidden")
+                    raise HttpError(403, "不允许用这个地址访问。服务器模式请把 STUDIA_PUBLIC_URL 设成浏览器地址栏里的地址"
+                                         "（协议、域名或 IP、端口都要一致），然后重启。")
                 body = self._body() if method == "POST" else {}
                 result = access.public(self, method, url.path, query, body)
                 if result is not NOT_HANDLED:

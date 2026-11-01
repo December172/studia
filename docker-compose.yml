@@ -1,0 +1,22 @@
+# docker compose up -d，然后看日志里的设置码：docker compose logs studia
+services:
+  studia:
+    build: .
+    image: studia
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # 浏览器里访问的地址，必须和地址栏一致（域名或 IP 加端口）。
+      STUDIA_PUBLIC_URL: ${STUDIA_PUBLIC_URL:-http://localhost:8080}
+      # 全站同时运行的任务数。
+      STUDIA_MAX_JOBS: ${STUDIA_MAX_JOBS:-4}
+      # 放在 Nginx / Caddy 等反向代理后面时设为 1。
+      STUDIA_TRUST_PROXY: ${STUDIA_TRUST_PROXY:-0}
+      # 可选：主密钥。不设置时首次启动会在数据卷里生成 secret.key。
+      STUDIA_SECRET_KEY: ${STUDIA_SECRET_KEY:-}
+    volumes:
+      - studia-data:/data
+
+volumes:
+  studia-data:

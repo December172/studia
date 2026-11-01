@@ -15,3 +15,22 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -r requirements.txt
       - run: python -m unittest discover -s tests -v
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t studia .
+      - name: Start and reach the first-run setup
+        run: |
+          docker run -d --name studia -p 8080:8080 -e STUDIA_PUBLIC_URL=http://localhost:8080 studia
+          for i in $(seq 30); do curl -fs http://localhost:8080/api/mode && break; sleep 1; done
+          curl -fs http://localhost:8080/api/mode | grep -q '"setup": true'
+          code=$(docker logs studia 2>&1 | sed -n 's/.*设置码：\([0-9A-F-]*\).*/\1/p')
+          test -n "$code"
+          curl -fs -X POST http://localhost:8080/api/auth/setup -H 'Content-Type: application/json' \
+            -d "{\"code\": \"$code\", \"username\": \"admin\", \"password\": \"admin-password\"}" | grep -q '"role": "admin"'
+          docker restart studia
+          for i in $(seq 30); do curl -fs http://localhost:8080/api/mode && break; sleep 1; done
+          curl -fs http://localhost:8080/api/mode | grep -q '"setup": false'
+      - if: always()
+        run: docker logs studia || true

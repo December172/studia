@@ -1400,17 +1400,6 @@ def oauth_diagnostic(login):
     run_console_tool(lambda: bool(login()), "测试浏览器登录")
 
 
-def confirm_update():
-    import tkinter as tk
-    from tkinter import messagebox
-    root = tk.Tk()
-    root.withdraw()
-    try:
-        return messagebox.askyesno("更新可用", "检测到新版本，是否下载？")
-    finally:
-        root.destroy()
-
-
 def demo(snapshot=None):
     """Offline UI preview; no platform, browser login or AI requests."""
     from pathlib import Path
