@@ -721,6 +721,7 @@ class LocalAccess:
 def make_handler(access):
     class Handler(BaseHTTPRequestHandler):
         server_version = "Studia"
+        timeout = 30  # a stalled client cannot pin a worker thread forever
 
         def log_message(self, *args):
             pass

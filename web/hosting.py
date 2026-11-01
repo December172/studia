@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import getpass
 import hmac
 import html
+import json
 import logging
+import os
 import re
 import secrets
 import threading
@@ -15,20 +18,94 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
+from Crypto.Cipher import AES
+
 from NewMoocMain.oauth_login import SSO_AUTH_URL, SSO_SOURCE
-from settings import SettingsStore
+from settings import SettingsError, SettingsStore
 from web.accounts import AccountError, Accounts, Sessions, Throttle
 from web.server import NOT_HANDLED, HttpError, Reply, Studia, _EventLogHandler, _job_public, make_handler
 
 COOKIE = "studia_session"
 OAUTH_TTL = 600
+KEY_ENV = "STUDIA_SECRET_KEY"
 logger = logging.getLogger(__name__)
+
+
+def load_key(value):
+    """32-byte AES key from the base64url text printed by --gen-key."""
+    try:
+        key = base64.urlsafe_b64decode((value or "").strip() + "==")
+    except (ValueError, TypeError):
+        key = b""
+    if len(key) != 32:
+        raise ValueError("%s 无效：请用 python StartWork.py --serve --gen-key 生成" % KEY_ENV)
+    return key
+
+
+class EncryptedSettingsStore(SettingsStore):
+    """A user's settings (platform tokens, API keys) sealed with AES-256-GCM.
+
+    The user id is the associated data, so a file copied into another user's
+    directory fails authentication instead of handing over that account.
+    """
+
+    def __init__(self, directory, key, owner):
+        super().__init__(directory)
+        self.key, self.owner = key, owner.encode()
+        self.plain_path = self.path
+        self.path = self.directory / "settings.enc"
+
+    def _read(self):
+        if not self.path.exists():
+            if not self.plain_path.exists():
+                return {}
+            return self._migrate()
+        try:
+            sealed = json.loads(self.path.read_text(encoding="utf-8"))
+            cipher = AES.new(self.key, AES.MODE_GCM, nonce=base64.b64decode(sealed["nonce"]))
+            cipher.update(self.owner)
+            plain = cipher.decrypt_and_verify(base64.b64decode(sealed["data"]), base64.b64decode(sealed["tag"]))
+            data = json.loads(plain)
+        except (OSError, ValueError, KeyError, TypeError):
+            raise SettingsError("无法解密用户配置：密钥不对或文件已损坏（原文件未覆盖）") from None
+        if not isinstance(data, dict):
+            raise SettingsError("用户配置格式不正确（原文件未覆盖）")
+        return data
+
+    def _migrate(self):
+        data = json.loads(self.plain_path.read_text(encoding="utf-8"))
+        self._write(data)
+        self.plain_path.unlink()
+        return data
+
+    def _write(self, data):
+        data["version"] = 1
+        cipher = AES.new(self.key, AES.MODE_GCM)
+        cipher.update(self.owner)
+        body, tag = cipher.encrypt_and_digest(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+        sealed = {"v": 1, "nonce": base64.b64encode(cipher.nonce).decode(), "tag": base64.b64encode(tag).decode(),
+                  "data": base64.b64encode(body).decode()}
+        temporary = self.directory / (".settings-%s.tmp" % secrets.token_hex(4))
+        try:
+            self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(sealed, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+        except OSError:
+            raise SettingsError("无法保存用户配置，请检查数据目录权限") from None
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
 
 class Hub:
     """Accounts plus one Studia app per user, each rooted in data/users/<id>/."""
 
-    def __init__(self, data_dir, public_url, *, max_jobs=4, trust_proxy=False):
+    def __init__(self, data_dir, public_url, *, key, max_jobs=4, trust_proxy=False):
+        self.key = key
         self.data = Path(data_dir).expanduser()
         (self.data / "users").mkdir(mode=0o700, parents=True, exist_ok=True)
         self.data.chmod(0o700)  # mkdir(parents=True) leaves the root at the umask default
@@ -48,12 +125,22 @@ class Hub:
             if app is None:
                 directory = self.data / "users" / uid
                 directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-                store = SettingsStore(directory)
+                store = EncryptedSettingsStore(directory, self.key, uid)
                 store.ensure_default_model()
                 app = Studia(store, reports_dir=directory / "ai_results", slots=self.slots,
                              oauth_url=lambda pid, uid=uid: self.oauth_url(uid, pid))
                 self.apps[uid] = app
             return app
+
+    def audit(self, action, *, actor="", target="", ip="", ok=True):
+        """Append-only record of sign-ins and admin actions; never passwords or tokens."""
+        line = json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "action": action, "ok": ok,
+                           "actor": actor, "target": target, "ip": ip}, ensure_ascii=False)
+        path = self.data / "audit.log"
+        with self.lock:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as stream:
+                stream.write(line + "\n")
 
     # ------------------------------------------------------------ MOOC browser login
 
@@ -123,7 +210,10 @@ class HostedAccess:
         return host in self.hosts
 
     def headers(self):
-        return {"Strict-Transport-Security": "max-age=31536000"} if self.secure else {}
+        headers = {"X-Frame-Options": "DENY", "Permissions-Policy": "camera=(), microphone=(), geolocation=()"}
+        if self.secure:
+            headers["Strict-Transport-Security"] = "max-age=31536000"
+        return headers
 
     def _ip(self, request):
         forwarded = request.headers.get("X-Forwarded-For", "")
@@ -156,17 +246,22 @@ class HostedAccess:
         if method == "POST" and path == "/api/auth/login":
             username = str(body.get("username", "")).strip()
             keys = ("ip:" + self._ip(request), "user:" + username.lower())
+            ip = self._ip(request)
             wait = hub.throttle.blocked(*keys)
             if wait:
+                hub.audit("login", actor=username, ip=ip, ok=False)
                 raise HttpError(429, "尝试次数太多，请 %d 分钟后再试" % max(1, wait // 60))
             try:
                 user = hub.accounts.authenticate(username, str(body.get("password", "")))
             except AccountError as exc:
+                hub.audit("login", actor=username, ip=ip, ok=False)
                 raise HttpError(403, str(exc))
             if user is None:
                 hub.throttle.fail(*keys)
+                hub.audit("login", actor=username, ip=ip, ok=False)
                 raise HttpError(401, "用户名或密码不正确")
             hub.throttle.clear(*keys)
+            hub.audit("login", actor=user["username"], ip=ip)
             return self._signed_in(user["id"])
         if method == "POST" and path == "/api/auth/register":
             key = "ip:" + self._ip(request)
@@ -177,7 +272,9 @@ class HostedAccess:
                                             str(body.get("password", "")))
             except AccountError as exc:
                 hub.throttle.fail(key)
+                hub.audit("register", actor=str(body.get("username", "")), ip=self._ip(request), ok=False)
                 raise HttpError(400, str(exc))
+            hub.audit("register", actor=hub.accounts.user(uid)["username"], ip=self._ip(request))
             return self._signed_in(uid)
         match = re.fullmatch(r"/oauth/callback/([\w-]+)", path)
         if method == "GET" and match:
@@ -217,15 +314,21 @@ class HostedAccess:
             except AccountError as exc:
                 raise HttpError(400, str(exc))
             hub.sessions.drop_user(user["id"])
+            hub.audit("password", actor=user["username"], ip=self._ip(request))
             return self._signed_in(user["id"])
         if not path.startswith("/api/admin/"):
             return NOT_HANDLED
         if user["role"] != "admin":
             raise HttpError(403, "只有管理员可以访问")
         try:
-            return self._admin(method, path, body, user)
+            result = self._admin(method, path, body, user)
         except AccountError as exc:
             raise HttpError(400, str(exc))
+        if method == "POST":
+            target = path.split("/")[4] if path.count("/") >= 4 else ""
+            name = (hub.accounts.user(target) or {}).get("username", target)
+            hub.audit("admin:" + path.rsplit("/", 1)[-1], actor=user["username"], target=name, ip=self._ip(request))
+        return result
 
     def _admin(self, method, path, body, me):
         hub = self.hub
@@ -288,8 +391,20 @@ def main(argv):
     parser.add_argument("--max-jobs", type=int, default=4, help="全站同时运行的任务数")
     parser.add_argument("--trust-proxy", action="store_true", help="信任反向代理传来的 X-Forwarded-For")
     parser.add_argument("--create-admin", metavar="USERNAME", help="创建管理员账号后退出")
+    parser.add_argument("--gen-key", action="store_true", help="生成加密用户数据的主密钥后退出")
     args = parser.parse_args(argv)
-    hub = Hub(args.data, args.public_url or "http://127.0.0.1:%d" % args.port,
+    if args.gen_key:
+        print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("="))
+        print("把它设成环境变量 %s 后再启动；丢失这个密钥，用户保存的平台登录和 API Key 将无法解密。" % KEY_ENV)
+        return 0
+    try:
+        key = load_key(os.environ.get(KEY_ENV))
+    except ValueError as exc:
+        if not args.create_admin:
+            print("缺少或无效的加密密钥：%s" % exc)
+            return 1
+        key = None
+    hub = Hub(args.data, args.public_url or "http://127.0.0.1:%d" % args.port, key=key,
               max_jobs=max(1, args.max_jobs), trust_proxy=args.trust_proxy)
     if args.create_admin:
         password = getpass.getpass("设置 %s 的密码：" % args.create_admin)
