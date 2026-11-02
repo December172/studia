@@ -885,7 +885,7 @@ async function loadPapers(p, c) {
     state.papers[k] = papers;
     delete state.paperErrors[k];
     const selected = selectedOf(k);
-    if (!selected.size) papers.filter((x) => x.available && !x.done).forEach((x) => selected.add(x.id));
+    if (!selected.size) papers.filter((x) => x.available && !x.done && x.status !== "状态未知").forEach((x) => selected.add(x.id));
   } catch (error) {
     // A failed read is not an empty course: keep it unloaded so a retry or the next login reads it again.
     state.paperErrors[k] = error.message;
