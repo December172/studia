@@ -8,7 +8,7 @@ import time
 import unittest
 from pathlib import Path
 from http.server import ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import web.accounts
 from web.accounts import AccountError, Accounts, Sessions, Throttle
@@ -84,8 +84,12 @@ class HostedServerTest(unittest.TestCase):
         token, csrf = self.login("admin", "admin-password")
         alice = self.hub.accounts.create_user("alice", "alice-password")
         post = lambda path, body: self.request("POST", path, body, cookie=token, csrf=csrf)
-        self.assertEqual(self.request("GET", "/api/admin/settings", cookie=token)[1], {"max_jobs": 4})
-        self.assertEqual(post("/api/admin/settings", {"max_jobs": 2})[1], {"max_jobs": 2})
+        self.assertEqual(self.request("GET", "/api/admin/settings", cookie=token)[1], {"max_jobs": 4, "zhs_parallel_study": False})
+        self.assertEqual(post("/api/admin/settings", {"max_jobs": 2})[1], {"max_jobs": 2, "zhs_parallel_study": False})
+        self.assertFalse(self.hub.app(alice).zhs_parallel())
+        self.assertTrue(post("/api/admin/settings", {"zhs_parallel_study": True})[1]["zhs_parallel_study"])
+        self.assertTrue(self.hub.app(alice).zhs_parallel())
+        post("/api/admin/settings", {"zhs_parallel_study": False})
         self.assertEqual(self.hub.job_limit(alice), 2)
         self.assertEqual(post("/api/admin/users/%s/limit" % alice, {"max_jobs": 6})[0], 200)
         self.assertEqual(self.hub.job_limit(alice), 6)
@@ -364,3 +368,59 @@ class LogExportTest(unittest.TestCase):
             self.assertIn('"login"', export_logs(directory, "audit", at("2026-11-01 09:00"), at("2026-11-01 10:00")))
             self.assertEqual(export_logs(directory, "app", at("2026-11-02 09:00"), at("2026-11-02 10:00")),
                              "这段时间没有日志。\n")
+
+
+class DailyLogFileTest(unittest.TestCase):
+    def test_a_long_running_server_writes_each_day_to_its_own_file(self):
+        from MoocMain.log import DailyFileHandler
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = os.getcwd()
+            os.chdir(directory)
+            try:
+                handler = DailyFileHandler()
+                handler.setFormatter(logging.Formatter("%(message)s"))
+                today = time.time()
+                for when, text in ((today, "today"), (today + 86400, "tomorrow")):
+                    record = logging.LogRecord("ZHSMain.api", logging.WARNING, __file__, 1, text, None, None)
+                    record.created = when
+                    handler.handle(record)
+                handler.close()
+                day = lambda t: time.strftime("%Y-%m-%d", time.localtime(t))
+                self.assertEqual(Path("icve-ai-assistant-log_%s.log" % day(today)).read_text().strip(), "today")
+                self.assertEqual(Path("icve-ai-assistant-log_%s.log" % day(today + 86400)).read_text().strip(), "tomorrow")
+            finally:
+                os.chdir(cwd)
+
+    def test_export_finds_lines_an_older_server_left_in_the_previous_days_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "icve-ai-assistant-log_2026-11-01.log").write_text(
+                "[2026-11-02 00:01:53,616][1][api.py][line: 1][WARNING] :: 智慧树接口失败：POST x\n", encoding="utf-8")
+            at = lambda text: time.mktime(time.strptime(text, "%Y-%m-%d %H:%M"))
+            self.assertIn("智慧树接口失败", export_logs(directory, "app", at("2026-11-02 00:00"), at("2026-11-02 09:00")))
+
+
+class LogOwnerTest(unittest.TestCase):
+    def test_runtime_log_lines_name_the_user_and_job(self):
+        import MoocMain.log
+        from web.server import JOBS
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = os.getcwd()
+            os.chdir(directory)
+            log = logging.getLogger("ZHSMain.owner-test")
+            log.setLevel(logging.INFO)
+            handler = MoocMain.log.DailyFileHandler()
+            handler.setFormatter(logging.Formatter("[%(levelname)s]%(who)s :: %(message)s"))
+            log.addHandler(handler)
+            JOBS["ab12cd34"] = Mock(owner="alice")
+            try:
+                for name in ("studia-job-ab12cd34/study_0", "MainThread"):
+                    worker = threading.Thread(target=log.warning, args=("被拦",), name=name)
+                    worker.start()
+                    worker.join()
+            finally:
+                log.removeHandler(handler)
+                handler.close()
+                JOBS.pop("ab12cd34", None)
+                os.chdir(cwd)
+            lines = next(Path(directory).glob("*.log")).read_text(encoding="utf-8").splitlines()
+            self.assertEqual(lines, ["[WARNING][alice/ab12cd34] :: 被拦", "[WARNING] :: 被拦"])

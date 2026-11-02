@@ -151,7 +151,9 @@ class Hub:
                 store.ensure_default_model()
                 app = Studia(store, reports_dir=directory / "ai_results", memory=self.memory, mooc_memory=self.mooc_memory,
                              oauth_url=lambda pid, uid=uid: self.oauth_url(uid, pid),
-                             job_limit=lambda uid=uid: self.job_limit(uid))
+                             job_limit=lambda uid=uid: self.job_limit(uid),
+                             zhs_parallel=lambda: bool(self.accounts.setting("zhs_parallel_study", False)))
+                app.owner = (self.accounts.user(uid) or {}).get("username", uid)
                 self.apps[uid] = app
             return app
 
@@ -192,6 +194,10 @@ class Hub:
         return True, "职教云登录成功，正在读取课程。可以关闭这个页面，回到 Studia。"
 
     # ------------------------------------------------------------ admin helpers
+
+    def site_settings(self):
+        return {"max_jobs": self.default_job_limit(),
+                "zhs_parallel_study": bool(self.accounts.setting("zhs_parallel_study", False))}
 
     def default_job_limit(self):
         return self.accounts.setting("max_jobs", MAX_JOBS)
@@ -413,10 +419,13 @@ class HostedAccess:
         if method == "GET" and path == "/api/admin/jobs":
             return {"jobs": hub.all_jobs()}
         if method == "GET" and path == "/api/admin/settings":
-            return {"max_jobs": hub.default_job_limit()}
+            return hub.site_settings()
         if method == "POST" and path == "/api/admin/settings":
-            hub.accounts.set_setting("max_jobs", _job_limit(body.get("max_jobs")))
-            return {"max_jobs": hub.default_job_limit()}
+            if "max_jobs" in body:
+                hub.accounts.set_setting("max_jobs", _job_limit(body.get("max_jobs")))
+            if "zhs_parallel_study" in body:
+                hub.accounts.set_setting("zhs_parallel_study", body.get("zhs_parallel_study") is True)
+            return hub.site_settings()
         match = re.fullmatch(r"/api/admin/users/(\w+)/jobs/(\w+)/stop", path)
         if method == "POST" and match:
             app = hub.apps.get(match[1])
@@ -467,7 +476,9 @@ def export_logs(directory, kind, start, end):
     if kind == "audit":
         files = [Path(directory) / "audit.log"]
     else:
-        day, last = datetime.date.fromtimestamp(start), datetime.date.fromtimestamp(end)
+        # From the day before: older servers kept writing into the file of the day they started.
+        day = datetime.date.fromtimestamp(start) - datetime.timedelta(days=1)
+        last = datetime.date.fromtimestamp(end)
         files = []
         while day <= last:
             files.append(Path(directory) / ("icve-ai-assistant-log_%s.log" % day.isoformat()))

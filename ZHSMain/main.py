@@ -351,7 +351,12 @@ class ZHSHandler:
 
         def report():
             payload = build_payload(state["played"], state["last_submit"], state["token"])
-            self.client.shared_save_cache(payload)
+            # The cache save is optional; it used to go out without courseId and failed every time
+            # (-1). After one failure it stays off for this course run instead of failing on every report.
+            if not ctx.get("cache_off") and self.client.shared_save_cache(
+                    dict(payload, courseId=ctx["report_course_id"])) is None:
+                ctx["cache_off"] = True
+                self.log.info("%s：缓存进度接口不可用，本次不再调用（正式进度照常保存）", course)
             sent_payload = payload
             try:
                 send(payload)
