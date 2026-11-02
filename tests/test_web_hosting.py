@@ -141,6 +141,15 @@ class HostedServerTest(unittest.TestCase):
         invites = self.request("GET", "/api/admin/invites", cookie=token)[1]["invites"]
         self.assertEqual(invites[0]["state"], "used")
 
+    def test_last_seen_counts_cookie_visits_not_only_password_logins(self):
+        token, csrf = self.login("admin", "admin-password")
+        code = self.request("POST", "/api/admin/invites", {"days": 3}, cookie=token, csrf=csrf)[1]["code"]
+        alice = self.request("POST", "/api/auth/register",
+                             {"invite": code, "username": "alice", "password": "alice-password"})[2]
+        self.request("GET", "/api/auth/me", cookie=alice)
+        seen = {u["username"]: u["last_login"] for u in self.request("GET", "/api/admin/users", cookie=token)[1]["users"]}
+        self.assertIsNotNone(seen["alice"])
+
     def test_users_cannot_see_each_others_data(self):
         self.hub.accounts.create_user("alice", "alice-password")
         self.hub.accounts.create_user("bob", "bob-password")
