@@ -507,7 +507,7 @@ class ZHSAnswerRunner:
                 "answer": answer,
                 "dataIds": "",
                 "questionType": prepared["kind"],
-            }, recruit_id, exam=is_exam)
+            }, recruit_id, exam=is_exam, captcha_vision=self.ai_client)
 
         def submit():
             if is_exam:
