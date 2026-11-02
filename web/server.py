@@ -149,6 +149,8 @@ class Studia:
             if line:
                 job["lines"].insert(0, line)
                 del job["lines"][60:]
+        if job is not None and event.get("type") == "progress":
+            _track(job.setdefault("progress", {}), event)
         for subscriber in list(self.subscribers):
             try:
                 subscriber.put_nowait(event)
@@ -401,7 +403,7 @@ class Studia:
             self._check_conflicts(platform.id, course_id, kind)
             job = {"id": secrets.token_hex(4), "kind": kind, "title": LABEL[kind], "course": course_id,
                    "platform": platform.id, "course_name": row.get("courseName") or "课程", "cancel": threading.Event(),
-                   "state": "queued", "summary": "", "started": time.time(), "ended": None, "lines": []}
+                   "state": "queued", "summary": "", "started": time.time(), "ended": None, "lines": [], "progress": {}}
             if kind == "answer":
                 selected = self._selected(platform, course_id, body.get("tasks") or [])
                 target = lambda: self._answer(platform, selected, bool(body.get("auto_submit")), job)
@@ -726,11 +728,32 @@ def _history_line(event):
     return None
 
 
+def _track(progress, event):
+    """Keep the counters the page draws a job's progress bar from, so a page opened mid-run can redraw it.
+    Mirrors handleEvent() in studia.js."""
+    kind, name = event.get("kind"), event.get("name") or ""
+    overall = progress.get("overall")
+    if kind == "begin":
+        progress["overall"] = {"name": name, "total": event.get("total") or 0, "done": 0, "unit": event.get("unit")}
+    elif kind == "add_total" and overall:
+        overall["total"] += event.get("total") or 0
+    elif kind == "result" and overall:
+        overall["done"] += 1
+    elif kind in ("resources", "questions"):
+        unit = event.get("unit")
+        progress["sub"] = {"name": name, "done": event.get("completed") or 0, "total": event.get("total") or 0,
+                           "unit": "项" if unit == "项资源" else unit}
+    elif kind == "detail":
+        progress["detail"] = name
+    elif kind == "unit" and event.get("status") == "running":
+        progress["unit"] = {"name": name, "key": event.get("key")}
+
+
 def _job_public(job):
     if job is None:
         return None
     return {key: job.get(key) for key in ("id", "kind", "title", "course", "course_name", "platform", "state",
-                                      "summary", "started", "ended", "lines")}
+                                      "summary", "started", "ended", "lines", "progress")}
 
 
 def _data_url(image):

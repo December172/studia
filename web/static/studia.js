@@ -1127,7 +1127,8 @@ async function refreshState() {
     const live = data.jobs || [];
     for (const job of live) {
       if (state.jobs.some((j) => j.id === job.id)) continue;
-      runOf(job.id).lines = job.lines || [];
+      // A page opened mid-run missed the earlier progress events; start from the server's tally.
+      Object.assign(runOf(job.id), job.progress || {}, { lines: job.lines || [] });
       if (jobType(job) !== "answer") loadUnits(job.platform, job.course);
     }
     // Jobs that ended while we were away: drop them and refresh what they changed.
