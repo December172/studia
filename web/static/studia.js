@@ -959,7 +959,7 @@ function renderPlayer() {
       <div class="scrub"><span class="track ${pct == null ? "unknown" : ""}"><i style="width:${pct ?? 0}%"></i></span><span class="t">${esc(label || clock(elapsed(job)))}</span></div>
       <div class="np_meta">${recentCells(key(job.platform, job.course))}
         ${others ? `<button class="btn" data-go="#/jobs" title="查看全部任务">另有 ${others} 个</button>` : ""}
-        <button class="btn" data-open="${job.id}">展开 <span class="kbd">F</span></button><button class="btn danger" data-stop="${job.id}" data-confirm="确认停止" title="⇧S">停止</button></div>`);
+        ${sheet.classList.contains("open") ? '<button class="btn" data-close>收起 <span class="kbd">F</span></button>' : `<button class="btn" data-open="${job.id}">展开 <span class="kbd">F</span></button>`}<button class="btn danger" data-stop="${job.id}" data-confirm="确认停止" title="⇧S">停止</button></div>`);
   } else {
     player.classList.add("ended");
     patch(player, `
@@ -974,13 +974,10 @@ function renderFocus() {
   const live = focusedJob();
   const job = live || state.lastDone;
   const body = $(".sheet_body", sheet);
-  // With several jobs, the bar doubles as a switcher between them.
+  // Stop and collapse live on the player bar below; the top bar only appears to switch between several jobs.
+  $(".sheet_bar", sheet).hidden = state.jobs.length < 2;
   patch($(".sheet_tag", sheet), state.jobs.length > 1
-    ? state.jobs.map((j) => `<button class="chip" data-focus="${j.id}" aria-pressed="${j.id === live.id}">${esc(j.title)} · ${esc(j.course_name)}</button>`).join("")
-    : live ? `<span class="live">${LIVE_WORD[live.title] || "进行中"}</span>` : "");
-  const stop = $("[data-stop]", sheet);
-  stop.hidden = !live;
-  if (live) stop.dataset.stop = live.id;
+    ? state.jobs.map((j) => `<button class="chip" data-focus="${j.id}" aria-pressed="${j.id === live.id}">${esc(j.title)} · ${esc(j.course_name)}</button>`).join("") : "");
   if (!job) { patch(body, `<div class="focus"><div><div class="clock">—</div><p class="of">现在没有任务。</p></div></div>`); return; }
   const run = live ? runOf(live.id) : freshRun();
   const { pct, label } = progressOf(run);
@@ -1004,10 +1001,10 @@ function openSheet(id) {
   if (id) state.focus = id;
   if (!focusedJob() && !state.lastDone) return;
   renderFocus();
-  renderPlayer();
   sheet.classList.add("open");
+  renderPlayer();
 }
-function closeSheet() { sheet.classList.remove("open"); }
+function closeSheet() { sheet.classList.remove("open"); renderPlayer(); }
 
 setInterval(() => {
   const byId = (id) => state.jobs.find((j) => j.id === id);
@@ -1279,7 +1276,8 @@ document.addEventListener("click", (event) => {
   const target = t.closest("[data-go]"); if (target) { closeSheet(); go(target.dataset.go); }
   if (t.closest("[data-find]")) openFinder();
   if (t.closest("[data-toggle-theme]")) toggleTheme();
-  const open = t.closest("[data-open]"); if (open) openSheet(open.dataset.open);
+  // Opening turns this very button into 收起; stop here so the same click doesn't close it again.
+  const open = t.closest("[data-open]"); if (open) { openSheet(open.dataset.open); return; }
   if (t.closest("[data-close]")) closeSheet();
   const stop = t.closest("[data-stop]"); if (stop) stopJob(stop.dataset.stop);
   const siteStop = t.closest("[data-stop-job]");
@@ -1318,7 +1316,7 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") { closeSheet(); return; }
   if (mod || event.altKey || event.target.closest("input, textarea, select") || document.body.classList.contains("signed-out")) return;
   if (event.key === "S" && event.shiftKey) { stopJob(focusedJob()?.id); return; }
-  if (event.key === "f") { openSheet(); return; }
+  if (event.key === "f") { if (sheet.classList.contains("open")) closeSheet(); else openSheet(); return; }
   if (event.key === "s") $('[data-start]:not([disabled])', page)?.click();
 });
 
