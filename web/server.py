@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import mimetypes
+import os
 import queue
 import re
 import secrets
@@ -56,6 +57,11 @@ GROUP = {"study": "learn", "review": "learn", "answer": "answer"}
 # Running job id -> its Studia app. A job thread is named "studia-job-<id>" and passes that
 # name on to the helper threads it starts, so a log line can be traced back to its job.
 JOBS = {}
+# Restarts (an update): jobs that were running are written next to the settings and resumed on the
+# next start if it comes within the hour; each job is resumed at most a few times in a row.
+RESUME_WINDOW = 3600
+RESUME_LIMIT = 3
+INTERRUPTED = "更新时中断"
 JOB_THREAD = re.compile(r"studia-job-([0-9a-f]+)")
 
 
@@ -137,7 +143,9 @@ class Studia:
         # The account name in hosted mode, shown in runtime-log lines; None locally.
         self.owner = None
         self.jobs = {}
-        self.history = []
+        self.history = self._saved().get("history", [])[:HISTORY]
+        # Set while the service shuts down: what was running stays on disk for resume().
+        self.closing = False
         self.subscribers = set()
 
     # ------------------------------------------------------------ events
@@ -391,7 +399,7 @@ class Studia:
 
     # ------------------------------------------------------------ jobs
 
-    def start_job(self, body):
+    def start_job(self, body, *, minutes=None, resumes=0):
         platform = self.platform(str(body.get("platform", "")))
         kind = body.get("type")
         course_id = str(body.get("course", ""))
@@ -403,16 +411,20 @@ class Studia:
             self._check_conflicts(platform.id, course_id, kind)
             job = {"id": secrets.token_hex(4), "kind": kind, "title": LABEL[kind], "course": course_id,
                    "platform": platform.id, "course_name": row.get("courseName") or "课程", "cancel": threading.Event(),
-                   "state": "queued", "summary": "", "started": time.time(), "ended": None, "lines": [], "progress": {}}
+                   "state": "queued", "summary": "", "started": time.time(), "ended": None, "lines": [], "progress": {},
+                   "resumes": resumes}
+            if resumes:
+                job["lines"].append({"text": "服务更新后自动继续", "level": "", "time": time.strftime("%H:%M")})
             if kind == "answer":
                 selected = self._selected(platform, course_id, body.get("tasks") or [])
                 target = lambda: self._answer(platform, selected, bool(body.get("auto_submit")), job)
             else:
-                minutes = REVIEW_MINUTES if kind == "review" else 0
-                target = lambda: self._study(platform, row, minutes, job)
+                job["minutes"] = (REVIEW_MINUTES if minutes is None else minutes) if kind == "review" else 0
+                target = lambda: self._study(platform, row, job["minutes"], job)
             self.jobs[job["id"]] = job
             JOBS[job["id"]] = self
             self._take_turn(job)
+            self._save()
         self.publish(dict(_job_public(job), type="job"))
         threading.Thread(target=self._run_job, args=(job, target, platform), daemon=True,
                          name="studia-job-%s" % job["id"]).start()
@@ -462,7 +474,7 @@ class Studia:
                     if other["state"] == "queued" and other["started"] < job["started"])
         if running + ahead >= self.job_limit():
             return False
-        job["state"] = "running"
+        job["state"], job["running_since"] = "running", time.time()
         return True
 
     def _run_job(self, job, target, platform):
@@ -498,12 +510,106 @@ class Studia:
                 platform.cache.pop(("units", job["course"]), None)
                 platform.cache.pop(("tasks", job["course"]), None)
             with self.lock:
+                if self.closing and state == "stopped":
+                    summary = INTERRUPTED
                 job.update(state=state, summary=summary, ended=time.time())
                 self.history.insert(0, job)
                 del self.history[HISTORY:]
                 self.jobs.pop(job["id"], None)
+                self._save()
             self.publish(dict(_job_public(job), type="job"))
             JOBS.pop(job["id"], None)
+
+    # ------------------------------------------------------------ restarts
+
+    def _jobs_path(self):
+        directory = getattr(self.store, "directory", None)
+        return Path(directory) / "jobs.json" if directory is not None else None
+
+    def _saved(self):
+        try:
+            data = json.loads(self._jobs_path().read_text(encoding="utf-8"))
+        except (AttributeError, OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _save(self, stopped_at=None):
+        """Write the running jobs and recent history to disk. Call with self.lock held."""
+        if self.closing:
+            return
+        now = stopped_at or time.time()
+        active = [{"platform": j["platform"], "type": j["kind"], "course": j["course"], "course_name": j["course_name"],
+                   "resumes": j.get("resumes", 0),
+                   # Review time still owed: its length minus what it has already played.
+                   "minutes": max(0, j.get("minutes", 0) - (now - j["running_since"]) / 60 if j.get("running_since") else j.get("minutes", 0))}
+                  for j in sorted(self.jobs.values(), key=lambda j: j["started"])]
+        data = {"stopped_at": stopped_at, "saved_at": now, "active": active,
+                "history": [_job_public(j) for j in self.history]}
+        path = self._jobs_path()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            os.replace(temporary, path)
+        except OSError:
+            logger.warning("任务记录保存失败", exc_info=True)
+
+    def shutdown(self):
+        """The service is stopping (usually an update): keep the running jobs on disk for resume(), then stop them."""
+        with self.lock:
+            self._save(stopped_at=time.time())
+            self.closing = True
+        self.stop_job()
+
+    def resume(self):
+        """Start again the jobs a restart interrupted. Learning continues from the progress the platform
+        recorded; answering is left to the person, since a paper may already have been handed in."""
+        data = self._saved()
+        active = [entry for entry in data.get("active") or [] if isinstance(entry, dict) and entry.get("type") in LABEL]
+        if not active:
+            return
+        fresh = time.time() - (data.get("stopped_at") or data.get("saved_at") or 0) < RESUME_WINDOW
+        for entry in active:
+            kind = entry["type"]
+            if kind == "review" and entry.get("minutes", 0) < 1:
+                continue
+            if kind == "answer" or not fresh or entry.get("resumes", 0) >= RESUME_LIMIT:
+                self._record(entry, "stopped", INTERRUPTED)
+                continue
+            body = {"platform": entry.get("platform"), "type": kind, "course": entry.get("course")}
+            for attempt in range(3):
+                try:
+                    self.start_job(body, minutes=max(1, round(entry.get("minutes", 0))), resumes=entry.get("resumes", 0) + 1)
+                    break
+                except HttpError as exc:
+                    if exc.status == 401:
+                        self._record(entry, "waiting", str(exc))
+                        break
+                    if exc.status != 409:  # 409: the same course is already running again
+                        self._record(entry, "error", str(exc))
+                    break
+                except Exception as exc:
+                    # The platform may not answer yet right after a restart; try again shortly.
+                    if attempt == 2:
+                        self._record(entry, "error", str(exc) or "恢复任务失败")
+                    else:
+                        time.sleep(20)
+        with self.lock:
+            self._save()
+
+    def _record(self, entry, state, summary):
+        """A history line for a job that resume() did not start again."""
+        kind = entry["type"]
+        now = time.time()
+        job = {"id": secrets.token_hex(4), "kind": kind, "title": LABEL[kind], "course": entry.get("course"),
+               "platform": entry.get("platform"), "course_name": entry.get("course_name") or "课程",
+               "state": state, "summary": summary, "started": now, "ended": now, "lines": [], "progress": {}}
+        with self.lock:
+            self.history.insert(0, job)
+            del self.history[HISTORY:]
+        self.publish(dict(_job_public(job), type="job"))
 
     def _ai(self, cancel_message):
         config = self.store.ai_config()
@@ -975,10 +1081,19 @@ def serve(port=0, open_browser=True, store=None):
     print("只有本机能访问；按 Ctrl+C 退出。")
     if open_browser:
         webbrowser.open(url)
+    threading.Thread(target=app.resume, daemon=True, name="studia-resume").start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        app.stop_job()
+        app.shutdown()
+        drain()
         server.server_close()
+
+
+def drain(timeout=20):
+    """Give stopping jobs a moment to finish their last request, e.g. saving how far a video got."""
+    deadline = time.monotonic() + timeout
+    while JOBS and time.monotonic() < deadline:
+        time.sleep(0.2)

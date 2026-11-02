@@ -629,6 +629,11 @@ const VIEWS = {
 
 function fixButtons(j, i) {
   const type = TYPE_OF[j.title];
+  // An update stopped it and it was not restarted on its own (answering, or interrupted too long ago).
+  if (j.state === "stopped" && j.summary === "更新时中断" && i === state.history.findIndex((x) => x.course === j.course && x.title === j.title)) {
+    return type === "answer" ? `<button class="btn small" data-go="#/course/${j.platform}/${j.course}/answer">重新作答</button>`
+      : `<button class="btn small primary" data-retry="${i}">重试</button>`;
+  }
   if (j.state === "waiting") {
     if (/登录/.test(j.summary)) return `<button class="btn small primary" data-go="#/login/${j.platform}">重新登录</button>`;
     if (/时长/.test(j.summary)) return "";

@@ -6,6 +6,8 @@ services:
     # docker build -t ghcr.io/yijunjie07/studia:latest .
     image: ghcr.io/yijunjie07/studia:latest
     restart: unless-stopped
+    # 更新时先让任务停稳、记下进度，重启后自动接着学。
+    stop_grace_period: 30s
     ports:
       - "8080:8080"
     environment:

@@ -27,7 +27,7 @@ from ZHSMain.memory import DatabaseAnswerMemory
 from ai.memory import MoocDatabaseAnswerMemory
 from settings import SettingsError, SettingsStore
 from web.accounts import AccountError, Accounts, Sessions, Throttle
-from web.server import MAX_JOBS, MAX_PENDING, NOT_HANDLED, HttpError, Reply, Studia, _EventLogHandler, make_handler
+from web.server import MAX_JOBS, MAX_PENDING, NOT_HANDLED, HttpError, Reply, Studia, _EventLogHandler, drain, make_handler
 
 COOKIE = "studia_session"
 OAUTH_TTL = 600
@@ -156,6 +156,14 @@ class Hub:
                 app.owner = (self.accounts.user(uid) or {}).get("username", uid)
                 self.apps[uid] = app
             return app
+
+    def resume(self):
+        """After a restart, start again each person's jobs it interrupted (see Studia.resume)."""
+        for path in sorted((self.data / "users").glob("*/jobs.json")):
+            user = self.accounts.user(path.parent.name)
+            if user and not user.get("disabled"):
+                threading.Thread(target=self.app(user["id"]).resume, daemon=True,
+                                 name="studia-resume-%s" % user["id"]).start()
 
     def audit(self, action, *, actor="", target="", ip="", ok=True):
         """Append-only record of sign-ins and admin actions; never passwords or tokens."""
@@ -525,13 +533,15 @@ def serve_hosted(hub, host, port):
     server.RequestHandlerClass = make_handler(HostedAccess(hub, server.server_address[1]))
     print("Studia 服务器模式已启动：监听 %s:%d，对外地址 %s" % (host, server.server_address[1], hub.public_url))
     print("数据目录：%s；按 Ctrl+C 退出。" % hub.data)
+    threading.Thread(target=hub.resume, daemon=True, name="studia-resume").start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         for app in list(hub.apps.values()):
-            app.stop_job()
+            app.shutdown()
+        drain()
         server.server_close()
 
 
