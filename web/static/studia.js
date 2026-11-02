@@ -26,6 +26,8 @@ function ring(percent, color = "var(--indigo)", size = 16) {
 const svg = (body, size = 16) =>
   `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
 const ICON = {
+  // Four study cells: the course tab on phones.
+  cells: svg('<rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1.2"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1.2"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1.2"/><rect x="9" y="9" width="4.5" height="4.5" rx="1.2"/>', 18),
   pulse: svg('<path d="M2 8h2.4l1.7-4.5 3.4 9 1.7-4.5H14"/>', 15),
   // A toothed cog: the old ring-of-rays gear read as a sun next to the theme toggle.
   gear: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>',
@@ -168,7 +170,7 @@ function jobPill() {
   return state.history.length ? `<span class="count">${state.history.length}</span>` : "";
 }
 
-// Hover rolls a label up and an italic copy in, as in the pill menu.
+// Hover rolls a label up and its copy in from below.
 const roll = (text) => `<span class="roll"><span class="roll_in" data-label="${esc(text)}">${esc(text)}</span></span>`;
 const rolling = (text) => `<span class="label" data-label="${esc(text)}"><span>${esc(text)}</span></span>`;
 
@@ -211,28 +213,38 @@ function renderSidebar() {
       ${me ? `<div class="psep"></div><button class="menu_row danger" role="menuitem" data-signout>${ICON.logout}<span class="grow">退出 Studia</span></button>` : ""}
     </div>` : ""}`);
 
-  // Phones: the same navigation as a pill at the top that opens into a full menu.
-  const live = state.jobs.filter((j) => j.state !== "queued").length;
-  patch($(".pill_cta_wrap"), `<button class="pill_cta" data-go="#/jobs">${roll(live ? `${live} 个进行中` : "任务")}<span class="arrow"></span></button>`);
-  const big = (hash, label, extra = "") => `<button data-go="${hash}" aria-current="${view === hash}">${rolling(label)}${extra ? `<small>${extra}</small>` : ""}</button>`;
-  const menuCourses = !p.logged_in ? [big(`#/login/${p.id}`, `登录 ${p.short}`)]
-    : (state.courses[p.id] || []).map((c) => big(`#/course/${p.id}/${c.id}`, c.name, c.progress == null ? "" : `${esc(c.progress)}%`));
-  patch($(".pill_panel"), `<p class="pill_brand">Studia</p>${platforms}
-    <nav class="pill_nav">${big("#/jobs", "任务", state.jobs.length ? String(state.jobs.length) : "")}
-      <div class="pill_group">${p.logged_in ? "课 程" : esc(p.name)}</div>${menuCourses.join("")}</nav>
-    <div class="pill_foot"><span>${esc(name)} · ${role}</span>
-      <button data-find>查找</button><button data-go="#/settings">设置</button>
-      ${me?.role === "admin" ? `<button data-go="#/admin">管理后台</button>` : ""}
-      <button data-toggle-theme>${night ? "日间模式" : "夜读模式"}</button>
-      ${me ? `<button data-signout>退出</button>` : ""}</div>`);
+  // Phones: a slim top bar with the platforms, three tabs at the bottom, and a tray
+  // that slides up from the tabs for the course list or the account.
+  patch($(".mbar_plat"), platforms);
+  const under = (...prefixes) => prefixes.some((x) => view.startsWith(x));
+  patch($(".mtabs"), `
+    <button class="mtab" data-tray="courses" aria-current="${state.tray === "courses" || (!state.tray && under("#/course", "#/login"))}">${ICON.cells}<span>课程</span></button>
+    <button class="mtab" data-go="#/jobs" aria-current="${!state.tray && view === "#/jobs"}">${ICON.pulse}<span>任务</span>${state.jobs.length ? `<b class="badge">${state.jobs.length}</b>` : ""}</button>
+    <button class="mtab" data-tray="me" aria-current="${state.tray === "me" || (!state.tray && under("#/settings", "#/admin"))}"><span class="avatar">${esc(initial)}</span><span>我的</span></button>`);
+  const row = (attrs, icon, label, extra = "", cls = "") => `<button class="tray_row ${cls}" ${attrs}>${icon}<span class="grow">${esc(label)}</span>${extra}</button>`;
+  let tray = "";
+  if (state.tray === "courses") {
+    const list = !p.logged_in ? [row(`data-go="#/login/${p.id}"`, ICON.login, `登录 ${p.short}`)]
+      : !state.courses[p.id] ? [`<div class="tray_row quiet">正在读取课程…</div>`]
+      : state.courses[p.id].map((c) => row(`data-go="#/course/${p.id}/${c.id}" aria-current="${view === `#/course/${p.id}/${c.id}`}"`, ring(c.progress, COLOR[p.id], 18), c.name,
+        state.jobs.some((j) => j.platform === p.id && j.course === c.id) ? '<span class="live"></span>' : c.progress == null ? "" : `<span class="count">${esc(c.progress)}%</span>`));
+    tray = `<div class="tray_head"><b>${esc(p.name)} 的课程</b><button class="btn small" data-find>查找</button></div>${list.join("") || '<div class="tray_row quiet">没有课程</div>'}`;
+  } else if (state.tray === "me") {
+    tray = `<div class="tray_head"><span class="avatar big">${esc(initial)}</span><span class="who"><b>${esc(name)}</b><small>${role}</small></span></div>
+      ${row('data-go="#/settings"', ICON.gear, "设置")}
+      ${me?.role === "admin" ? row('data-go="#/admin"', ICON.shield, "管理后台") : ""}
+      ${row("data-toggle-theme", night ? ICON.sun : ICON.moon, night ? "日间模式" : "夜读模式")}
+      ${me ? row("data-signout", ICON.logout, "退出 Studia", "", "danger") : ""}`;
+  }
+  if (tray) patch($(".tray_body"), tray);
 }
 
-function setPill(open) {
-  document.body.classList.toggle("pill-open", open);
-  const toggle = $(".pill_toggle");
-  toggle.setAttribute("aria-expanded", open);
-  $(".roll_in", toggle).textContent = $(".roll_in", toggle).dataset.label = open ? "关闭" : "菜单";
+function setTray(which) {
+  state.tray = which || null;
+  document.body.classList.toggle("tray-open", !!state.tray);
+  renderSidebar();
 }
+
 
 /* ---------------------------------------------------------------- page helpers */
 
@@ -1175,8 +1187,9 @@ document.addEventListener("click", (event) => {
   if (state.meOpen && !t.closest("[data-me]")) { state.meOpen = false; renderSidebar(); }
   if (t.closest("[data-me]")) { state.meOpen = !state.meOpen; renderSidebar(); return; }
   if (t.closest("[data-signout]")) { signOut(); return; }
-  if (t.closest("[data-pill]")) { setPill(!document.body.classList.contains("pill-open")); return; }
-  if (t.closest("[data-go], [data-find], [data-switch], [data-signout]")) setPill(false);
+  const trayBtn = t.closest("[data-tray]"); if (trayBtn) { setTray(state.tray === trayBtn.dataset.tray ? null : trayBtn.dataset.tray); return; }
+  if (t.closest("[data-tray-close]")) { setTray(null); return; }
+  if (state.tray && t.closest("[data-go], [data-find], [data-signout]")) setTray(null);
   const sw = t.closest("[data-switch]"); if (sw) { switchPlatform(sw.dataset.switch); return; }
   const target = t.closest("[data-go]"); if (target) { closeSheet(); go(target.dataset.go); }
   if (t.closest("[data-find]")) openFinder();
@@ -1206,7 +1219,7 @@ window.addEventListener("keydown", (event) => {
   if (mod && event.key.toLowerCase() === "k") { event.preventDefault(); openFinder(); return; }
   if (mod && event.key.toLowerCase() === "j") { event.preventDefault(); toggleTheme(); return; }
   if (mod && event.key === ",") { event.preventDefault(); go("#/settings"); return; }
-  if (event.key === "Escape" && document.body.classList.contains("pill-open")) { setPill(false); return; }
+  if (event.key === "Escape" && state.tray) { setTray(null); return; }
   if (event.key === "Escape" && state.meOpen) { state.meOpen = false; renderSidebar(); return; }
   if (event.key === "Escape") { closeSheet(); return; }
   if (mod || event.altKey || event.target.closest("input, textarea, select") || document.body.classList.contains("signed-out")) return;
