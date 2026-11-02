@@ -27,7 +27,8 @@ const svg = (body, size = 16) =>
   `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
 const ICON = {
   pulse: svg('<path d="M2 8h2.4l1.7-4.5 3.4 9 1.7-4.5H14"/>', 15),
-  gear: svg('<circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M3.6 12.4l1.2-1.2M11.2 4.8l1.2-1.2"/>', 15),
+  // A toothed cog: the old ring-of-rays gear read as a sun next to the theme toggle.
+  gear: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>',
   moon: svg('<path d="M13 9.5A5.5 5.5 0 0 1 6.5 3a5.5 5.5 0 1 0 6.5 6.5z"/>', 15),
   sun: svg('<circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/>', 15),
   logout: svg('<path d="M6.5 2.5h-3v11h3M10 5l3 3-3 3M13 8H6"/>', 15),
@@ -73,8 +74,8 @@ async function api(path, { method = "GET", body } = {}) {
 
 const state = {
   platforms: [], courses: {}, papers: {}, units: {}, selected: {},
-  jobs: [], runs: {}, focus: null, jobLimit: 4, history: [], view: "", loginToken: { cancelled: true }, lastDone: null,
-  current: store.get("studia-platform", ""), menuOpen: false, meOpen: false, logFilter: "all", armed: null, editPassword: false,
+  jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, lastDone: null,
+  current: store.get("studia-platform", ""), meOpen: false, adminTab: "overview", logFilter: "all", armed: null, editPassword: false,
 };
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
 const runOf = (id) => (state.runs[id] = state.runs[id] || freshRun());
@@ -85,7 +86,7 @@ function blocker(pid, cid, type) {
   for (const o of state.jobs) {
     if (GROUP[jobType(o)] !== GROUP[type] || o.platform !== pid) continue;
     if (o.course === cid) return o.state === "queued" ? `正在排队（${o.title}）` : `正在${o.title}…`;
-    if (pid === "zhs" && GROUP[type] === "learn") return `智慧树一次只能播一个视频，等「${o.course_name}」的${o.title}结束`;
+    if (pid === "zhs" && GROUP[type] === "learn" && !state.zhsParallel) return `智慧树一次只能播一个视频，等「${o.course_name}」的${o.title}结束`;
   }
   return "";
 }
@@ -156,7 +157,6 @@ function homeOf(p) {
 }
 function switchPlatform(pid, navigate = true) {
   state.current = pid;
-  state.menuOpen = false;
   store.set("studia-platform", pid);
   if (navigate) go(homeOf(platformOf(pid)));
   else renderSidebar();
@@ -168,47 +168,70 @@ function jobPill() {
   return state.history.length ? `<span class="count">${state.history.length}</span>` : "";
 }
 
+// Hover rolls a label up and an italic copy in, as in the pill menu.
+const roll = (text) => `<span class="roll"><span class="roll_in" data-label="${esc(text)}">${esc(text)}</span></span>`;
+const rolling = (text) => `<span class="label" data-label="${esc(text)}"><span>${esc(text)}</span></span>`;
+
 function renderSidebar() {
   const p = currentPlatform();
   if (!p) return;
   const view = state.view;
   const item = (hash, icon, label, extra = "", cls = "") =>
-    `<button class="nav_item ${cls}" data-go="${hash}" aria-current="${view === hash}">${icon}<span class="label">${esc(label)}</span>${extra}</button>`;
+    `<button class="nav_item ${cls}" data-go="${hash}" aria-current="${view === hash}">${icon}${rolling(label)}${extra}</button>`;
+  const platforms = `<div class="plat_seg" role="tablist">${state.platforms.map((x, i) =>
+    `<button role="tab" aria-selected="${x.id === p.id}" data-switch="${x.id}" title="${esc(platformStatus(x))} · ⌘${i + 1}">${esc(x.short)}${
+      state.jobs.some((j) => j.platform === x.id) ? '<i class="busy"></i>' : x.logged_in ? "" : '<i class="out"></i>'}</button>`).join("")}</div>`;
+  patch($(".switcher_wrap"), platforms);
 
-  patch($(".switcher_wrap"), `
-    <button class="switch" data-menu aria-haspopup="menu" aria-expanded="${state.menuOpen}">
-      <span class="plat ${p.id}">${INITIAL[p.id]}</span><span class="who"><b>${esc(p.name)}</b><small>${esc(platformStatus(p))}</small></span><span class="chev">${ICON.updown}</span></button>
-    ${state.menuOpen ? `<div class="menu" role="menu">${state.platforms.map((x, i) => `
-      <button class="menu_row" role="menuitem" data-switch="${x.id}"><span class="plat ${x.id}">${INITIAL[x.id]}</span>
-        <span class="who"><b>${esc(x.name)}</b><small>${esc(platformStatus(x))}</small></span>
-        ${state.jobs.some((j) => j.platform === x.id) ? '<span class="live">进行中</span>' : ""}
-        ${x.id === p.id ? `<span class="tick">${ICON.tick}</span>` : `<span class="kbd">⌘${i + 1}</span>`}</button>`).join("")}</div>` : ""}`);
-
-  let html = item("#/jobs", ICON.pulse, "任务", jobPill());
-  if (session.user?.role === "admin") html += item("#/admin", ICON.shield, "管理");
-  html += `<div class="nav_label">${p.logged_in ? "课程" : esc(p.short)}<span class="kbd">⌘K</span></div>`;
-  if (!p.logged_in) html += item(`#/login/${p.id}`, ICON.login, `登录${/^[A-Za-z]/.test(p.short) ? " " : ""}${p.short}`);
-  else if (!state.courses[p.id]) html += `<div class="nav_item quiet"><span class="label">正在读取课程…</span></div>`;
-  else html += state.courses[p.id].map((c) => {
+  const courses = [];
+  if (!p.logged_in) courses.push(item(`#/login/${p.id}`, ICON.login, `登录${/^[A-Za-z]/.test(p.short) ? " " : ""}${p.short}`));
+  else if (!state.courses[p.id]) courses.push(`<div class="nav_item quiet"><span class="label">正在读取课程…</span></div>`);
+  else courses.push(...state.courses[p.id].map((c) => {
     const busy = state.jobs.some((j) => j.platform === p.id && j.course === c.id);
     return item(`#/course/${p.id}/${c.id}`, ring(c.progress, COLOR[p.id]), c.name,
       busy ? '<span class="live"></span>' : c.progress == null ? "" : `<span class="count">${esc(c.progress)}%</span>`);
-  }).join("") || `<div class="nav_item quiet"><span class="label">没有课程</span></div>`;
-  patch($(".nav"), html);
+  }));
+  if (!courses.length) courses.push(`<div class="nav_item quiet"><span class="label">没有课程</span></div>`);
+  patch($(".nav"), item("#/jobs", ICON.pulse, "任务", jobPill())
+    + `<div class="nav_label">${p.logged_in ? "课程" : esc(p.short)}<span class="kbd">⌘K</span></div>` + courses.join(""));
 
+  // One account button at the bottom; settings, the admin console, theme and sign-out live in its menu.
   const me = session.user;
   const night = document.documentElement.dataset.theme === "night";
-  patch($(".side_foot"), (me
-    ? `<button class="me" data-me aria-haspopup="menu" aria-expanded="${state.meOpen}"><span class="avatar">${esc(me.username.slice(0, 1).toUpperCase())}</span><span class="label">${esc(me.username)}</span></button>
-       ${state.meOpen ? `<div class="menu me_menu" role="menu">
-         <div class="me_head"><span class="avatar big">${esc(me.username.slice(0, 1).toUpperCase())}</span><span class="who"><b>${esc(me.username)}</b><small>${me.role === "admin" ? "管理员" : "成员"}</small></span></div>
-         <button class="menu_row" role="menuitem" data-go="#/settings/account">${ICON.key}<span class="grow">账号与密码</span></button>
-         ${me.role === "admin" ? `<button class="menu_row" role="menuitem" data-go="#/admin">${ICON.shield}<span class="grow">管理</span></button>` : ""}
-         <div class="psep"></div>
-         <button class="menu_row danger" role="menuitem" data-signout>${ICON.logout}<span class="grow">退出 Studia</span></button></div>` : ""}`
-    : `<span class="me static" title="本机模式：只有这台电脑能访问"><span class="avatar">本</span><span class="label">本机</span></span>`)
-    + `<button class="icon_btn" data-toggle-theme title="${night ? "日间模式" : "夜读模式"} ⌘J" aria-label="切换日间 / 夜读模式">${night ? ICON.sun : ICON.moon}</button>
-       <button class="icon_btn" data-go="#/settings" title="设置" aria-label="设置">${ICON.gear}</button>`);
+  const name = me ? me.username : "本机";
+  const initial = me ? me.username.slice(0, 1).toUpperCase() : "本";
+  const role = me ? (me.role === "admin" ? "管理员" : "成员") : "只有这台电脑能访问";
+  patch($(".side_foot"), `<button class="me" data-me aria-haspopup="menu" aria-expanded="${state.meOpen}">
+      <span class="avatar">${esc(initial)}</span><span class="who"><b>${esc(name)}</b><small>${role}</small></span>
+      <span class="chev">${ICON.updown}</span></button>
+    ${state.meOpen ? `<div class="menu me_menu" role="menu">
+      <button class="menu_row" role="menuitem" data-go="#/settings">${ICON.gear}<span class="grow">设置</span><span class="kbd">⌘,</span></button>
+      ${me?.role === "admin" ? `<button class="menu_row" role="menuitem" data-go="#/admin">${ICON.shield}<span class="grow">管理后台</span></button>` : ""}
+      <button class="menu_row" role="menuitem" data-toggle-theme>${night ? ICON.sun : ICON.moon}<span class="grow">${night ? "日间模式" : "夜读模式"}</span><span class="kbd">⌘J</span></button>
+      ${me ? `<div class="psep"></div><button class="menu_row danger" role="menuitem" data-signout>${ICON.logout}<span class="grow">退出 Studia</span></button>` : ""}
+    </div>` : ""}`);
+
+  // Phones: the same navigation as a pill at the top that opens into a full menu.
+  const live = state.jobs.filter((j) => j.state !== "queued").length;
+  patch($(".pill_cta_wrap"), `<button class="pill_cta" data-go="#/jobs">${roll(live ? `${live} 个进行中` : "任务")}<span class="arrow"></span></button>`);
+  const big = (hash, label, extra = "") => `<button data-go="${hash}" aria-current="${view === hash}">${rolling(label)}${extra ? `<small>${extra}</small>` : ""}</button>`;
+  const menuCourses = !p.logged_in ? [big(`#/login/${p.id}`, `登录 ${p.short}`)]
+    : (state.courses[p.id] || []).map((c) => big(`#/course/${p.id}/${c.id}`, c.name, c.progress == null ? "" : `${esc(c.progress)}%`));
+  patch($(".pill_panel"), `<p class="pill_brand">Studia</p>${platforms}
+    <nav class="pill_nav">${big("#/jobs", "任务", state.jobs.length ? String(state.jobs.length) : "")}
+      <div class="pill_group">${p.logged_in ? "课 程" : esc(p.name)}</div>${menuCourses.join("")}</nav>
+    <div class="pill_foot"><span>${esc(name)} · ${role}</span>
+      <button data-find>查找</button><button data-go="#/settings">设置</button>
+      ${me?.role === "admin" ? `<button data-go="#/admin">管理后台</button>` : ""}
+      <button data-toggle-theme>${night ? "日间模式" : "夜读模式"}</button>
+      ${me ? `<button data-signout>退出</button>` : ""}</div>`);
+}
+
+function setPill(open) {
+  document.body.classList.toggle("pill-open", open);
+  const toggle = $(".pill_toggle");
+  toggle.setAttribute("aria-expanded", open);
+  $(".roll_in", toggle).textContent = $(".roll_in", toggle).dataset.label = open ? "关闭" : "菜单";
 }
 
 /* ---------------------------------------------------------------- page helpers */
@@ -315,106 +338,141 @@ document.addEventListener("mouseover", (event) => {
 /* ---------------------------------------------------------------- views */
 
 let adminTimer = 0;
+const ADMIN_TABS = [["overview", "概览"], ["jobs", "任务"], ["people", "用户与邀请"], ["site", "站点设置"], ["logs", "日志"]];
 const VIEWS = {
-  async admin(refresh = false) {
+  async admin(refresh = false, tab = state.adminTab) {
     clearTimeout(adminTimer);
-    const head = `<h1 class="title">管理</h1><p class="sub">全站任务、每人任务上限、账号和邀请码、日志导出。</p>`;
-    // Show the page at once; the five lists fill it in when they arrive.
-    if (!refresh && !$("[data-save-limit]", page)) setPage(`${head}<div class="empty">正在读取…</div>`);
-    let users, invites, memory, jobs, settings;
-    try {
-      [users, invites, memory, jobs, settings] = await Promise.all(["users", "invites", "memory", "jobs", "settings"].map((x) => api(`/api/admin/${x}`)));
-    } catch (error) { if (!refresh) setPage(`${head}<div class="empty">${esc(error.message)}</div>`); return; }
-    if (state.view !== "#/admin") return;
-    users = users.users; invites = invites.invites; jobs = jobs.jobs;
-    const nameOf = (uid) => users.find((u) => u.id === uid)?.username || "—";
-    const inviteState = { open: ["blue", "可用"], used: ["", "已使用"], expired: ["", "已过期"] };
+    tab = ADMIN_TABS.some(([k]) => k === tab) ? tab : "overview";
+    state.adminTab = tab;
+    const tabs = `<div class="tabs" role="tablist">${ADMIN_TABS.map(([k, label]) =>
+      `<button class="tab" role="tab" aria-selected="${k === tab}" data-go="#/admin/${k}">${label}</button>`).join("")}</div>`;
+    const head = `<h1 class="title">管理后台</h1><p class="sub">整个站点的任务、账号和设置，只有管理员能看到。</p>${tabs}`;
+    // Show the tab at once; its lists fill it in when they arrive.
+    if (!refresh) {
+      // Switching tabs inside the console swaps the content in place; arriving from elsewhere animates.
+      quiet = state.view === "#/admin" && Boolean(page.querySelector('.tabs [data-go^="#/admin/"]'));
+      setPage(`${head}<div class="empty">正在读取…</div>`);
+      quiet = false;
+    }
+    const need = { overview: ["users", "jobs", "memory"], jobs: ["jobs"], people: ["users", "invites"], site: ["settings"], logs: [] }[tab];
+    let data;
+    try { data = Object.fromEntries(await Promise.all(need.map(async (x) => [x, await api(`/api/admin/${x}`)]))); }
+    catch (error) { if (!refresh) setPage(`${head}<div class="empty">${esc(error.message)}</div>`); return; }
+    if (state.view !== "#/admin" || state.adminTab !== tab) return;
+    const users = data.users?.users || [], jobs = data.jobs?.jobs || [];
     const running = jobs.filter((j) => j.state === "running").length;
-    const pad2 = (n) => String(n).padStart(2, "0");
-    const local = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-    const today = new Date(); today.setHours(0, 0, 0, 0);
-    const kept = (name, fallback) => $(`[name="${name}"]`, page)?.value || fallback;
+    const jobRows = (list) => `<div class="runs">${list.map((j) => `<div class="run">${j.state === "queued" ? ICON.waiting : ICON.running}
+        <span class="t1">${esc(j.username)} · ${esc(j.title)} · ${esc(j.course_name)}<small>${esc(platformOf(j.platform)?.short || j.platform)} · 开始于 ${ago(j.started)}</small></span>
+        <span class="fix"><button class="btn small danger" data-stop-job="${esc(j.user_id)}/${esc(j.id)}">停止</button></span>
+        <span class="state ${j.state === "queued" ? "waiting" : "running"}">${j.state === "queued" ? "排队中" : "运行中"}<span class="mono">${duration(Date.now() / 1000 - j.started)}</span></span>
+        <span class="when"></span></div>`).join("") || `<div class="run"><span></span><span class="t1"><small>现在没有任务在运行</small></span></div>`}</div>`;
+    let body = "";
+    if (tab === "overview") {
+      const memory = data.memory;
+      body = `<dl class="ledger">
+          <div><dt>运行中</dt><dd><span class="big">${running}</span><span class="note">个任务</span></dd></div>
+          <div><dt>排队</dt><dd><span class="big">${jobs.length - running}</span><span class="note">个任务</span></dd></div>
+          <div><dt>用户</dt><dd><span class="big">${users.length}</span><span class="note">人 · ${users.filter((u) => u.jobs?.length).length} 人在用</span></dd></div>
+          <div><dt>答案记忆</dt><dd><span class="big">${memory.questions + memory.mooc.questions}</span><span class="note">题</span></dd></div>
+        </dl>
+        <div class="section"><h3>正在运行</h3><button class="link" data-go="#/admin/jobs">全部任务 ›</button></div>
+        ${jobRows(jobs.filter((j) => j.state === "running").slice(0, 5))}
+        <div class="section"><h3>共享答案记忆</h3><span class="aside">同一门课的试卷之间共享，命中的题不再调用 AI</span></div>
+        <div class="models"><div class="model plain"><span class="m1"><b>智慧树 · ${memory.questions} 题</b><span class="pill blue">${memory.confirmed} 题已确认正确</span>
+          <small class="sans">交卷后平台判定的对错：对的直接用、错的避开。</small></span></div>
+          <div class="model plain"><span class="m1"><b>MOOC · ${memory.mooc.questions} 题</b><span class="pill blue">平台公布的标准答案</span>
+          <small class="sans">交卷后平台公布的标准答案；单选、多选、判断题。</small></span></div></div>`;
+    } else if (tab === "jobs") {
+      body = `<div class="section"><h3>全站任务</h3><span class="aside">${running} 个运行中 · ${jobs.length - running} 个排队 · 每 5 秒刷新</span></div>${jobRows(jobs)}`;
+    } else if (tab === "people") {
+      const invites = data.invites.invites;
+      const nameOf = (uid) => users.find((u) => u.id === uid)?.username || "—";
+      const inviteState = { open: ["blue", "可用"], used: ["", "已使用"], expired: ["", "已过期"] };
+      body = `<div class="section"><h3>用户</h3><span class="aside">${users.length} 人</span></div>
+        <div class="models">${users.map((u) => `<div class="model"><span class="avatar big">${esc(u.username.slice(0, 1).toUpperCase())}</span>
+            <span class="m1"><b>${esc(u.username)}</b>${u.role === "admin" ? '<span class="pill blue">管理员</span>' : ""}${u.disabled ? '<span class="pill red">已停用</span>' : ""}<span class="pill">同时 ${u.job_limit} 个${u.max_jobs ? "（单独设置）" : ""}</span>
+            <small class="sans">${u.jobs?.length ? u.jobs.map((j) => `${esc(j.title)} · ${esc(j.course_name)}${j.state === "queued" ? "（排队）" : ""}`).join("；") : u.last_login ? `上次登录 ${ago(u.last_login)}` : "还没登录过"}</small></span><span></span>
+            <span class="row_btns">${u.jobs?.length ? `<button class="btn small danger" data-stop-user="${u.id}">停止全部任务</button>` : ""}
+              <button class="btn small" data-user-limit="${u.id}" data-current="${u.max_jobs || ""}">任务上限</button>
+              <button class="btn small" data-reset="${u.id}">重置密码</button>
+              ${u.id === session.user.id ? "" : u.disabled ? `<button class="btn small" data-enable="${u.id}">启用</button>` : `<button class="btn small danger" data-disable="${u.id}">停用</button>`}</span></div>`).join("")}</div>
+        <div class="section"><h3>邀请码</h3><button class="link" data-invite>＋ 生成邀请码</button></div>
+        <p class="hint">把邀请码发给对方，对方在登录页选「用邀请码注册」。每个邀请码只能用一次，7 天后过期。</p>
+        <div class="models">${invites.map((i) => `<div class="model plain"><span class="m1"><b><code>${esc(i.code)}</code></b><span class="pill ${inviteState[i.state][0]}">${inviteState[i.state][1]}</span>
+            <small class="sans">${i.used_by ? `${esc(nameOf(i.used_by))} 已注册` : `创建于 ${ago(i.created)} · ${new Date(i.expires * 1000).toLocaleDateString()} 过期`}</small></span>
+          <span class="row_btns">${i.state === "open" ? `<button class="btn small" data-copy="${esc(i.code)}">复制</button><button class="btn small danger" data-revoke="${esc(i.code)}">作废</button>` : ""}</span></div>`).join("")
+          || `<div class="model plain"><span class="m1"><small class="sans">还没有邀请码</small></span></div>`}</div>`;
+    } else if (tab === "site") {
+      const settings = data.settings;
+      const kept = (name, fallback) => $(`[name="${name}"]`, page)?.value || fallback;
+      state.zhsParallel = settings.zhs_parallel_study;
+      body = `<div class="section"><h3>任务上限</h3></div>
+        <p class="hint">每个人同时最多运行几个任务，多出的会排队，等自己前面的任务结束后自动开始。可以在「用户与邀请」里给某个人单独设置。用户自己只能在设置里调学习和答题的并发数。</p>
+        <div class="models"><div class="model plain"><span class="m1"><b>默认每人同时 <input class="inline_num" type="number" min="1" max="20" name="max_jobs" value="${esc(kept("max_jobs", settings.max_jobs))}"> 个任务</b>
+            <small class="sans">4 核 4G 的服务器，每人 4 个、6 个人同时跑是可以的；答题多的话，让大家把答题并发调到 3–4。</small></span>
+          <span class="row_btns"><button class="btn small primary" data-save-limit>保存</button></span></div></div>
+        <div class="section"><h3>智慧树</h3></div>
+        <div class="models"><div class="model plain"><span class="m1"><b>不同课程可以同时自动学习</b><span class="pill ${settings.zhs_parallel_study ? "wait" : ""}">${settings.zhs_parallel_study ? "已开启" : "已关闭"}</span>
+            <small class="sans">关闭时，一个智慧树账号同一时间只有一门课在学习。开启后不同课程可以同时学习，每门课里仍然一个视频一个视频按 1.5 倍速播放；但平台会看到这个账号同时在播多个视频，可能判定为多窗口学习，导致学习时长不计、出验证码或被标记异常。答题不受这个开关影响。</small></span>
+          <span class="row_btns"><button class="btn small ${settings.zhs_parallel_study ? "" : "danger"}" data-zhs-parallel="${settings.zhs_parallel_study ? "off" : "on"}">${settings.zhs_parallel_study ? "关闭" : "开启"}</button></span></div></div>`;
+    } else {
+      const pad2 = (n) => String(n).padStart(2, "0");
+      const local = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      body = `<div class="section"><h3>日志导出</h3></div>
+        <p class="hint">导出一段时间里的日志，下载为文本文件，最长 92 天。运行日志是所有人任务的过程记录（每行标着用户和任务编号，已隐去密码和令牌）；操作记录是登录、注册和管理员操作。</p>
+        <div class="models"><div class="model plain log_export"><span class="log_range">
+            <label>从 <input type="datetime-local" name="log_from" value="${esc(local(today))}"></label>
+            <label>到 <input type="datetime-local" name="log_to" value="${esc(local(new Date()))}"></label>
+            <label>类型 <select name="log_kind"><option value="app">运行日志</option><option value="audit">操作记录</option></select></label></span>
+          <span class="row_btns"><button class="btn small primary" data-export-logs>导出</button></span></div></div>`;
+    }
     quiet = true;
-    setPage(`${head}
-      <div class="section"><h3>全站任务</h3><span class="aside">${running} 个运行中 · ${jobs.length - running} 个排队 · 每 5 秒刷新</span></div>
-      <div class="runs">${jobs.map((j) => `<div class="run">${j.state === "queued" ? ICON.waiting : ICON.running}
-          <span class="t1">${esc(j.username)} · ${esc(j.title)} · ${esc(j.course_name)}<small>${esc(platformOf(j.platform)?.short || j.platform)} · 开始于 ${ago(j.started)}</small></span>
-          <span class="fix"><button class="btn small danger" data-stop-job="${esc(j.user_id)}/${esc(j.id)}">停止</button></span>
-          <span class="state ${j.state === "queued" ? "waiting" : "running"}">${j.state === "queued" ? "排队中" : "运行中"}<span class="mono">${duration(Date.now() / 1000 - j.started)}</span></span>
-          <span class="when"></span></div>`).join("") || `<div class="run"><span></span><span class="t1"><small>现在没有任务在运行</small></span></div>`}</div>
-
-      <div class="section"><h3>任务上限</h3></div>
-      <p class="hint">每个人同时最多运行几个任务，多出的会排队，等自己前面的任务结束后自动开始。可以在下面的用户列表里给某个人单独设置。用户自己只能在设置里调学习和答题的并发数，不能改这里。</p>
-      <div class="models"><div class="model plain"><span class="m1"><b>默认每人同时 <input class="inline_num" type="number" min="1" max="20" name="max_jobs" value="${esc(kept("max_jobs", settings.max_jobs))}"> 个任务</b>
-          <small class="sans">4 核 4G 的服务器，每人 4 个、6 个人同时跑是可以的；答题多的话，让大家把答题并发调到 3–4。</small></span>
-        <span class="row_btns"><button class="btn small primary" data-save-limit>保存</button></span></div></div>
-
-      <div class="section"><h3>用户</h3><span class="aside">${users.length} 人</span></div>
-      <div class="models">${users.map((u) => `<div class="model"><span class="avatar big">${esc(u.username.slice(0, 1).toUpperCase())}</span>
-          <span class="m1"><b>${esc(u.username)}</b>${u.role === "admin" ? '<span class="pill blue">管理员</span>' : ""}${u.disabled ? '<span class="pill red">已停用</span>' : ""}<span class="pill">同时 ${u.job_limit} 个${u.max_jobs ? "（单独设置）" : ""}</span>
-          <small class="sans">${u.jobs?.length ? u.jobs.map((j) => `${esc(j.title)} · ${esc(j.course_name)}${j.state === "queued" ? "（排队）" : ""}`).join("；") : u.last_login ? `上次登录 ${ago(u.last_login)}` : "还没登录过"}</small></span><span></span>
-          <span class="row_btns">${u.jobs?.length ? `<button class="btn small danger" data-stop-user="${u.id}">停止全部任务</button>` : ""}
-            <button class="btn small" data-user-limit="${u.id}" data-current="${u.max_jobs || ""}">任务上限</button>
-            <button class="btn small" data-reset="${u.id}">重置密码</button>
-            ${u.id === session.user.id ? "" : u.disabled ? `<button class="btn small" data-enable="${u.id}">启用</button>` : `<button class="btn small danger" data-disable="${u.id}">停用</button>`}</span></div>`).join("")}</div>
-
-      <div class="section"><h3>邀请码</h3><button class="link" data-invite>＋ 生成邀请码</button></div>
-      <p class="hint">把邀请码发给对方，对方在登录页选「用邀请码注册」。每个邀请码只能用一次，7 天后过期。</p>
-      <div class="models">${invites.map((i) => `<div class="model plain"><span class="m1"><b><code>${esc(i.code)}</code></b><span class="pill ${inviteState[i.state][0]}">${inviteState[i.state][1]}</span>
-          <small class="sans">${i.used_by ? `${esc(nameOf(i.used_by))} 已注册` : `创建于 ${ago(i.created)} · ${new Date(i.expires * 1000).toLocaleDateString()} 过期`}</small></span>
-        <span class="row_btns">${i.state === "open" ? `<button class="btn small" data-copy="${esc(i.code)}">复制</button><button class="btn small danger" data-revoke="${esc(i.code)}">作废</button>` : ""}</span></div>`).join("")
-        || `<div class="model plain"><span class="m1"><small class="sans">还没有邀请码</small></span></div>`}</div>
-
-      <div class="section"><h3>共享答案记忆</h3><span class="aside">命中的题直接用，不再调用 AI</span></div>
-      <div class="models"><div class="model plain"><span class="m1"><b>智慧树 · ${memory.questions} 题</b><span class="pill blue">${memory.confirmed} 题已确认正确</span>
-        <small class="sans">交卷后平台判定的对错，在同一门课的所有试卷之间共享：对的直接用、错的避开。</small></span></div>
-        <div class="model plain"><span class="m1"><b>MOOC · ${memory.mooc.questions} 题</b><span class="pill blue">平台公布的标准答案</span>
-        <small class="sans">交卷后平台公布的标准答案，在同一门课（同一个班）的所有试卷之间共享；单选、多选、判断题。</small></span></div></div>
-
-      <div class="section"><h3>日志导出</h3></div>
-      <p class="hint">导出一段时间里的日志，下载为文本文件。运行日志是所有人任务的过程记录（已隐去密码和令牌）；操作记录是登录、注册和管理员操作。</p>
-      <div class="models"><div class="model plain log_export"><span class="log_range">
-          <label>从 <input type="datetime-local" name="log_from" value="${esc(kept("log_from", local(today)))}"></label>
-          <label>到 <input type="datetime-local" name="log_to" value="${esc(kept("log_to", local(new Date())))}"></label>
-          <label>类型 <select name="log_kind"><option value="app">运行日志</option><option value="audit" ${kept("log_kind", "") === "audit" ? "selected" : ""}>操作记录</option></select></label></span>
-        <span class="row_btns"><button class="btn small primary" data-export-logs>导出</button></span></div></div>`);
+    setPage(head + body);
     quiet = false;
-    const act = async (path, body, message) => {
-      try { await api(path, { method: "POST", body: body || {} }); toast(message); VIEWS.admin(true); } catch (e) { toast(e.message); }
+    const act = async (path, payload, message) => {
+      try { await api(path, { method: "POST", body: payload || {} }); toast(message); VIEWS.admin(true, tab); } catch (e) { toast(e.message); }
     };
-    $("[data-invite]", page).onclick = async () => {
-      try { const { code } = await api("/api/admin/invites", { method: "POST", body: { days: 7 } }); navigator.clipboard?.writeText(code).catch(() => {}); toast(`邀请码 ${code} 已复制`); VIEWS.admin(true); }
+    const on = (selector, handler) => page.querySelectorAll(selector).forEach((el) => (el.onclick = () => handler(el)));
+    on("[data-invite]", async () => {
+      try { const { code } = await api("/api/admin/invites", { method: "POST", body: { days: 7 } }); navigator.clipboard?.writeText(code).catch(() => {}); toast(`邀请码 ${code} 已复制`); VIEWS.admin(true, tab); }
       catch (e) { toast(e.message); }
-    };
-    $("[data-save-limit]", page).onclick = () => act("/api/admin/settings", { max_jobs: Number($('[name="max_jobs"]', page).value) }, "已保存，马上生效");
-    $("[data-export-logs]", page).onclick = () => {
+    });
+    on("[data-save-limit]", () => act("/api/admin/settings", { max_jobs: Number($('[name="max_jobs"]', page).value) }, "已保存，马上生效"));
+    on("[data-zhs-parallel]", (el) => {
+      const enable = el.dataset.zhsParallel === "on";
+      if (enable && !el.classList.contains("armed")) { el.classList.add("armed"); el.textContent = "确认开启"; return; }
+      act("/api/admin/settings", { zhs_parallel_study: enable }, enable ? "已开启，新开的智慧树学习任务生效" : "已关闭");
+    });
+    on("[data-export-logs]", () => {
       const from = new Date($('[name="log_from"]', page).value).getTime() / 1000;
       const to = new Date($('[name="log_to"]', page).value).getTime() / 1000;
       if (!(from < to)) { toast("请选择正确的时间段"); return; }
       location.href = `/api/admin/logs?kind=${$('[name="log_kind"]', page).value}&from=${Math.floor(from)}&to=${Math.ceil(to)}`;
-    };
-    page.querySelectorAll("[data-stop-job]").forEach((el) => (el.onclick = () => act(`/api/admin/users/${el.dataset.stopJob.replace("/", "/jobs/")}/stop`, null, "已发出停止指令")));
-    page.querySelectorAll("[data-user-limit]").forEach((el) => (el.onclick = () => {
+    });
+    on("[data-stop-job]", (el) => act(`/api/admin/users/${el.dataset.stopJob.replace("/", "/jobs/")}/stop`, null, "已发出停止指令"));
+    on("[data-user-limit]", (el) => {
       const value = window.prompt("这个人同时最多运行几个任务（1–20）？留空表示跟随默认值。", el.dataset.current);
       if (value !== null) act(`/api/admin/users/${el.dataset.userLimit}/limit`, { max_jobs: value.trim() }, "已保存，马上生效");
-    }));
-    page.querySelectorAll("[data-copy]").forEach((el) => (el.onclick = () => { navigator.clipboard?.writeText(el.dataset.copy).then(() => toast("已复制"), () => toast(el.dataset.copy)); }));
-    page.querySelectorAll("[data-revoke]").forEach((el) => (el.onclick = () => act(`/api/admin/invites/${el.dataset.revoke}/revoke`, null, "邀请码已作废")));
-    page.querySelectorAll("[data-stop-user]").forEach((el) => (el.onclick = () => act(`/api/admin/users/${el.dataset.stopUser}/stop`, null, "已发出停止指令")));
-    page.querySelectorAll("[data-enable]").forEach((el) => (el.onclick = () => act(`/api/admin/users/${el.dataset.enable}/enable`, null, "已启用")));
-    page.querySelectorAll("[data-disable]").forEach((el) => (el.onclick = () => {
+    });
+    on("[data-copy]", (el) => navigator.clipboard?.writeText(el.dataset.copy).then(() => toast("已复制"), () => toast(el.dataset.copy)));
+    on("[data-revoke]", (el) => act(`/api/admin/invites/${el.dataset.revoke}/revoke`, null, "邀请码已作废"));
+    on("[data-stop-user]", (el) => act(`/api/admin/users/${el.dataset.stopUser}/stop`, null, "已发出停止指令"));
+    on("[data-enable]", (el) => act(`/api/admin/users/${el.dataset.enable}/enable`, null, "已启用"));
+    on("[data-disable]", (el) => {
       if (!el.classList.contains("armed")) { el.classList.add("armed"); el.textContent = "确认停用"; return; }
       act(`/api/admin/users/${el.dataset.disable}/disable`, null, "已停用，对方已被登出");
-    }));
-    page.querySelectorAll("[data-reset]").forEach((el) => (el.onclick = () => {
+    });
+    on("[data-reset]", (el) => {
       const password = window.prompt("输入新密码（至少 8 位）。保存后对方需要用新密码重新登录。");
       if (password) act(`/api/admin/users/${el.dataset.reset}/password`, { password }, "密码已重置");
-    }));
-    // Live view of everyone's jobs; paused while the admin is typing or the tab is hidden.
+    });
+    // Live tabs refresh every 5 seconds; paused while the admin is typing or the page is hidden.
+    if (tab !== "overview" && tab !== "jobs") return;
     const tick = () => {
-      if (state.view !== "#/admin") return;
+      if (state.view !== "#/admin" || state.adminTab !== tab) return;
       if (document.hidden || page.querySelector("input:focus, select:focus, .armed")) adminTimer = setTimeout(tick, 5000);
-      else VIEWS.admin(true);
+      else VIEWS.admin(true, tab);
     };
     adminTimer = setTimeout(tick, 5000);
   },
@@ -465,7 +523,7 @@ const VIEWS = {
     } else {
       setPage(`${head}<p class="sub">${esc(p.name)} 使用职教云账号，通过浏览器授权登录。${where}</p>
         <div class="login_card"><div class="login_status"><div data-status><b>在浏览器中登录</b><p>点下面的按钮会打开职教云登录页，在那里登录完成后，这里会自动继续。</p></div>
-          <button class="btn primary" data-start-login>打开登录页</button></div></div>`);
+          <button class="btn primary" data-start-login>${roll("打开登录页")}</button></div></div>`);
       $("[data-start-login]", page).onclick = () => browserLogin(pid);
     }
   },
@@ -497,7 +555,7 @@ const VIEWS = {
               <label class="auth_field"><span>原密码</span><input name="old" type="password" autocomplete="current-password" required></label>
               <label class="auth_field"><span>新密码</span><input name="new" type="password" autocomplete="new-password" minlength="8" placeholder="至少 8 位" required></label>
               <label class="auth_field"><span>再输一次</span><input name="again" type="password" autocomplete="new-password" minlength="8" required></label>
-              <span class="row_btns"><button type="button" class="btn" data-password-cancel>取消</button><button class="btn primary">保存新密码</button></span>
+              <span class="row_btns"><button type="button" class="btn" data-password-cancel>取消</button><button class="btn primary">${roll("保存新密码")}</button></span>
             </span></form>`
           : `<div class="model plain"><span class="m1"><b>密码</b><small class="sans">修改后，其他设备上的登录会全部退出</small></span>
               <span class="row_btns"><button class="btn small" data-password-edit>修改密码</button></span></div>`}
@@ -545,7 +603,7 @@ const VIEWS = {
         <div class="models"><div class="form_card" style="margin:0;box-shadow:none">
           <div class="field"><label>AI 答题</label><input type="number" min="1" max="8" name="ai" value="${data.concurrency.ai}"></div>
           <div class="field"><label>自动学习</label><input type="number" min="1" max="8" name="study" value="${data.concurrency.study}"></div>
-          <div class="form_btns"><button class="btn primary" data-concurrency>保存</button></div></div></div>
+          <div class="form_btns"><button class="btn primary" data-concurrency>${roll("保存")}</button></div></div></div>
         <div class="section"><h3>外观</h3></div>
         <div class="models"><div class="model plain"><span class="m1"><b>夜读模式</b><small class="sans">深色主题，只替换颜色，不改布局。只记在这个浏览器里。</small></span>
           <button class="btn" data-toggle-theme>切换 <span class="kbd">⌘J</span></button></div></div>`);
@@ -584,7 +642,7 @@ function renderModels(head, models, editing = null) {
       <div class="field"><label>服务地址</label><input name="base_url" value="${esc(m?.base_url || "")}" placeholder="https://api.example.com/v1" required></div>
       <div class="field"><label>模型</label><input name="model" value="${esc(m?.model || "")}" placeholder="例如 deepseek-chat" required></div>
       <div class="field"><label>API Key</label><input name="api_key" type="password" autocomplete="off" ${m ? `placeholder="留空则不修改（当前 ${esc(m.key_hint)}）"` : "required"}></div>
-      <div class="form_btns"><button type="button" class="btn" data-cancel>取消</button><button class="btn primary">${m ? "保存" : "保存并测试"}</button></div>
+      <div class="form_btns"><button type="button" class="btn" data-cancel>取消</button><button class="btn primary">${roll(m ? "保存" : "保存并测试")}</button></div>
     </form>`;
   const row = (m) => {
     if (editing === m.id) return form(m);
@@ -720,7 +778,7 @@ function renderCourse(p, c, tab, full = false) {
     }).join("") || `<div class="empty">这门课没有作业、测验或考试</div>`;
     if (categories.length) body += `<div class="dock"><span class="info">${answerBlock ? esc(answerBlock) : n ? `已选 <b>${n}</b> 份 · 交卷前会再确认一次` : "勾选要作答的试卷"}</span>
       <button class="btn" data-save ${n && !answerBlock ? "" : "disabled"}>仅生成答案</button>
-      <button class="btn primary ${state.armed === k ? "armed" : ""}" data-submit ${n && !answerBlock ? "" : "disabled"}>${state.armed === k ? `再按一次，交 ${n} 份卷` : "AI 作答并交卷"}</button></div>`;
+      <button class="btn primary ${state.armed === k ? "armed" : ""}" data-submit ${n && !answerBlock ? "" : "disabled"}>${roll(state.armed === k ? `再按一次，交 ${n} 份卷` : "AI 作答并交卷")}</button></div>`;
   }
   if (full) setPage(head + body); else { quiet = true; setPage(head + body); quiet = false; }
 
@@ -1056,6 +1114,7 @@ async function refreshState() {
     state.platforms = data.platforms;
     state.history = data.history || [];
     state.jobLimit = data.job_limit || state.jobLimit;
+    state.zhsParallel = Boolean(data.zhs_parallel);
     const live = data.jobs || [];
     for (const job of live) {
       if (state.jobs.some((j) => j.id === job.id)) continue;
@@ -1086,7 +1145,7 @@ function closeFinder() { overlay.classList.remove("open"); }
 function paintFinder() {
   const q = finderInput.value.trim().toLowerCase();
   const match = (text) => !q || text.toLowerCase().includes(q);
-  const pages = [["#/jobs", ICON.pulse, "任务"], ["#/settings", ICON.gear, "设置"], ...(session.user?.role === "admin" ? [["#/admin", ICON.shield, "管理"]] : []),
+  const pages = [["#/jobs", ICON.pulse, "任务"], ["#/settings", ICON.gear, "设置"], ...(session.user?.role === "admin" ? [["#/admin", ICON.shield, "管理后台"]] : []),
     ...state.platforms.map((p) => [homeOf(p), `<span class="dot ${p.id}"></span>`, `切换到 ${p.name}`])]
     .filter(([, , label]) => match(label)).map(([hash, icon, label]) => ({ hash, icon, label, meta: "页面" }));
   const courses = state.platforms.flatMap((p) => (state.courses[p.id] || []).filter((c) => match(c.name))
@@ -1113,13 +1172,11 @@ overlay.addEventListener("click", (event) => { if (event.target === overlay) clo
 
 document.addEventListener("click", (event) => {
   const t = event.target;
-  if (state.menuOpen && !t.closest(".menu, [data-menu]")) { state.menuOpen = false; renderSidebar(); }
   if (state.meOpen && !t.closest("[data-me]")) { state.meOpen = false; renderSidebar(); }
   if (t.closest("[data-me]")) { state.meOpen = !state.meOpen; renderSidebar(); return; }
   if (t.closest("[data-signout]")) { signOut(); return; }
-  if (t.closest("[data-drawer]")) { document.body.classList.toggle("drawer"); return; }
-  if (t.closest("[data-go], [data-find]")) document.body.classList.remove("drawer");
-  if (t.closest("[data-menu]")) { state.menuOpen = !state.menuOpen; renderSidebar(); return; }
+  if (t.closest("[data-pill]")) { setPill(!document.body.classList.contains("pill-open")); return; }
+  if (t.closest("[data-go], [data-find], [data-switch], [data-signout]")) setPill(false);
   const sw = t.closest("[data-switch]"); if (sw) { switchPlatform(sw.dataset.switch); return; }
   const target = t.closest("[data-go]"); if (target) { closeSheet(); go(target.dataset.go); }
   if (t.closest("[data-find]")) openFinder();
@@ -1148,9 +1205,10 @@ window.addEventListener("keydown", (event) => {
   if (mod && ["1", "2", "3"].includes(event.key) && state.platforms[event.key - 1]) { event.preventDefault(); switchPlatform(state.platforms[event.key - 1].id); return; }
   if (mod && event.key.toLowerCase() === "k") { event.preventDefault(); openFinder(); return; }
   if (mod && event.key.toLowerCase() === "j") { event.preventDefault(); toggleTheme(); return; }
-  if (event.key === "Escape" && document.body.classList.contains("drawer")) { document.body.classList.remove("drawer"); return; }
+  if (mod && event.key === ",") { event.preventDefault(); go("#/settings"); return; }
+  if (event.key === "Escape" && document.body.classList.contains("pill-open")) { setPill(false); return; }
   if (event.key === "Escape" && state.meOpen) { state.meOpen = false; renderSidebar(); return; }
-  if (event.key === "Escape") { if (state.menuOpen) { state.menuOpen = false; renderSidebar(); } else closeSheet(); return; }
+  if (event.key === "Escape") { closeSheet(); return; }
   if (mod || event.altKey || event.target.closest("input, textarea, select") || document.body.classList.contains("signed-out")) return;
   if (event.key === "S" && event.shiftKey) { stopJob(focusedJob()?.id); return; }
   if (event.key === "f") { openSheet(); return; }
@@ -1173,7 +1231,7 @@ function route() {
   if (name === "settings") { state.editPassword = false; VIEWS.settings(a); }
   else if (name === "course") VIEWS.course(a, decodeURIComponent(b || ""), c);
   else if (name === "login") VIEWS.login(a);
-  else if (name === "admin" && session.user?.role !== "admin") go(homeOf(currentPlatform()));
+  else if (name === "admin") { if (session.user?.role === "admin") VIEWS.admin(false, a); else go(homeOf(currentPlatform())); }
   else if (VIEWS[name]) VIEWS[name]();
   else go(homeOf(currentPlatform()));
 }
@@ -1225,7 +1283,6 @@ function showAuth(mode = "login") {
     </section>
     <section class="auth_side">
       <form class="auth_card" data-auth novalidate>
-        <div class="brand auth_mobile_brand"><span class="seal">S</span><b>Studia</b></div>
         <h2>${text.title}</h2><p class="auth_lead">${esc(text.lead)}</p>
         ${mode === "setup" ? field("code", "设置码", 'required autocomplete="off" autocapitalize="characters" placeholder="例如 2593-2D9E-D41F"') : ""}
         ${mode === "register" ? field("invite", "邀请码", 'required autocomplete="off" autocapitalize="characters" placeholder="例如 3F2A-91BC-04DE"') : ""}
@@ -1233,7 +1290,7 @@ function showAuth(mode = "login") {
         ${field("password", "密码", `type="password" required autocomplete="${mode === "login" ? "current-password" : "new-password"}" ${mode === "login" ? "" : 'minlength="8" placeholder="至少 8 位"'}`)}
         ${mode === "setup" ? field("again", "再输一次密码", 'type="password" required autocomplete="new-password" minlength="8"') : ""}
         <p class="auth_error" role="alert"></p>
-        <button class="btn primary auth_submit">${text.button}</button>
+        <button class="btn primary auth_submit">${roll(text.button)}</button>
         ${text.switch ? `<p class="auth_note">${text.switch[0]}<button type="button" class="link" data-auth-mode="${text.switch[2]}">${text.switch[1]}</button></p>` : ""}
       </form>
     </section>`;
@@ -1262,14 +1319,14 @@ function showAuth(mode = "login") {
     if (mode === "setup" && body.password !== body.again) { error.textContent = "两次输入的密码不一致"; return; }
     const button = $(".auth_submit", form);
     button.disabled = true;
-    button.textContent = "请稍候…";
+    button.innerHTML = roll("请稍候…");
     try {
       await api(`/api/auth/${mode}`, { method: "POST", body });
       location.reload();
     } catch (failure) {
       error.textContent = failure.message;
       button.disabled = false;
-      button.textContent = text.button;
+      button.innerHTML = roll(text.button);
     }
   };
 }
