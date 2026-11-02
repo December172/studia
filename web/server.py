@@ -522,8 +522,13 @@ class Studia:
         kwargs = {"client": self.client(platform), "course_rows": [row], "on_progress": self.progress_of(job),
                   "cancel_event": job["cancel"], "max_workers": self.store.concurrency()["study"]}
         ai = None
+        captcha_ai = None
         if spec["needs_ai"]:
             ai = kwargs["activity_ai"] = self._ai("MOOC 学习会自动参与讨论和评价，请先在设置里添加 AI 模型")
+        elif platform.id == "zhs":
+            config = self.store.ai_config()
+            if config is not None:
+                captcha_ai = kwargs["captcha_ai"] = AIClient(config)
         if minutes:
             kwargs["review_minutes"] = minutes
         try:
@@ -533,6 +538,8 @@ class Studia:
         finally:
             if ai is not None:
                 ai.session.close()
+            if captcha_ai is not None:
+                captcha_ai.session.close()
         return "今日复习完成" if minutes else "学习完成"
 
     def _answer(self, platform, selected, auto_submit, job):

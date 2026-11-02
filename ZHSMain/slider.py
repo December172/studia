@@ -1,14 +1,9 @@
-"""智慧树人机验证自动通过：网易易盾滑块。
-
-平台在请求过于频繁时由 ableCaptcha 弹出易盾滑块（captchaId 见下）。
-本模块用真实浏览器加载组件、定位缺口、模拟真人拖动，返回 validate 令牌。
-
-注意：智慧树的风控主因是同一账号多实例并发，验证只是结果。
-并发不降下来，通过验证后下一个请求仍会被拦。
-"""
+"""完成易盾拼图或图片点选，返回令牌供智慧树校验。"""
 from __future__ import annotations
 
 import os
+import json
+import math
 import random
 import tempfile
 
@@ -17,6 +12,7 @@ from MoocMain.log import Logger
 logger = Logger(__name__).get_log()
 
 CAPTCHA_ID = "75f9f716460a422f89a628f50fd8cc2b"
+SPACE_CAPTCHA_ID = "4da3050565514a35a50541b0e1f54538"
 LOADER = "https://cstaticdun.126.net/load.min.js"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
@@ -102,8 +98,8 @@ def find_gap(bg, piece):
     return int(best - x0), float(min(0.99, max(0.0, margin)))
 
 
-def solve(cookies, *, page_url, attempts=3, headless=True, timeout=25):
-    """在 page_url 上通过滑块，返回 (validate, cookies)。失败返回 ("", cookies)。"""
+def solve(cookies, *, page_url, captcha_type="space", vision=None, attempts=2, headless=True, timeout=25):
+    """返回 (validate, cookies)；验证令牌仍需提交给智慧树。"""
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as play:
@@ -119,7 +115,7 @@ def solve(cookies, *, page_url, attempts=3, headless=True, timeout=25):
                 if "nosdn" in r.url and r.url.endswith((".png", ".jpg")) else None)
         try:
             for _ in range(attempts):
-                validate = _one_round(page, images, page_url, timeout)
+                validate = _one_round(page, images, page_url, timeout, captcha_type, vision)
                 if validate:
                     return validate, _dump(context.cookies())
             logger.warning("滑块未通过：%s", _safe(page.evaluate("window.__err")))
@@ -128,21 +124,45 @@ def solve(cookies, *, page_url, attempts=3, headless=True, timeout=25):
             browser.close()
 
 
-def _one_round(page, images, page_url, timeout):
-    page.goto(page_url, wait_until="domcontentloaded", timeout=timeout * 1000)
-    page.evaluate("() => { document.body.innerHTML = '<div id=\"cap\"></div>'; }")
+def _one_round(page, images, page_url, timeout, captcha_type, vision):
+    # Keep the learning-page origin without loading its unrelated application or redirects.
+    page.route(page_url, lambda route: route.fulfill(status=200, content_type="text/html",
+                                                       body='<div id="cap"></div>'))
+    try:
+        page.goto(page_url, wait_until="domcontentloaded", timeout=timeout * 1000)
+    finally:
+        page.unroute(page_url)
     page.add_script_tag(url=LOADER)
-    page.add_script_tag(content=_INIT + "boot();")
-    page.wait_for_function("() => window.__state !== 'init'", timeout=timeout * 1000)
+    captcha_id = SPACE_CAPTCHA_ID if captcha_type == "space" else CAPTCHA_ID
+    page.add_script_tag(content=_INIT.replace(CAPTCHA_ID, captcha_id) + "boot();")
+    page.wait_for_function("() => window.__ins || ['loadfail','throw','error'].includes(window.__state)",
+                           timeout=timeout * 1000)
     if page.evaluate("window.__state") in ("loadfail", "throw", "error"):
         logger.warning("滑块组件加载失败：%s", _safe(page.evaluate("window.__err")))
         return ""
     page.evaluate("() => window.__ins.popUp()")
     try:
-        page.wait_for_selector(".yidun_bg-img", timeout=timeout * 1000)
+        page.wait_for_selector(".yidun_modal:visible", timeout=timeout * 1000)
     except Exception:
         logger.warning("滑块面板未出现：%s", _safe(page.evaluate("window.__err")))
         return ""
+    page.wait_for_function("() => { const e = document.querySelector('.yidun--popup'); "
+                           "return e && !e.classList.contains('yidun--loading'); }",
+                           timeout=timeout * 1000)
+    challenge = page.eval_on_selector(".yidun--popup", "e => e.className")
+    if "yidun--space" in challenge:
+        if vision is None:
+            logger.warning("图片验证需要支持视觉输入的 AI 模型")
+            return ""
+        if not _click_image(page, vision, timeout):
+            return ""
+        return _validate(page, timeout)
+
+    if "yidun--jigsaw" not in challenge:
+        logger.warning("暂不支持当前验证方式，需要人工处理")
+        return ""
+
+    page.wait_for_selector(".yidun_bg-img:visible", timeout=timeout * 1000)
     page.wait_for_timeout(600)
 
     box = page.evaluate("""() => {
@@ -165,6 +185,47 @@ def _one_round(page, images, page_url, timeout):
         return ""
     logger.info("滑块缺口 x=%s（置信度 %.2f）", left, confidence)
     _drag(page, box["slider"], float(left))
+    return _validate(page, timeout)
+
+
+def _click_image(page, vision, timeout):
+    """Only the verification dialog is sent to the configured vision provider."""
+    page.wait_for_function("() => !document.querySelector('.yidun--loading')", timeout=timeout * 1000)
+    modal = page.locator(".yidun_modal:visible").first
+    bounds = modal.bounding_box()
+    if not bounds or bounds["width"] <= 0 or bounds["height"] <= 0:
+        return False
+    width, height = round(bounds["width"]), round(bounds["height"])
+    question = {
+        "type": "问答",
+        "title": ("阅读图片中的验证要求，按顺序给出需要点击的目标中心。"
+                  f"图片宽{width}像素、高{height}像素，坐标原点在左上角，x向右、y向下。"
+                  "answer 必须是 [[x,y],...]，每个坐标为像素值；无法确定时 answer 为 null。"),
+    }
+    result = vision.answer(question, images=[("验证图片", "image/png", modal.screenshot())])
+    points = result.get("answer")
+    if isinstance(points, str):
+        try:
+            points = json.loads(points)
+        except ValueError:
+            return False
+    if not isinstance(points, list) or not 1 <= len(points) <= 5:
+        return False
+    # ponytail: at most five targets per challenge; extend if the provider adds longer sequences.
+    for point in points:
+        if (not isinstance(point, (list, tuple)) or len(point) != 2 or
+                any(isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n) for n in point)):
+            return False
+        x, y = point
+        if not (0 <= x < width and 0 <= y < height):
+            return False
+    for x, y in points:
+        page.mouse.click(bounds["x"] + x, bounds["y"] + y)
+        page.wait_for_timeout(350)
+    return True
+
+
+def _validate(page, timeout):
     try:
         page.wait_for_function("() => ['verify','fail','error'].includes(window.__state)",
                                timeout=timeout * 1000)

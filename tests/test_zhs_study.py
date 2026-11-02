@@ -89,6 +89,10 @@ class FakeClient:
             return self.prelearning_queue.pop(0) if len(self.prelearning_queue) > 1 else self.prelearning_queue[0]
         return self.prelearning_default
 
+    def pass_captcha(self, ev, *, vision=None):
+        self._record("pass_captcha", ev=ev, vision=vision)
+        return True
+
     def shared_question_points(self, payload):
         self._record("shared_question_points", payload=payload)
         return {"questionPoint": self.question_points}
@@ -104,12 +108,12 @@ class FakeClient:
     def shared_courseware(self, video_id):
         self._record("shared_courseware", video_id=video_id)
 
-    def shared_save_cache(self, payload):
-        self._record("shared_save_cache", payload=payload)
+    def shared_save_cache(self, payload, **kwargs):
+        self._record("shared_save_cache", payload=payload, **kwargs)
         return None if self.cache_fails else {"code": 0}
 
-    def shared_save_progress(self, payload):
-        self._record("shared_save_progress", payload=dict(payload))
+    def shared_save_progress(self, payload, **kwargs):
+        self._record("shared_save_progress", payload=dict(payload), **kwargs)
         if self.save_progress_errors:
             raise self.save_progress_errors.pop(0)
 
@@ -330,6 +334,32 @@ class StopTest(unittest.TestCase):
 
 
 class RetryTest(unittest.TestCase):
+    def test_prelearning_image_verification_rechecks_before_progress(self):
+        client = FakeClient()
+        client.videos = two_video_course()
+        client.lesson = {"100": {"watchState": 1, "studyTotalTime": 30}}
+        client.prelearning_queue = [
+            {"isSlide": True},
+            {"studiedLessonDto": {"id": 100, "studyTotalTime": 0}},
+        ]
+        run(client, [shared_row()])
+        self.assertEqual(len(client.args_of("pass_captcha")), 1)
+        self.assertEqual(len(client.args_of("shared_prelearning")), 2)
+        self.assertTrue(client.args_of("shared_save_progress"))
+        context = decode_ev(client.args_of("shared_save_progress")[-1]["captcha_ev"]).split(";")
+        self.assertEqual(context[:4], ["5", "7", "42", "101"])
+        self.assertEqual(context[6:8], ["777", "11"])
+
+    def test_prelearning_face_verification_stops_before_progress(self):
+        client = FakeClient()
+        client.videos = two_video_course()
+        client.lesson = {"100": {"watchState": 1, "studyTotalTime": 30}}
+        client.prelearning_default = {"isFace": True}
+        handler = run(client, [shared_row()])
+        self.assertIsInstance(handler.blocked, CaptchaRequired)
+        self.assertFalse(client.args_of("pass_captcha"))
+        self.assertFalse(client.args_of("shared_save_progress"))
+
     def test_multi_window_refreshes_token(self):
         client = FakeClient()
         client.videos = {

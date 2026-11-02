@@ -1,6 +1,7 @@
 """滑块缺口定位自检：用真实易盾图片，识别结果必须稳定且落在已知缺口处。"""
 import os
 import unittest
+from unittest.mock import Mock
 
 import cv2
 
@@ -28,6 +29,20 @@ class GapTest(unittest.TestCase):
         bg, piece = self._images()
         left, confidence = slider.find_gap(bg, piece[:, :, :3])
         self.assertEqual((left, confidence), (0, 0.0))
+
+    def test_image_click_uses_only_dialog_and_rejects_out_of_bounds(self):
+        page = Mock()
+        modal = page.locator.return_value.first
+        modal.bounding_box.return_value = {"x": 30, "y": 40, "width": 320, "height": 200}
+        modal.screenshot.return_value = b"dialog-only"
+        vision = Mock()
+        vision.answer.return_value = {"answer": [[321, 40]]}
+        self.assertFalse(slider._click_image(page, vision, 10))
+        page.mouse.click.assert_not_called()
+        self.assertEqual(vision.answer.call_args.kwargs["images"][0][2], b"dialog-only")
+        vision.answer.return_value = {"answer": [[120, 80]]}
+        self.assertTrue(slider._click_image(page, vision, 10))
+        page.mouse.click.assert_called_once_with(150, 120)
 
 
 if __name__ == "__main__":
