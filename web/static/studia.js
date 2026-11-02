@@ -31,7 +31,6 @@ const svg = (body, size = 16) =>
 const ICON = {
   // Four study cells: the course tab on phones.
   cells: svg('<rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1.2"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1.2"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1.2"/><rect x="9" y="9" width="4.5" height="4.5" rx="1.2"/>', 18),
-  home: svg('<rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/>', 15),
   pulse: svg('<path d="M2 8h2.4l1.7-4.5 3.4 9 1.7-4.5H14"/>', 15),
   // A toothed cog: the old ring-of-rays gear read as a sun next to the theme toggle.
   gear: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>',
@@ -179,9 +178,12 @@ function platformStatus(p) {
   if (!p.logged_in) return "未登录";
   return state.courses[p.id] ? `已登录 · ${state.courses[p.id].length} 门课程` : "已登录";
 }
+const PHONE = matchMedia("(max-width: 860px)");
 function homeOf(p) {
   if (!p.logged_in) return `#/login/${p.id}`;
-  return "#/home";
+  // Phones open the course list (the 课程 tab); the desktop sidebar already lists them, so open the first course.
+  const first = (state.courses[p.id] || [])[0];
+  return PHONE.matches || !first ? "#/home" : `#/course/${p.id}/${first.id}`;
 }
 function switchPlatform(pid, navigate = true) {
   state.current = pid;
@@ -216,7 +218,7 @@ function renderSidebar() {
       busy ? '<span class="live"></span>' : c.progress == null ? "" : `<span class="count">${esc(c.progress)}%</span>`);
   }));
   if (!courses.length) courses.push(`<div class="nav_item quiet"><span class="label">没有课程</span></div>`);
-  patch($(".nav"), item("#/home", ICON.home, "总览") + item("#/jobs", ICON.pulse, "任务", jobPill())
+  patch($(".nav"), item("#/jobs", ICON.pulse, "任务", jobPill())
 
     + `<div class="nav_label">${p.logged_in ? "课程" : esc(p.short)}</div>` + courses.join(""));
 
@@ -241,11 +243,11 @@ function renderSidebar() {
 
   // Phones: three tabs at the bottom; a page one level down (a course, a settings tab) gets a back
   // button in the top bar instead of the logo. The platform switch only sits on the overview.
-  const back = under("#/course") ? ["#/home", "总览"] : under("#/settings", "#/admin") ? ["#/me", "我的"] : null;
+  const back = under("#/course") ? ["#/home", "课程"] : under("#/settings", "#/admin") ? ["#/me", "我的"] : null;
   patch($(".mbar"), back ? `<button class="mback" data-go="${back[0]}">${ICON.back}<span>${back[1]}</span></button><span class="grow"></span>`
     : `<img class="mark" src="icon.svg" alt=""><b>Studia</b><span class="grow"></span>${under("#/home", "#/login") ? platforms : ""}`);
   patch($(".mtabs"), `
-    <button class="mtab" data-go="#/home" aria-current="${under("#/home", "#/course", "#/login")}">${ICON.cells}<span>总览</span></button>
+    <button class="mtab" data-go="#/home" aria-current="${under("#/home", "#/course", "#/login")}">${ICON.cells}<span>课程</span></button>
     <button class="mtab" data-go="#/jobs" aria-current="${view === "#/jobs"}">${ICON.pulse}<span>任务</span>${state.jobs.length ? `<b class="badge">${state.jobs.length}</b>` : ""}</button>
     <button class="mtab" data-go="#/me" aria-current="${under("#/me", "#/settings", "#/admin")}"><span class="avatar">${esc(initial)}</span><span>我的</span></button>`);
 }
@@ -542,7 +544,7 @@ const VIEWS = {
     if (!p.logged_in) return go(`#/login/${p.id}`);
     const list = state.courses[p.id];
     const busy = (list || []).filter((c) => state.jobs.some((j) => j.platform === p.id && j.course === c.id)).length;
-    const head = `<h1 class="title">总览</h1><p class="sub">${esc(p.name)}${list ? ` · ${list.length} 门课程${busy ? ` · ${busy} 门进行中` : ""}` : ""}</p>`;
+    const head = `<h1 class="title">课程</h1><p class="sub">${esc(p.name)}${list ? ` · ${list.length} 门${busy ? ` · ${busy} 门进行中` : ""}` : ""}</p>`;
     if (!list) return setPage(`${head}<div class="empty">正在读取课程…</div>`);
     const card = (c) => {
       const job = state.jobs.find((j) => j.platform === p.id && j.course === c.id);
@@ -556,25 +558,7 @@ const VIEWS = {
           <span class="cc_bar"><span class="bar"><i style="width:${Number(c.progress) || 0}%"></i></span><span class="mono">${c.progress == null ? "—" : `${esc(c.progress)}%`}</span></span>
           <span class="cc_line">${line}</span></span></button>`;
     };
-    // The numbers across this platform's courses; units and papers count once they have loaded.
-    const units = list.flatMap((c) => (unitsOf(key(p.id, c.id)) || []).flatMap((ch) => ch.units));
-    const done = units.filter((u) => u.state === "done").length;
-    const papers = list.flatMap((c) => state.papers[key(p.id, c.id)] || []);
-    const open = papers.filter((x) => x.available && !x.done).length;
-    const full = papers.filter((x) => /满分/.test(x.status)).length;
-    const avg = Math.round(list.reduce((n, c) => n + (Number(c.progress) || 0), 0) / Math.max(1, list.length));
-    const latest = new Map();
-    for (const j of state.history) if (j.platform === p.id && !latest.has(j.course + j.title)) latest.set(j.course + j.title, j);
-    const waiting = [...latest.values()].filter((j) => j.state === "waiting").length;
-    const running = state.jobs.filter((j) => j.platform === p.id).length;
-    const stats = list.length ? `<div class="section"><h3>数据</h3></div>
-      <dl class="stats">
-        <div><dt>平均进度</dt><dd><span class="digits">${[...String(avg)].map((d) => `<i>${d}</i>`).join("")}<small>%</small></span></dd></div>
-        <div><dt>学习单元</dt><dd><span class="num">${done}<small>/${units.length}</small></span><span class="bar"><i style="width:${units.length ? (done / units.length) * 100 : 0}%"></i></span></dd></div>
-        <div><dt>可作答试卷</dt><dd><span class="num pen">${open}</span><small>份${full ? ` · 满分 ${full} 份` : ""}</small></dd></div>
-        <div><dt>任务</dt><dd><span class="num">${running}</span><small>进行中</small>${waiting ? `<button class="live waiting" data-go="#/jobs">${waiting} 个等你操作</button>` : ""}</dd></div>
-      </dl>` : "";
-    setPage(`${head}${stats}${list.length ? `<div class="section"><h3>课程</h3></div><div class="course_cards">${list.map(card).join("")}</div>` : '<div class="empty">这个账号下没有课程</div>'}`);
+    setPage(`${head}${list.length ? `<div class="course_cards">${list.map(card).join("")}</div>` : '<div class="empty">这个账号下没有课程</div>'}`);
   },
 
   me() {
@@ -1242,7 +1226,7 @@ function closeFinder() { overlay.classList.remove("open"); }
 function paintFinder() {
   const q = finderInput.value.trim().toLowerCase();
   const match = (text) => !q || text.toLowerCase().includes(q);
-  const pages = [["#/home", ICON.home, "总览"], ["#/jobs", ICON.pulse, "任务"], ["#/settings", ICON.gear, "设置"], ...(session.user?.role === "admin" ? [["#/admin", ICON.shield, "管理后台"]] : []),
+  const pages = [["#/jobs", ICON.pulse, "任务"], ["#/settings", ICON.gear, "设置"], ...(session.user?.role === "admin" ? [["#/admin", ICON.shield, "管理后台"]] : []),
     ...state.platforms.map((p) => [homeOf(p), `<span class="dot ${p.id}"></span>`, `切换到 ${p.name}`])]
     .filter(([, , label]) => match(label)).map(([hash, icon, label]) => ({ hash, icon, label, meta: "页面" }));
   const courses = state.platforms.flatMap((p) => (state.courses[p.id] || []).filter((c) => match(c.name))
