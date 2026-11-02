@@ -27,7 +27,8 @@ const svg = (body, size = 16) =>
   `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
 const ICON = {
   pulse: svg('<path d="M2 8h2.4l1.7-4.5 3.4 9 1.7-4.5H14"/>', 15),
-  gear: svg('<circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M3.6 12.4l1.2-1.2M11.2 4.8l1.2-1.2"/>', 15),
+  // A toothed cog: the old ring-of-rays gear read as a sun next to the theme toggle.
+  gear: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>',
   moon: svg('<path d="M13 9.5A5.5 5.5 0 0 1 6.5 3a5.5 5.5 0 1 0 6.5 6.5z"/>', 15),
   sun: svg('<circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/>', 15),
   logout: svg('<path d="M6.5 2.5h-3v11h3M10 5l3 3-3 3M13 8H6"/>', 15),
@@ -73,7 +74,7 @@ async function api(path, { method = "GET", body } = {}) {
 
 const state = {
   platforms: [], courses: {}, papers: {}, units: {}, selected: {},
-  jobs: [], runs: {}, focus: null, jobLimit: 4, history: [], view: "", loginToken: { cancelled: true }, lastDone: null,
+  jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, lastDone: null,
   current: store.get("studia-platform", ""), menuOpen: false, meOpen: false, logFilter: "all", armed: null, editPassword: false,
 };
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
@@ -85,7 +86,7 @@ function blocker(pid, cid, type) {
   for (const o of state.jobs) {
     if (GROUP[jobType(o)] !== GROUP[type] || o.platform !== pid) continue;
     if (o.course === cid) return o.state === "queued" ? `正在排队（${o.title}）` : `正在${o.title}…`;
-    if (pid === "zhs" && GROUP[type] === "learn") return `智慧树一次只能播一个视频，等「${o.course_name}」的${o.title}结束`;
+    if (pid === "zhs" && GROUP[type] === "learn" && !state.zhsParallel) return `智慧树一次只能播一个视频，等「${o.course_name}」的${o.title}结束`;
   }
   return "";
 }
@@ -327,6 +328,7 @@ const VIEWS = {
     } catch (error) { if (!refresh) setPage(`${head}<div class="empty">${esc(error.message)}</div>`); return; }
     if (state.view !== "#/admin") return;
     users = users.users; invites = invites.invites; jobs = jobs.jobs;
+    state.zhsParallel = settings.zhs_parallel_study;
     const nameOf = (uid) => users.find((u) => u.id === uid)?.username || "—";
     const inviteState = { open: ["blue", "可用"], used: ["", "已使用"], expired: ["", "已过期"] };
     const running = jobs.filter((j) => j.state === "running").length;
@@ -347,7 +349,10 @@ const VIEWS = {
       <p class="hint">每个人同时最多运行几个任务，多出的会排队，等自己前面的任务结束后自动开始。可以在下面的用户列表里给某个人单独设置。用户自己只能在设置里调学习和答题的并发数，不能改这里。</p>
       <div class="models"><div class="model plain"><span class="m1"><b>默认每人同时 <input class="inline_num" type="number" min="1" max="20" name="max_jobs" value="${esc(kept("max_jobs", settings.max_jobs))}"> 个任务</b>
           <small class="sans">4 核 4G 的服务器，每人 4 个、6 个人同时跑是可以的；答题多的话，让大家把答题并发调到 3–4。</small></span>
-        <span class="row_btns"><button class="btn small primary" data-save-limit>保存</button></span></div></div>
+        <span class="row_btns"><button class="btn small primary" data-save-limit>保存</button></span></div>
+        <div class="model plain"><span class="m1"><b>智慧树不同课程可以同时自动学习</b><span class="pill ${settings.zhs_parallel_study ? "wait" : ""}">${settings.zhs_parallel_study ? "已开启" : "已关闭"}</span>
+          <small class="sans">关闭时，一个智慧树账号同一时间只有一门课在学习。开启后不同课程可以同时学习，每门课里仍然一个视频一个视频按 1.5 倍速播放；但平台会看到这个账号同时在播多个视频，可能判定为多窗口学习，导致学习时长不计、出验证码或被标记异常。答题不受这个开关影响。</small></span>
+        <span class="row_btns"><button class="btn small ${settings.zhs_parallel_study ? "" : "danger"}" data-zhs-parallel="${settings.zhs_parallel_study ? "off" : "on"}">${settings.zhs_parallel_study ? "关闭" : "开启"}</button></span></div></div>
 
       <div class="section"><h3>用户</h3><span class="aside">${users.length} 人</span></div>
       <div class="models">${users.map((u) => `<div class="model"><span class="avatar big">${esc(u.username.slice(0, 1).toUpperCase())}</span>
@@ -387,6 +392,12 @@ const VIEWS = {
       catch (e) { toast(e.message); }
     };
     $("[data-save-limit]", page).onclick = () => act("/api/admin/settings", { max_jobs: Number($('[name="max_jobs"]', page).value) }, "已保存，马上生效");
+    const zhsSwitch = $("[data-zhs-parallel]", page);
+    zhsSwitch.onclick = () => {
+      const on = zhsSwitch.dataset.zhsParallel === "on";
+      if (on && !zhsSwitch.classList.contains("armed")) { zhsSwitch.classList.add("armed"); zhsSwitch.textContent = "确认开启"; return; }
+      act("/api/admin/settings", { zhs_parallel_study: on }, on ? "已开启，新开的智慧树学习任务生效" : "已关闭");
+    };
     $("[data-export-logs]", page).onclick = () => {
       const from = new Date($('[name="log_from"]', page).value).getTime() / 1000;
       const to = new Date($('[name="log_to"]', page).value).getTime() / 1000;
@@ -1056,6 +1067,7 @@ async function refreshState() {
     state.platforms = data.platforms;
     state.history = data.history || [];
     state.jobLimit = data.job_limit || state.jobLimit;
+    state.zhsParallel = Boolean(data.zhs_parallel);
     const live = data.jobs || [];
     for (const job of live) {
       if (state.jobs.some((j) => j.id === job.id)) continue;

@@ -76,6 +76,11 @@ class WebServerTest(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "只能播放一个视频"):
             check("zhs", "shared-2", "study")
         check("zhs", "shared-1", "answer")       # answering the same course is fine
+        self.app.zhs_parallel = lambda: True     # the admin switch: other courses may study too
+        check("zhs", "shared-2", "study")
+        with self.assertRaisesRegex(Exception, "正在自动学习"):
+            check("zhs", "shared-1", "review")   # but never two in the same course
+        self.app.zhs_parallel = lambda: False
         check("mooc", "m1", "study")             # other platforms are independent
         self.app.jobs = {"a1": dict(running, platform="mooc", course="m1")}
         check("mooc", "m2", "study")             # MOOC courses study side by side
