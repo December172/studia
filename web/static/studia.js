@@ -208,7 +208,6 @@ function renderSidebar() {
       <span class="chev">${ICON.updown}</span></button>
     ${state.meOpen ? `<div class="menu me_menu" role="menu">
       <button class="menu_row" role="menuitem" data-go="#/settings">${ICON.gear}<span class="grow">设置</span><span class="kbd">⌘,</span></button>
-      ${me?.role === "admin" ? `<button class="menu_row" role="menuitem" data-go="#/admin">${ICON.shield}<span class="grow">管理后台</span></button>` : ""}
       <button class="menu_row" role="menuitem" data-toggle-theme>${night ? ICON.sun : ICON.moon}<span class="grow">${night ? "日间模式" : "夜读模式"}</span><span class="kbd">⌘J</span></button>
       ${me ? `<div class="psep"></div><button class="menu_row danger" role="menuitem" data-signout>${ICON.logout}<span class="grow">退出 Studia</span></button>` : ""}
     </div>` : ""}`);
@@ -220,7 +219,7 @@ function renderSidebar() {
   patch($(".mtabs"), `
     <button class="mtab" data-tray="courses" aria-current="${state.tray === "courses" || (!state.tray && under("#/course", "#/login"))}">${ICON.cells}<span>课程</span></button>
     <button class="mtab" data-go="#/jobs" aria-current="${!state.tray && view === "#/jobs"}">${ICON.pulse}<span>任务</span>${state.jobs.length ? `<b class="badge">${state.jobs.length}</b>` : ""}</button>
-    <button class="mtab" data-tray="me" aria-current="${state.tray === "me" || (!state.tray && under("#/settings", "#/admin"))}"><span class="avatar">${esc(initial)}</span><span>我的</span></button>`);
+    <button class="mtab" data-tray="me" aria-current="${state.tray === "me" || (!state.tray && under("#/settings"))}"><span class="avatar">${esc(initial)}</span><span>我的</span></button>`);
   const row = (attrs, icon, label, extra = "", cls = "") => `<button class="tray_row ${cls}" ${attrs}>${icon}<span class="grow">${esc(label)}</span>${extra}</button>`;
   let tray = "";
   if (state.tray === "courses") {
@@ -232,7 +231,6 @@ function renderSidebar() {
   } else if (state.tray === "me") {
     tray = `<div class="tray_head"><span class="avatar big">${esc(initial)}</span><span class="who"><b>${esc(name)}</b><small>${role}</small></span></div>
       ${row('data-go="#/settings"', ICON.gear, "设置")}
-      ${me?.role === "admin" ? row('data-go="#/admin"', ICON.shield, "管理后台") : ""}
       ${row("data-toggle-theme", night ? ICON.sun : ICON.moon, night ? "日间模式" : "夜读模式")}
       ${me ? row("data-signout", ICON.logout, "退出 Studia", "", "danger") : ""}`;
   }
@@ -277,11 +275,16 @@ function patchChildren(from, to) {
 // Entrance animation only when the user navigates; background repaints patch in place.
 let quiet = false;
 function setPage(html) {
-  if (quiet) { patch(page, html); return; }
-  page.innerHTML = html;
-  page.classList.remove("enter");
-  void page.offsetWidth;
-  page.classList.add("enter");
+  if (quiet) patch(page, html);
+  else {
+    page.innerHTML = html;
+    page.classList.remove("enter");
+    void page.offsetWidth;
+    page.classList.add("enter");
+  }
+  // The settings tab bar scrolls sideways on phones: keep the current tab in sight.
+  const nav = page.querySelector(".settings_nav"), on = nav?.querySelector('[aria-selected="true"]');
+  if (on && (on.offsetLeft < nav.scrollLeft || on.offsetLeft + on.offsetWidth > nav.scrollLeft + nav.clientWidth)) nav.scrollLeft = on.offsetLeft - 16;
 }
 
 const LABEL = { study: "自动学习", review: "每日复习", answer: "AI 答题" };
@@ -351,18 +354,23 @@ document.addEventListener("mouseover", (event) => {
 
 let adminTimer = 0;
 const ADMIN_TABS = [["overview", "概览"], ["jobs", "任务"], ["people", "用户与邀请"], ["site", "站点设置"], ["logs", "日志"]];
+const SETTINGS_TABS = [["account", "账号"], ["models", "AI 模型"], ["study", "偏好"]];
+function settingsHead(active, sub) {
+  const tab = (hash, label) => `<button class="tab" role="tab" aria-selected="${hash === active}" data-go="${hash}">${label}</button>`;
+  return `<h1 class="title">设置</h1><p class="sub">${sub}</p>
+    <div class="settings_nav"><div class="tabs" role="tablist">${SETTINGS_TABS.map(([k, label]) => tab(`#/settings/${k}`, label)).join("")}</div>
+    ${session.user?.role === "admin" ? `<span class="tabs_label">管理</span><div class="tabs" role="tablist">${ADMIN_TABS.map(([k, label]) => tab(`#/settings/admin/${k}`, label)).join("")}</div>` : ""}</div>`;
+}
 const VIEWS = {
   async admin(refresh = false, tab = state.adminTab) {
     clearTimeout(adminTimer);
     tab = ADMIN_TABS.some(([k]) => k === tab) ? tab : "overview";
     state.adminTab = tab;
-    const tabs = `<div class="tabs" role="tablist">${ADMIN_TABS.map(([k, label]) =>
-      `<button class="tab" role="tab" aria-selected="${k === tab}" data-go="#/admin/${k}">${label}</button>`).join("")}</div>`;
-    const head = `<h1 class="title">管理后台</h1><p class="sub">整个站点的任务、账号和设置，只有管理员能看到。</p>${tabs}`;
+    const head = settingsHead(`#/settings/admin/${tab}`, "仅管理员可见");
     // Show the tab at once; its lists fill it in when they arrive.
     if (!refresh) {
       // Switching tabs inside the console swaps the content in place; arriving from elsewhere animates.
-      quiet = state.view === "#/admin" && Boolean(page.querySelector('.tabs [data-go^="#/admin/"]'));
+      quiet = Boolean(page.querySelector(".settings_nav"));
       setPage(`${head}<div class="empty">正在读取…</div>`);
       quiet = false;
     }
@@ -370,7 +378,7 @@ const VIEWS = {
     let data;
     try { data = Object.fromEntries(await Promise.all(need.map(async (x) => [x, await api(`/api/admin/${x}`)]))); }
     catch (error) { if (!refresh) setPage(`${head}<div class="empty">${esc(error.message)}</div>`); return; }
-    if (state.view !== "#/admin" || state.adminTab !== tab) return;
+    if (state.view !== "#/settings/admin" || state.adminTab !== tab) return;
     const users = data.users?.users || [], jobs = data.jobs?.jobs || [];
     const running = jobs.filter((j) => j.state === "running").length;
     const jobRows = (list) => `<div class="runs">${list.map((j) => `<div class="run">${j.state === "queued" ? ICON.waiting : ICON.running}
@@ -387,15 +395,13 @@ const VIEWS = {
           <div><dt>用户</dt><dd><span class="big">${users.length}</span><span class="note">人 · ${users.filter((u) => u.jobs?.length).length} 人在用</span></dd></div>
           <div><dt>答案记忆</dt><dd><span class="big">${memory.questions + memory.mooc.questions}</span><span class="note">题</span></dd></div>
         </dl>
-        <div class="section"><h3>正在运行</h3><button class="link" data-go="#/admin/jobs">全部任务 ›</button></div>
+        <div class="section"><h3>正在运行</h3><button class="link" data-go="#/settings/admin/jobs">全部任务 ›</button></div>
         ${jobRows(jobs.filter((j) => j.state === "running").slice(0, 5))}
-        <div class="section"><h3>共享答案记忆</h3><span class="aside">同一门课的试卷之间共享，命中的题不再调用 AI</span></div>
-        <div class="models"><div class="model plain"><span class="m1"><b>智慧树 · ${memory.questions} 题</b><span class="pill blue">${memory.confirmed} 题已确认正确</span>
-          <small class="sans">交卷后平台判定的对错：对的直接用、错的避开。</small></span></div>
-          <div class="model plain"><span class="m1"><b>MOOC · ${memory.mooc.questions} 题</b><span class="pill blue">平台公布的标准答案</span>
-          <small class="sans">交卷后平台公布的标准答案；单选、多选、判断题。</small></span></div></div>`;
+        <div class="section"><h3>共享答案记忆</h3><span class="aside">按课程共享</span></div>
+        <div class="models"><div class="model plain"><span class="m1"><b>智慧树 · ${memory.questions} 题</b><span class="pill blue">${memory.confirmed} 题已确认正确</span></span></div>
+          <div class="model plain"><span class="m1"><b>MOOC · ${memory.mooc.questions} 题</b><span class="pill blue">平台公布的标准答案</span></span></div></div>`;
     } else if (tab === "jobs") {
-      body = `<div class="section"><h3>全站任务</h3><span class="aside">${running} 个运行中 · ${jobs.length - running} 个排队 · 每 5 秒刷新</span></div>${jobRows(jobs)}`;
+      body = `<div class="section"><h3>全站任务</h3><span class="aside">${running} 运行中 · ${jobs.length - running} 排队</span></div>${jobRows(jobs)}`;
     } else if (tab === "people") {
       const invites = data.invites.invites;
       const nameOf = (uid) => users.find((u) => u.id === uid)?.username || "—";
@@ -409,7 +415,6 @@ const VIEWS = {
               <button class="btn small" data-reset="${u.id}">重置密码</button>
               ${u.id === session.user.id ? "" : u.disabled ? `<button class="btn small" data-enable="${u.id}">启用</button>` : `<button class="btn small danger" data-disable="${u.id}">停用</button>`}</span></div>`).join("")}</div>
         <div class="section"><h3>邀请码</h3><button class="link" data-invite>＋ 生成邀请码</button></div>
-        <p class="hint">把邀请码发给对方，对方在登录页选「用邀请码注册」。每个邀请码只能用一次，7 天后过期。</p>
         <div class="models">${invites.map((i) => `<div class="model plain"><span class="m1"><b><code>${esc(i.code)}</code></b><span class="pill ${inviteState[i.state][0]}">${inviteState[i.state][1]}</span>
             <small class="sans">${i.used_by ? `${esc(nameOf(i.used_by))} 已注册` : `创建于 ${ago(i.created)} · ${new Date(i.expires * 1000).toLocaleDateString()} 过期`}</small></span>
           <span class="row_btns">${i.state === "open" ? `<button class="btn small" data-copy="${esc(i.code)}">复制</button><button class="btn small danger" data-revoke="${esc(i.code)}">作废</button>` : ""}</span></div>`).join("")
@@ -419,20 +424,16 @@ const VIEWS = {
       const kept = (name, fallback) => $(`[name="${name}"]`, page)?.value || fallback;
       state.zhsParallel = settings.zhs_parallel_study;
       body = `<div class="section"><h3>任务上限</h3></div>
-        <p class="hint">每个人同时最多运行几个任务，多出的会排队，等自己前面的任务结束后自动开始。可以在「用户与邀请」里给某个人单独设置。用户自己只能在设置里调学习和答题的并发数。</p>
-        <div class="models"><div class="model plain"><span class="m1"><b>默认每人同时 <input class="inline_num" type="number" min="1" max="20" name="max_jobs" value="${esc(kept("max_jobs", settings.max_jobs))}"> 个任务</b>
-            <small class="sans">4 核 4G 的服务器，每人 4 个、6 个人同时跑是可以的；答题多的话，让大家把答题并发调到 3–4。</small></span>
+        <div class="models"><div class="model plain"><span class="m1"><b>默认每人同时 <input class="inline_num" type="number" min="1" max="20" name="max_jobs" value="${esc(kept("max_jobs", settings.max_jobs))}"> 个任务</b></span>
           <span class="row_btns"><button class="btn small primary" data-save-limit>保存</button></span></div></div>
         <div class="section"><h3>智慧树</h3></div>
-        <div class="models"><div class="model plain"><span class="m1"><b>不同课程可以同时自动学习</b><span class="pill ${settings.zhs_parallel_study ? "wait" : ""}">${settings.zhs_parallel_study ? "已开启" : "已关闭"}</span>
-            <small class="sans">关闭时，一个智慧树账号同一时间只有一门课在学习。开启后不同课程可以同时学习，每门课里仍然一个视频一个视频按 1.5 倍速播放；但平台会看到这个账号同时在播多个视频，可能判定为多窗口学习，导致学习时长不计、出验证码或被标记异常。答题不受这个开关影响。</small></span>
+        <div class="models"><div class="model plain"><span class="m1"><b>多并发学习</b><span class="pill ${settings.zhs_parallel_study ? "wait" : ""}">${settings.zhs_parallel_study ? "已开启" : "已关闭"}</span></span>
           <span class="row_btns"><button class="btn small ${settings.zhs_parallel_study ? "" : "danger"}" data-zhs-parallel="${settings.zhs_parallel_study ? "off" : "on"}">${settings.zhs_parallel_study ? "关闭" : "开启"}</button></span></div></div>`;
     } else {
       const pad2 = (n) => String(n).padStart(2, "0");
       const local = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
       const today = new Date(); today.setHours(0, 0, 0, 0);
-      body = `<div class="section"><h3>日志导出</h3></div>
-        <p class="hint">导出一段时间里的日志，下载为文本文件，最长 92 天。运行日志是所有人任务的过程记录（每行标着用户和任务编号，已隐去密码和令牌）；操作记录是登录、注册和管理员操作。</p>
+      body = `<div class="section"><h3>日志导出</h3><span class="aside">最长 92 天</span></div>
         <div class="models"><div class="model plain log_export"><span class="log_range">
             <label>从 <input type="datetime-local" name="log_from" value="${esc(local(today))}"></label>
             <label>到 <input type="datetime-local" name="log_to" value="${esc(local(new Date()))}"></label>
@@ -464,7 +465,7 @@ const VIEWS = {
     });
     on("[data-stop-job]", (el) => act(`/api/admin/users/${el.dataset.stopJob.replace("/", "/jobs/")}/stop`, null, "已发出停止指令"));
     on("[data-user-limit]", (el) => {
-      const value = window.prompt("这个人同时最多运行几个任务（1–20）？留空表示跟随默认值。", el.dataset.current);
+      const value = window.prompt("任务上限（1–20，留空用默认）", el.dataset.current);
       if (value !== null) act(`/api/admin/users/${el.dataset.userLimit}/limit`, { max_jobs: value.trim() }, "已保存，马上生效");
     });
     on("[data-copy]", (el) => navigator.clipboard?.writeText(el.dataset.copy).then(() => toast("已复制"), () => toast(el.dataset.copy)));
@@ -476,13 +477,13 @@ const VIEWS = {
       act(`/api/admin/users/${el.dataset.disable}/disable`, null, "已停用，对方已被登出");
     });
     on("[data-reset]", (el) => {
-      const password = window.prompt("输入新密码（至少 8 位）。保存后对方需要用新密码重新登录。");
+      const password = window.prompt("新密码（至少 8 位）");
       if (password) act(`/api/admin/users/${el.dataset.reset}/password`, { password }, "密码已重置");
     });
     // Live tabs refresh every 5 seconds; paused while the admin is typing or the page is hidden.
     if (tab !== "overview" && tab !== "jobs") return;
     const tick = () => {
-      if (state.view !== "#/admin" || state.adminTab !== tab) return;
+      if (state.view !== "#/settings/admin" || state.adminTab !== tab) return;
       if (document.hidden || page.querySelector("input:focus, select:focus, .armed")) adminTimer = setTimeout(tick, 5000);
       else VIEWS.admin(true, tab);
     };
@@ -491,9 +492,9 @@ const VIEWS = {
 
   jobs() {
     const open = new Set([...page.querySelectorAll(".run_lines:not([hidden])")].map((el) => el.dataset.lines));
-    const live = state.jobs.length ? `<div class="section"><h3>进行中</h3><span class="aside">每人最多同时运行 ${state.jobLimit} 个，多出的排队</span></div>
+    const live = state.jobs.length ? `<div class="section"><h3>进行中</h3><span class="aside">上限 ${state.jobLimit} 个</span></div>
       <div class="runs">${state.jobs.map((job) => { const run = runOf(job.id); return `<div class="run">${ICON.running}
-        <span class="t1">${esc(job.title)} · ${esc(job.course_name)}<small>${esc(platformOf(job.platform)?.short || "")} · ${esc(job.state === "queued" ? `排队中：你同时最多运行 ${state.jobLimit} 个任务` : run.unit?.name || run.detail || "准备中…")}</small></span>
+        <span class="t1">${esc(job.title)} · ${esc(job.course_name)}<small>${esc(platformOf(job.platform)?.short || "")} · ${esc(job.state === "queued" ? "排队中" : run.unit?.name || run.detail || "准备中…")}</small></span>
         <span class="fix"><button class="btn small" data-open="${job.id}">展开</button><button class="btn small danger" data-stop="${job.id}">停止</button></span>
         <span class="state running">${STATE_WORD[job.state] || "进行中"}<span class="mono" data-elapsed="${job.id}">${duration(elapsed(job))}</span></span>
         <span class="when">${ago(job.started)}</span></div>`; }).join("")}</div>` : "";
@@ -504,9 +505,9 @@ const VIEWS = {
         <span class="when">${ago(j.ended || j.started)}</span></div>
       <div class="run_lines" data-lines="${i}" ${open.has(String(i)) ? "" : "hidden"}>${logHtml(j.lines || [])}</div>`).join("");
     setPage(`<h1 class="title">任务</h1>
-      <p class="sub">${session.mode === "hosted" ? "任务在服务器上运行，关掉网页也不会中断。" : "任务在这台电脑上运行，关掉网页不会中断，关掉终端才会停止。"}不同课程可以同时学习和答题，每人最多同时运行 ${state.jobLimit} 个，多出的会排队，前面的结束后自动开始。</p>
+      <p class="sub">${session.mode === "hosted" ? "在服务器上运行，关掉网页不影响" : "关掉网页不影响，关掉终端会停止"}</p>
       ${live}
-      <div class="section"><h3>历史</h3><span class="aside">只有失败和需要你处理的任务才有按钮，点一行看日志</span></div>
+      <div class="section"><h3>历史</h3><span class="aside">点一行看日志</span></div>
       ${rows ? `<div class="runs">${rows}</div>` : `<div class="empty">还没有运行过任务</div>`}`);
     page.querySelectorAll("[data-history]").forEach((el) => (el.onclick = (event) => {
       if (event.target.closest("button, a")) return;
@@ -523,18 +524,17 @@ const VIEWS = {
     const p = platformOf(pid);
     if (!p) return setPage(`<div class="empty">不支持这个平台</div>`);
     if (p.logged_in) return go(homeOf(p));
-    const where = session.mode === "hosted" ? "登录状态保存在服务器上你自己的目录里，并且加密存放。" : "登录状态只保存在这台电脑上。";
     const head = `<div class="crumb"><span class="dot ${pid}"></span>${esc(p.name)}</div><h1 class="title">登录${/^[A-Za-z]/.test(p.short) ? " " : ""}${esc(p.short)}</h1>`;
     if (p.login === "qr") {
-      setPage(`${head}<p class="sub">用智慧树 App 扫码，在手机上确认后，课程会出现在左侧。${where}</p>
+      setPage(`${head}<p class="sub">用智慧树 App 扫码</p>
         <div class="login_card"><div class="qr"><div class="qr_empty">正在获取二维码…</div></div>
-          <div class="login_status"><div data-status><b>等待扫码</b><p>打开智慧树 App，点右上角的扫一扫。二维码过期会自动刷新。</p></div>
+          <div class="login_status"><div data-status><b>等待扫码</b><p>二维码过期会自动刷新</p></div>
             <button class="btn" data-start-login>刷新二维码</button></div></div>`);
       $("[data-start-login]", page).onclick = () => qrLogin(pid);
       qrLogin(pid);
     } else {
-      setPage(`${head}<p class="sub">${esc(p.name)} 使用职教云账号，通过浏览器授权登录。${where}</p>
-        <div class="login_card"><div class="login_status"><div data-status><b>在浏览器中登录</b><p>点下面的按钮会打开职教云登录页，在那里登录完成后，这里会自动继续。</p></div>
+      setPage(`${head}<p class="sub">用职教云账号登录</p>
+        <div class="login_card"><div class="login_status"><div data-status><b>在浏览器中登录</b><p>登录完成后自动继续</p></div>
           <button class="btn primary" data-start-login>${roll("打开登录页")}</button></div></div>`);
       $("[data-start-login]", page).onclick = () => browserLogin(pid);
     }
@@ -549,11 +549,9 @@ const VIEWS = {
   },
 
   async settings(tab = "models") {
-    tab = ["account", "models", "study"].includes(tab) ? tab : "models";
-    const tabs = `<div class="tabs" role="tablist">${[["account", "账号"], ["models", "AI 模型"], ["study", "偏好"]].map(([k, label]) =>
-      `<button class="tab" role="tab" aria-selected="${k === tab}" data-go="#/settings/${k}">${label}</button>`).join("")}</div>`;
-    const where = session.mode === "hosted" ? "设置只对你的账号生效，保存在服务器上你自己的目录里。" : "所有设置只保存在这台电脑上。";
-    const head = `<h1 class="title">设置</h1><p class="sub">${where}</p>${tabs}`;
+    tab = SETTINGS_TABS.some(([k]) => k === tab) ? tab : "models";
+    const where = session.mode === "hosted" ? "只对你的账号生效" : "只保存在这台电脑上";
+    const head = settingsHead(`#/settings/${tab}`, where);
     if (tab === "account") {
       const me = session.user;
       const studia = me ? `<div class="section"><h3>Studia 账号</h3></div>
@@ -562,14 +560,14 @@ const VIEWS = {
             <span class="m1"><b>${esc(me.username)}</b><span class="pill ${me.role === "admin" ? "blue" : ""}">${me.role === "admin" ? "管理员" : "成员"}</span>
             <small class="sans">${me.last_login ? `上次登录 ${ago(me.last_login)}` : ""}${me.created ? ` · ${new Date(me.created * 1000).toLocaleDateString()} 加入` : ""}</small></span></span></div>
           ${state.editPassword ? `<form class="model plain password_form" data-password>
-            <span class="m1"><b>修改密码</b><small class="sans">保存后，其他设备上的登录会全部退出。</small></span>
+            <span class="m1"><b>修改密码</b><small class="sans">其他设备会退出登录</small></span>
             <span class="pw_fields">
               <label class="auth_field"><span>原密码</span><input name="old" type="password" autocomplete="current-password" required></label>
               <label class="auth_field"><span>新密码</span><input name="new" type="password" autocomplete="new-password" minlength="8" placeholder="至少 8 位" required></label>
               <label class="auth_field"><span>再输一次</span><input name="again" type="password" autocomplete="new-password" minlength="8" required></label>
               <span class="row_btns"><button type="button" class="btn" data-password-cancel>取消</button><button class="btn primary">${roll("保存新密码")}</button></span>
             </span></form>`
-          : `<div class="model plain"><span class="m1"><b>密码</b><small class="sans">修改后，其他设备上的登录会全部退出</small></span>
+          : `<div class="model plain"><span class="m1"><b>密码</b><small class="sans">其他设备会退出登录</small></span>
               <span class="row_btns"><button class="btn small" data-password-edit>修改密码</button></span></div>`}
           <div class="model plain"><span class="m1"><b>退出登录</b><small class="sans">只退出这个浏览器</small></span>
             <span class="row_btns"><button class="btn small danger" data-signout>退出 Studia</button></span></div>
@@ -611,13 +609,12 @@ const VIEWS = {
     if (tab === "study") {
       quiet = true;
       setPage(`${head}<div class="section"><h3>并发数量</h3></div>
-        <p class="hint">同时处理的数量。智慧树的视频始终逐个播放，不受这里影响。</p>
         <div class="models"><div class="form_card" style="margin:0;box-shadow:none">
           <div class="field"><label>AI 答题</label><input type="number" min="1" max="8" name="ai" value="${data.concurrency.ai}"></div>
           <div class="field"><label>自动学习</label><input type="number" min="1" max="8" name="study" value="${data.concurrency.study}"></div>
           <div class="form_btns"><button class="btn primary" data-concurrency>${roll("保存")}</button></div></div></div>
         <div class="section"><h3>外观</h3></div>
-        <div class="models"><div class="model plain"><span class="m1"><b>夜读模式</b><small class="sans">深色主题，只替换颜色，不改布局。只记在这个浏览器里。</small></span>
+        <div class="models"><div class="model plain"><span class="m1"><b>夜读模式</b><small class="sans">只对这个浏览器生效</small></span>
           <button class="btn" data-toggle-theme>切换 <span class="kbd">⌘J</span></button></div></div>`);
       quiet = false;
       $("[data-concurrency]", page).onclick = async () => {
@@ -669,7 +666,7 @@ function renderModels(head, models, editing = null) {
   };
   quiet = true;
   setPage(`${head}<div class="section"><h3>AI 模型</h3><button class="link" data-add>＋ 添加模型</button></div>
-    <p class="hint">答题、讨论和评价都用"使用中"的模型，点左边的圆圈切换。</p>
+    <p class="hint">点圆圈切换使用中的模型</p>
     ${editing === "new" ? form(null) : ""}<div class="models">${models.map(row).join("")}</div>`);
   quiet = false;
   const reload = async (edit = null) => {
@@ -719,12 +716,12 @@ function renderModels(head, models, editing = null) {
 
 function studyActions(p, c) {
   if (p.id === "zhs" && c.kind === "shared") return [
-    ["study", ICON.play, "自动学习", "逐个播放还没看完的视频，约 1.5 倍速，视频里的弹题会自动作答。"],
-    ["review", ICON.repeat, "每日复习", "从看完的视频里轮换着重看 30 分钟（1 倍速），用来攒学习习惯分，每天一次。"],
+    ["study", ICON.play, "自动学习", "1.5 倍速看完剩下的视频，弹题自动答"],
+    ["review", ICON.repeat, "每日复习", "重看 30 分钟攒习惯分，每天一次"],
   ];
-  if (p.id === "zhs") return [["study", ICON.play, "自动学习", "完成知识点下的文档、课件和视频，先做不用等的资源。"]];
-  if (p.id === "mooc") return [["study", ICON.play, "自动学习", "按顺序完成还没学完的课件和视频，并按主题参与讨论、提交五星评价。需要先添加 AI 模型。"]];
-  return [["study", ICON.play, "自动学习", "完成资源库课程里的学习资源。"]];
+  if (p.id === "zhs") return [["study", ICON.play, "自动学习", "完成文档、课件和视频"]];
+  if (p.id === "mooc") return [["study", ICON.play, "自动学习", "学完课件和视频，自动讨论和评价"]];
+  return [["study", ICON.play, "自动学习", "学完资源库里的资源"]];
 }
 const STAMP = { 考试: "k", 测验: "c" };
 
@@ -878,7 +875,7 @@ function renderPlayer() {
     patch(player, `
       <div class="np"><span class="art">${job.title === "AI 答题" ? ICON.pen : job.title === "每日复习" ? ICON.repeat : ICON.play}</span>
         <span class="what"><small><span class="live">${queued ? "排队中" : LIVE_WORD[job.title] || "进行中"}</span>${esc(job.course_name)}</small>
-        <b>${esc(queued ? `排队中，等你前面的任务结束（最多同时 ${state.jobLimit} 个）` : run.unit?.name || run.detail || "准备中…")}</b></span></div>
+        <b>${esc(queued ? "排队中" : run.unit?.name || run.detail || "准备中…")}</b></span></div>
       <div class="scrub"><span class="track ${pct == null ? "unknown" : ""}"><i style="width:${pct ?? 0}%"></i></span><span class="t">${esc(label || clock(elapsed(job)))}</span></div>
       <div class="np_meta">${recentCells(key(job.platform, job.course))}
         ${others ? `<button class="btn" data-go="#/jobs" title="查看全部任务">另有 ${others} 个</button>` : ""}
@@ -1157,7 +1154,7 @@ function closeFinder() { overlay.classList.remove("open"); }
 function paintFinder() {
   const q = finderInput.value.trim().toLowerCase();
   const match = (text) => !q || text.toLowerCase().includes(q);
-  const pages = [["#/jobs", ICON.pulse, "任务"], ["#/settings", ICON.gear, "设置"], ...(session.user?.role === "admin" ? [["#/admin", ICON.shield, "管理后台"]] : []),
+  const pages = [["#/jobs", ICON.pulse, "任务"], ["#/settings", ICON.gear, "设置"], ...(session.user?.role === "admin" ? [["#/settings/admin", ICON.shield, "管理后台"]] : []),
     ...state.platforms.map((p) => [homeOf(p), `<span class="dot ${p.id}"></span>`, `切换到 ${p.name}`])]
     .filter(([, , label]) => match(label)).map(([hash, icon, label]) => ({ hash, icon, label, meta: "页面" }));
   const courses = state.platforms.flatMap((p) => (state.courses[p.id] || []).filter((c) => match(c.name))
@@ -1235,16 +1232,17 @@ const parseHash = (hash) => (hash || "").match(/^#\/(\w+)(?:\/([^/]+))?(?:\/([^/
 function route() {
   const [, name, a, b, c] = parseHash(location.hash);
   if (!name || name === "all") { go(homeOf(currentPlatform())); return; }
+  if (name === "admin") { go(`#/settings/admin${a ? `/${a}` : ""}`); return; }  // old links
   if ((name === "course" || name === "login") && platformOf(a) && state.current !== a) { state.current = a; store.set("studia-platform", a); }
   if (name !== "login") state.loginToken.cancelled = true;
-  state.view = name === "course" ? `#/course/${a}/${b}` : name === "login" ? `#/login/${a}` : `#/${name}`;
+  state.view = name === "course" ? `#/course/${a}/${b}` : name === "login" ? `#/login/${a}` : name === "settings" && a === "admin" ? "#/settings/admin" : `#/${name}`;
   renderSidebar();
   renderPlayer();
   scroller.scrollTop = 0;
-  if (name === "settings") { state.editPassword = false; VIEWS.settings(a); }
+  if (name === "settings" && a === "admin") { if (session.user?.role === "admin") VIEWS.admin(false, b); else go("#/settings"); }
+  else if (name === "settings") { state.editPassword = false; VIEWS.settings(a); }
   else if (name === "course") VIEWS.course(a, decodeURIComponent(b || ""), c);
   else if (name === "login") VIEWS.login(a);
-  else if (name === "admin") { if (session.user?.role === "admin") VIEWS.admin(false, a); else go(homeOf(currentPlatform())); }
   else if (VIEWS[name]) VIEWS[name]();
   else go(homeOf(currentPlatform()));
 }
@@ -1276,7 +1274,7 @@ function animateAuthGrid(box) {
 const AUTH = {
   login: { title: "登录", lead: "欢迎回来。", button: "登录", switch: ["还没有账号？", "用邀请码注册", "register"] },
   register: { title: "注册", lead: "邀请码向管理员要，每个只能用一次。", button: "注册并登录", switch: ["已经有账号？", "去登录", "login"] },
-  setup: { title: "创建管理员", lead: "这是新部署的 Studia。设置码在服务器日志里，Docker 部署可以运行 docker compose logs studia 查看。", button: "创建并进入" },
+  setup: { title: "创建管理员", lead: "设置码在服务器日志里（docker compose logs studia）。", button: "创建并进入" },
 };
 function showAuth(mode = "login") {
   document.body.classList.add("signed-out");
