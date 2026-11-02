@@ -177,6 +177,11 @@ code { font: 12px var(--mono); padding: 1px 5px; border-radius: 4px; background:
 @media (hover: hover) { .tab:hover { color: var(--text); } }
 .tab[aria-selected="true"] { background: var(--card); color: var(--text); box-shadow: 0 0 0 1px var(--line), 0 1px 3px rgb(var(--ink) / .08); }
 .tab .n { font: 11px var(--mono); color: var(--text-4); }
+/* Settings: your own tabs, then the site's for admins; scrolls sideways on narrow screens. */
+.settings_nav { position: relative; display: flex; align-items: center; gap: 12px; margin-top: 32px; overflow-x: auto; scrollbar-width: none; }
+.settings_nav::-webkit-scrollbar { display: none; }
+.settings_nav .tabs { flex: none; margin-top: 0; }
+.tabs_label { flex: none; padding-left: 12px; border-left: 1px solid var(--line-2); font-size: 11px; font-weight: 600; letter-spacing: .14em; color: var(--text-4); }
 
 .section { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 40px 0 14px; }
 .section h3 { margin: 0; font: 400 21px/1.25 var(--serif); }
