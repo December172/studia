@@ -642,7 +642,7 @@ class ZHSHandler:
                         raise ZHSError("智慧课程进度上报失败：%s" % error) from error
                     self.sleep(1)
             self.sleep(2)
-            self.progress.detail(f"{course} · {name} · {position}/{length}")
+            self.progress.detail(f"{course} · {name} · {self._mmss(position)}/{self._mmss(length)}")
             if position == length:
                 break
         self.log.info("%s · 播放完成：%s", course, name)
