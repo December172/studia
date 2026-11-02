@@ -111,8 +111,9 @@ def course_units(client, row):
 
 class ZHSHandler:
     def __init__(self, *, client, course_rows, on_progress=None, max_workers=1,
-                 cancel_event=None, sleep=time.sleep, rng=None, review_minutes=0):
+                 cancel_event=None, sleep=time.sleep, rng=None, review_minutes=0, captcha_ai=None):
         self.client = client
+        self.captcha_ai = captcha_ai
         self.review_seconds = int(review_minutes) * 60
         self.course_rows = course_rows or []
         self.progress = Reporter(on_progress)
@@ -295,9 +296,19 @@ class ZHSHandler:
         play_id = video["videoId"]
         video_sec = _to_int(video.get("videoSec"))
         end = max(video_sec, 1)
+        initial = _nonneg_int(video.get("studyTotalTime"))
+        state = {"played": initial, "head": 0 if review else initial, "last_submit": initial}
+
+        def captcha_context():
+            return encode_ev([
+                recruit_id, video["chapterId"], ctx["report_course_id"], lesson_id,
+                str(timedelta(seconds=min(video_sec, int(state["head"])))),
+                int(state["played"]), play_id, video_id,
+                int(state["played"] - state["last_submit"]),
+            ])
 
         def prelearning():
-            data = self.client.shared_prelearning({
+            payload = {
                 "ccCourseId": cc_course_id,
                 "chapterId": video["chapterId"],
                 "isApply": 1,
@@ -305,7 +316,16 @@ class ZHSHandler:
                 "lessonVideoId": video_id,
                 "recruitId": recruit_id,
                 "videoId": play_id,
-            }) or {}
+            }
+            data = self.client.shared_prelearning(payload) or {}
+            if data.get("isFace"):
+                raise CaptchaRequired("智慧树要求人脸验证，请在平台完成后重试")
+            if data.get("isSlide"):
+                if not self.client.pass_captcha(captcha_context(), vision=self.captcha_ai):
+                    raise CaptchaRequired("智慧树要求图片验证，请在平台完成后重试")
+                data = self.client.shared_prelearning(payload) or {}
+                if data.get("isSlide") or data.get("isFace"):
+                    raise CaptchaRequired("智慧树仍要求验证，请在平台完成后重试")
             dto = data.get("studiedLessonDto") or {}
             token = base64.b64encode(str(dto.get("id", 0)).encode("ascii")).decode("ascii")
             return token, _nonneg_int(dto.get("studyTotalTime"))
@@ -347,14 +367,16 @@ class ZHSHandler:
             return {"ewssw": wp.text(), "sdsew": ev, "zwsds": token_value}
 
         def send(payload):
-            self.client.shared_save_progress(dict(payload, courseId=ctx["report_course_id"]))
+            self.client.shared_save_progress(dict(payload, courseId=ctx["report_course_id"]),
+                                             captcha_ev=captcha_context(), captcha_vision=self.captcha_ai)
 
         def report():
             payload = build_payload(state["played"], state["last_submit"], state["token"])
             # The cache save is optional; it used to go out without courseId and failed every time
             # (-1). After one failure it stays off for this course run instead of failing on every report.
             if not ctx.get("cache_off") and self.client.shared_save_cache(
-                    dict(payload, courseId=ctx["report_course_id"])) is None:
+                    dict(payload, courseId=ctx["report_course_id"]), captcha_ev=captcha_context(),
+                    captcha_vision=self.captcha_ai) is None:
                 ctx["cache_off"] = True
                 self.log.info("%s：缓存进度接口不可用，本次不再调用（正式进度照常保存）", course)
             sent_payload = payload
