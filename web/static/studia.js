@@ -155,9 +155,9 @@ function clock(sec) {
 }
 function duration(sec) {
   sec = Math.max(0, Math.round(sec));
-  if (sec < 60) return `${sec}s`;
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ${pad(sec % 60)}s`;
-  return `${Math.floor(sec / 3600)}h ${pad(Math.floor((sec % 3600) / 60))}m`;
+  if (sec < 60) return `${sec} 秒`;
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分 ${pad(sec % 60)} 秒`;
+  return `${Math.floor(sec / 3600)} 小时 ${pad(Math.floor((sec % 3600) / 60))} 分`;
 }
 const elapsed = (job) => (job.ended || Date.now() / 1000) - job.started;
 
@@ -326,9 +326,13 @@ function gridHtml(k) {
   const t = tally(data.chapters);
   const legend = [["done", "完成"], ["running", "进行中"], ["queued", "待学"], ["waiting", "等你操作"], ["failed", "失败"], ["skipped", "跳过"]]
     .filter(([s]) => t[s] || s === "done" || s === "queued");
-  return `<div class="grid" data-k="${esc(k)}">${data.chapters.map((ch, ci) => `<div class="chapter"><span class="name" title="${esc(ch.name)}">${esc(ch.name)}</span>
-      <span class="cells">${ch.units.map((u, ui) => `<i class="cell ${u.state}" data-u="${ci}:${ui}"></i>`).join("")}</span>
-      <span class="tally">${ch.units.filter((u) => u.state === "done").length}/${ch.units.length}</span></div>`).join("")}
+  const fresh = state.stamped && Date.now() - state.stamped.at < 900 ? state.stamped.id : null;
+  // The chapter being studied; between two units nothing runs, so fall back to the next unfinished one.
+  let current = data.chapters.findIndex((ch) => ch.units.some((u) => u.state === "running"));
+  if (current < 0) current = data.chapters.findIndex((ch) => ch.units.some((u) => u.state === "queued" || u.state === "waiting"));
+  return `<div class="grid" data-k="${esc(k)}"><div class="chapters">${data.chapters.map((ch, ci) => `<div class="chapter ${ci === current ? "current" : ""}"><span class="name" title="${esc(ch.name)}">${esc(ch.name)}</span>
+      <span class="cells">${ch.units.map((u, ui) => `<i class="cell ${u.state}${u.id === fresh ? " stamp" : ""}" data-u="${ci}:${ui}"></i>`).join("")}</span>
+      <span class="tally">${ch.units.filter((u) => u.state === "done").length}/${ch.units.length}</span></div>`).join("")}</div>
     <div class="legend">${legend.map(([s, label]) => `<span><i class="cell ${s}"></i>${label}</span>`).join("")}</div></div>`;
 }
 
@@ -516,14 +520,14 @@ const VIEWS = {
       <div class="runs">${state.jobs.map((job) => { const run = runOf(job.id); return `<div class="run">${ICON.running}
         <span class="t1">${esc(job.title)} · ${esc(job.course_name)}<small>${esc(platformOf(job.platform)?.short || "")} · ${esc(job.state === "queued" ? "排队中" : run.unit?.name || run.detail || "准备中…")}</small></span>
         <span class="fix"><button class="btn small" data-open="${job.id}">查看</button><button class="btn small danger" data-stop="${job.id}" data-confirm="确认停止">停止</button></span>
-        <span class="state running">${STATE_WORD[job.state] || "进行中"}<span class="mono" data-elapsed="${job.id}">${duration(elapsed(job))}</span></span>
-        <span class="when">${ago(job.started)}</span></div>`; }).join("")}</div>` : "";
-    const rows = state.history.map((j, i) => `<div class="run ${open.has(String(i)) ? "open" : ""}" data-history="${i}">${ICON[j.state] || ICON.stopped}
+        <span class="state running">${job.state === "queued" ? "排队中" : progressBar(run)}</span>
+        <span class="when" data-elapsed="${job.id}">${duration(elapsed(job))}</span></div>`; }).join("")}</div>` : "";
+    const rows = state.history.map((j, i) => { const past = retried(j, i); return `<div class="run ${open.has(String(i)) ? "open" : ""} ${past ? "past" : ""}" data-history="${i}">${ICON[j.state] || ICON.stopped}
         <span class="t1">${esc(j.title)} · ${esc(j.course_name)}<small>${esc(platformOf(j.platform)?.short || "")} · ${esc(j.summary)}</small></span>
-        <span class="fix">${fixButtons(j, i)}</span>
-        <span class="state ${j.state}">${STATE_WORD[j.state] || ""}<span class="mono">${j.ended ? duration(j.ended - j.started) : ""}</span></span>
+        <span class="fix">${past ? "" : fixButtons(j, i)}</span>
+        <span class="state ${past ? "stopped" : j.state}">${past ? "已重试" : STATE_WORD[j.state] || ""}<span class="mono">${j.ended ? duration(j.ended - j.started) : ""}</span></span>
         <span class="when">${ago(j.ended || j.started)}</span><span class="chev_r" aria-hidden="true"></span></div>
-      <div class="run_lines" data-lines="${i}" ${open.has(String(i)) ? "" : "hidden"}>${logHtml(j.lines || [])}</div>`).join("");
+      <div class="run_lines" data-lines="${i}" ${open.has(String(i)) ? "" : "hidden"}>${logHtml(j.lines || [], "all", j.course_name)}</div>`; }).join("");
     setPage(`${head}
       ${live}
       <div class="section"><h3>历史</h3></div>
@@ -680,6 +684,13 @@ const VIEWS = {
   },
 };
 
+// A waiting or failed run the user has since started again (or that is running now) needs no button.
+const retried = (j, i) => (j.state === "waiting" || j.state === "error")
+  && [...state.jobs, ...state.history.slice(0, i)].some((x) => x.platform === j.platform && x.course === j.course && x.title === j.title);
+function progressBar(run) {
+  const { pct, label } = progressOf(run);
+  return pct == null ? "进行中" : `<span class="bar"><i style="width:${pct}%"></i></span><span class="mono">${esc(label)}</span>`;
+}
 function fixButtons(j, i) {
   const type = TYPE_OF[j.title];
   // An update stopped it and it was not restarted on its own (answering, or interrupted too long ago).
@@ -898,12 +909,15 @@ async function loadPapers(p, c) {
 
 /* ---------------------------------------------------------------- player & focus sheet */
 
-const LOG_LEVEL = { error: ["err", "ERR"], warn: ["warn", "WARN"] };
-function logHtml(lines, filter = "all") {
+const LOG_LEVEL = { error: ["err", "错误"], warn: ["warn", "提醒"] };
+// Lines inside one course's view need not repeat the course name ("课程 · 开始播放：…").
+const bare = (text, course) => course && text.startsWith(course) ? text.slice(course.length).replace(/^\s*[·：:]\s*/, "") || text : text;
+function logHtml(lines, filter = "all", course = "") {
   const shown = lines.filter((l) => filter === "all" || (filter === "warn" ? l.level : l.level === "error")).slice(0, 120);
-  return shown.map((l) => {
-    const [cls, lv] = LOG_LEVEL[l.level] || (l.done ? ["ok", "OK"] : ["", "·"]);
-    return `<div class="line ${cls}"><time>${esc(l.time)}</time><span class="lv">${lv}</span><span class="msg">${esc(l.text)}</span></div>`;
+  return shown.map((l, i) => {
+    const [cls, lv] = LOG_LEVEL[l.level] || (l.done ? ["ok", "完成"] : ["", ""]);
+    const fresh = i === 0 && l.at && Date.now() - l.at < 700 ? " fresh" : "";
+    return `<div class="line ${cls}${fresh}"><time>${esc(l.time)}</time><i class="lv" ${lv ? `title="${lv}"` : ""}></i><span class="msg">${esc(bare(l.text, course))}</span></div>`;
   }).join("") || `<div class="line none">${lines.length ? "没有符合条件的日志" : "等待第一条进度…"}</div>`;
 }
 
@@ -968,19 +982,38 @@ function renderFocus() {
   const { pct, label } = progressOf(run);
   const k = key(job.platform, job.course);
   body.style.setProperty("--c", inkOf({ id: job.course }));
-  const grid = job.title !== "AI 答题" && unitsOf(k)
-    ? `<div class="section" style="margin-top:34px"><h3>整门课</h3><span class="aside mono">${tally(unitsOf(k)).done}/${tally(unitsOf(k)).all}</span></div>${gridHtml(k)}` : "";
+  const units = job.title !== "AI 答题" && unitsOf(k), t = units && tally(units);
+  const grid = units
+    ? `<div class="section"><h3>整门课</h3><span class="aside mono">${t.done}/${t.all} · ${Math.round((t.done / (t.all || 1)) * 100)}%</span></div>${gridHtml(k)}` : "";
+  const spot = live && spotOf(job, run);
+  const chapter = run.unit && (units || []).find((ch) => ch.units.some((u) => u.id === run.unit.key));
   const headline = live
     ? `<div class="clock" data-clock="${live.id}">${clock(elapsed(job))}<small>已用时</small></div>
-       <div class="now">${esc(run.unit?.name || run.detail || "准备中…")}</div><div class="of">${esc(run.detail && run.unit ? run.detail : job.course_name)}</div>
-       <div class="track ${pct == null ? "unknown" : ""}"><i style="width:${pct ?? 0}%"></i></div>
-       <div class="ticks"><span>开始</span><span>${esc(label)}</span><span>结束</span></div>`
+       <div class="now">${esc(run.unit?.name || bare(run.detail, job.course_name).replace(/ · [\d:]+\/[\d:]+$/, "") || "准备中…")}</div>
+       <div class="of">${chapter ? `${esc(chapter.name)} · ` : ""}${esc(job.course_name)}</div>
+       ${spot ? `<div class="spot"><div class="track"><i style="width:${spot.pct}%"></i></div><span class="mono">${spot.label}</span></div>`
+         : !units ? `<div class="spot"><div class="track ${pct == null ? "unknown" : ""}"><i style="width:${pct ?? 0}%"></i></div><span class="mono">${esc(label)}</span></div>` : ""}`
     : `<div class="clock">${STATE_WORD[job.state] || "结束"}<small>${duration(elapsed(job))}</small></div>
        <div class="now">${esc(job.summary || "")}</div><div class="of">${esc(job.title)} · ${esc(job.course_name)}</div>`;
   patch(body, `<div class="focus"><div>${headline}${grid}</div>
     <div class="log"><div class="log_head"><span class="grow">日志</span>
       ${[["all", "全部"], ["warn", "提醒"], ["err", "错误"]].map(([f, l]) => `<button class="chip" data-filter="${f}" aria-pressed="${state.logFilter === f}">${l}</button>`).join("")}</div>
-      <div class="log_body">${logHtml(live ? run.lines : job.lines || [], state.logFilter)}</div></div></div>`);
+      <div class="log_body">${logHtml(live ? run.lines : job.lines || [], state.logFilter, job.course_name)}</div></div></div>`);
+  // Long courses: keep the chapter being studied in view inside the grid, once per chapter change.
+  const box = $(".focus .chapters", body), current = box && $(".chapter.current", box);
+  const mark = current && `${job.id}:${current.querySelector(".name").textContent}`;
+  if (current && mark !== state.shownChapter) {
+    state.shownChapter = mark;
+    box.scrollTo({ top: current.offsetTop - box.clientHeight / 2 + current.offsetHeight / 2, behavior: sheet.classList.contains("open") ? "smooth" : "auto" });
+  }
+}
+// The position inside the current video, from details like "课程 · 视频 · 01:58/19:43" (or seconds, "118/1183").
+function spotOf(job, run) {
+  const m = (run.detail || "").match(/ · (\d+(?::\d+)*)\/(\d+(?::\d+)*)$/);
+  if (!m) return null;
+  const secs = (v) => v.split(":").reduce((a, b) => a * 60 + Number(b), 0);
+  const at = secs(m[1]), of = secs(m[2]);
+  return of ? { pct: Math.min(100, (at / of) * 100), label: `${clock(at)} / ${clock(of)}` } : null;
 }
 function openSheet(id) {
   if (id) state.focus = id;
@@ -1013,7 +1046,7 @@ async function stopJob(id) {
 
 const STATUS = { success: "完成", skipped: "跳过", error: "出错", submitted: "已交卷", saved: "已保存答案", preview: "已生成答案", paused: "已暂停", ai_error: "AI 出错", submission_unknown: "交卷结果未知", waiting: "等你操作" };
 function pushLine(run, text, level = "", done = false) {
-  run.lines.unshift({ text, level, done, time: new Date().toTimeString().slice(0, 5) });
+  run.lines.unshift({ text, level, done, time: new Date().toTimeString().slice(0, 5), at: Date.now() });
   run.lines.length = Math.min(run.lines.length, 200);
 }
 
@@ -1058,6 +1091,7 @@ function handleEvent(event) {
     else if (event.kind === "unit") {
       const u = findUnit(key(job.platform, job.course), event.key);
       if (u) u.state = event.status;
+      if (u && event.status === "done") state.stamped = { id: u.id, at: Date.now() };
       if (event.status === "running") run.unit = { name: event.name, key: event.key };
     } else if (event.kind === "result") {
       if (run.overall) run.overall.done += 1;

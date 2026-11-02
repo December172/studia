@@ -28,6 +28,8 @@ const models = [
   { id: "p2", provider: "DeepSeek 官方", model: "deepseek-v4.1-flash", base_url: "https://api.deepseek.com/v1", key_hint: "sk-…77c1", active: false, health: "error", health_message: "401 鉴权失败", deletable: true },
 ];
 const history = [
+  { id: "h4", title: "AI 答题", course: "shared-1", course_name: "新一代信息技术导论", platform: "zhs", state: "done", summary: "处理完成 7/7 份试卷",
+    started: Date.now() / 1000 - 700, ended: Date.now() / 1000 - 629, lines: [{ text: "新一代信息技术导论 · 第三章单元测试 · 已交卷", done: true, time: "14:32" }] },
   { id: "h3", title: "AI 答题", course: "shared-1", course_name: "新一代信息技术导论", platform: "zhs", state: "waiting", summary: "智慧树要求先完成滑块验证",
     started: Date.now() / 1000 - 900, ended: Date.now() / 1000 - 840, lines: [{ text: "第三章单元测试 · 等你操作", level: "warn", done: true, time: "14:20" }] },
   { id: "h2", title: "AI 答题", course: "m1", course_name: "大学英语（二）", platform: "mooc", state: "error", summary: "第 4 题：AI 返回的答案格式不符",
@@ -49,7 +51,9 @@ function chapters(spec, done) {
 const units = {
   m1: chapters([["第 1 章 自我介绍", 7], ["第 2 章 校园生活", 8], ["第 3 章 职场沟通", 9], ["第 4 章 产品说明", 8], ["第 5 章 安全规范", 7]], 22),
   "shared-1": chapters([["第一章 信息技术概述", 6], ["第二章 云计算", 6], ["第三章 人工智能", 7]], 99),
-  "ai-1": chapters([["信道与编码", 5], ["网络体系结构", 6]], 7),
+  "ai-1": chapters([["广义的通信概念", 2], ["通信的发展", 5], ["现代通信的概念", 2], ["贝尔和贝尔实验室", 6], ["通信基本模型", 5], ["信息、消息与信号", 5],
+    ["信息的度量", 4], ["信号基本概念和分类", 4], ["信号的变换", 4], ["信号的时域和频域特性", 4], ["通信系统一般模型", 4], ["调制与解调", 6],
+    ["复用技术", 5], ["计算机网络的发展历程", 6], ["网络体系结构", 7], ["物理层", 6], ["数据链路层", 8], ["网络层", 9], ["传输层", 7], ["应用层", 6]], 66),
 };
 
 const GROUP = { study: "learn", review: "learn", answer: "answer" };
@@ -96,15 +100,15 @@ function fakeJob(body) {
     if (ticks === 0) {
       u.state = "running";
       send({ type: "progress", kind: "unit", key: u.id, name: u.name, status: "running" });
-      send({ type: "log", text: `开始：${u.name}`, level: "" });
+      send({ type: "log", text: `${course.name} · 开始播放：${u.name}`, level: "" });
     }
     ticks += 1;
-    const length = u.minutes ? 4 : 1;
-    send({ type: "progress", kind: "detail", name: `${course.name} · ${u.name} · ${ticks}/${length}` });
+    const length = u.minutes ? 6 : 1, secs = (u.minutes || 1) * 60, mmss = (v) => `${String(Math.floor(v / 60)).padStart(2, "0")}:${String(v % 60).padStart(2, "0")}`;
+    send({ type: "progress", kind: "detail", name: `${course.name} · ${u.name} · ${mmss(Math.round((secs * ticks) / length))}/${mmss(secs)}` });
     if (ticks >= length) {
       u.state = Math.random() < 0.08 ? "failed" : "done";
       send({ type: "progress", kind: "unit", key: u.id, name: u.name, status: u.state });
-      send({ type: "log", text: u.state === "done" ? `已完成：${u.name}` : `${u.name}：上报失败`, level: u.state === "done" ? "" : "error" });
+      send({ type: "log", text: u.state === "done" ? `${course.name} · 播放完成：${u.name}` : `${course.name} · ${u.name}：上报失败`, level: u.state === "done" ? "" : "error" });
       if (Math.random() < 0.12) send({ type: "log", text: "讨论区发帖频率限制，等待 60 秒", level: "warn" });
       i += 1; ticks = 0;
       const doneCount = total - todo.length + i;
