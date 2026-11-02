@@ -82,6 +82,50 @@ class SecureTest(unittest.TestCase):
         self.assertIn("secretStr", kwargs["json"])
         self.assertIn("json", kwargs)
 
+    def test_captcha_retry_preserves_json_body(self):
+        client = make_api()
+        client.session.request.side_effect = [json_response({"code": -12}), json_response({"code": 200})]
+        with patch.object(client, "pass_captcha", return_value=True):
+            client.secure(api.STUDY_GATEWAY + "/learning/test", {"a": 1}, key="ai", ok=200,
+                          as_json=True, captcha_ev="test-context")
+        first, retry = client.session.request.call_args_list
+        for call in (first, retry):
+            decoded = json.loads(decrypt(call.kwargs["json"]["secretStr"], KEYS["ai"]))
+            self.assertEqual(decoded["a"], 1)
+        self.assertIsNotNone(retry.kwargs["json"])
+        self.assertIsNone(retry.kwargs["data"])
+
+    def test_captcha_is_accepted_only_when_platform_confirms(self):
+        client = make_api()
+        with patch("ZHSMain.slider.solve", return_value=("test-token", [])):
+            client.session.request.return_value = json_response({"data": {"status": 200, "pass": True}})
+            self.assertTrue(client.pass_captcha("test-context"))
+            form = client.session.request.call_args.kwargs["data"]
+            data = json.loads(decrypt(form["secretStr"], KEYS["video"]))
+            self.assertEqual((data["token"], data["ev"], data["checkType"]),
+                             ("test-token", "test-context", 1))
+            client.session.request.return_value = json_response({"data": {"status": "200", "pass": True}})
+            self.assertTrue(client.pass_captcha("test-context"))
+            client.session.request.return_value = json_response({"data": {"status": 200, "pass": False}})
+            self.assertFalse(client.pass_captcha("test-context"))
+
+    def test_without_learning_context_captcha_does_not_retry(self):
+        client = make_api()
+        client.session.request.return_value = json_response({"code": -12})
+        with patch.object(client, "pass_captcha") as solve, self.assertRaises(CaptchaRequired):
+            client.secure(api.STUDY_GATEWAY + "/learning/test", {})
+        solve.assert_not_called()
+        self.assertEqual(client.session.request.call_count, 1)
+
+    def test_slider_hint_selects_puzzle_and_failure_does_not_retry(self):
+        client = make_api()
+        client.session.request.return_value = json_response({"code": -12, "captchaType": "slide"})
+        with patch.object(client, "pass_captcha", return_value=False) as solve:
+            with self.assertRaises(CaptchaRequired):
+                client.secure(api.STUDY_GATEWAY + "/learning/test", {}, captcha_ev="context")
+        self.assertEqual(solve.call_args.kwargs["captcha_type"], "puzzle")
+        self.assertEqual(client.session.request.call_count, 1)
+
     def test_captcha_and_api_error(self):
         client = make_api()
         client.session.request.return_value = json_response({"code": -12})

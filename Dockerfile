@@ -9,14 +9,18 @@ ENV TZ=Asia/Shanghai \
     PIP_NO_CACHE_DIR=1 \
     STUDIA_HOST=0.0.0.0 \
     STUDIA_PORT=8080 \
-    STUDIA_DATA=/data
+    STUDIA_DATA=/data \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 
 # Log timestamps and the admin's log export use local time.
 RUN apt-get update && apt-get install -y --no-install-recommends tzdata && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install -r requirements.txt \
+    && python -m playwright install --with-deps --only-shell chromium \
+    && chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH" \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY . .
 # Run unprivileged; /data is the only writable place (mount a volume there).
