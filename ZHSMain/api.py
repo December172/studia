@@ -292,7 +292,8 @@ class ZHSApi:
             "dateFormate": str(timestamp),
         }
 
-    def secure(self, url, payload, *, key="video", ok=0, as_json=False, method="POST"):
+    def secure(self, url, payload, *, key="video", ok=0, as_json=False, method="POST",
+               captcha_ev=None, captcha_vision=None):
         form = self._secure_form(payload, key)
         if method.upper() == "GET":
             result = self._request("GET", url, params=form)
@@ -308,7 +309,11 @@ class ZHSApi:
             _log_failure(method, url, getattr(result, "http_status", None), code=code,
                          message=result.get("message") or result.get("msg") or "",
                          result=result, captcha=True)
-            if self.pass_captcha(result):
+            kind = _captcha_type(result).lower()
+            captcha_type = "puzzle" if "jigsaw" in kind or "slide" in kind else "space"
+            if (captcha_ev is not None and url.startswith(STUDY_GATEWAY + "/learning/") and
+                    self.pass_captcha(captcha_ev, vision=captcha_vision, captcha_type=captcha_type)):
+                form = self._secure_form(payload, key)
                 if method.upper() == "GET":
                     result = self._request("GET", url, params=form)
                 elif as_json:
@@ -325,31 +330,38 @@ class ZHSApi:
             raise ZHSApiError(code, message)
         return result
 
-    def pass_captcha(self, result):
-        """按平台报出的验证类型自动通过。目前只实现了易盾滑块（jigsaw）。"""
+    def pass_captcha(self, ev, *, vision=None, captcha_type="space"):
+        """验证令牌须经智慧树确认后才允许重试。"""
         from ZHSMain import slider
 
-        kind = _captcha_type(result)
-        if "jigsaw" not in kind and "slider" not in kind:
-            logger.warning("验证类型 %s 暂不支持自动通过，需要人工处理", kind)
+        if not ev:
+            logger.warning("缺少学习验证上下文，需要人工处理")
             return False
         cookies = [
             {"name": c.name, "value": c.value, "domain": c.domain or "", "path": c.path or "/"}
             for c in self.session.cookies
         ]
         try:
-            validate, fresh = slider.solve(cookies, page_url=EXAM_PAGE)
+            validate, _ = slider.solve(cookies, page_url="https://studyvideoh5.zhihuishu.com/stuStudy",
+                                       captcha_type=captcha_type, vision=vision)
         except Exception as exc:
-            logger.warning("滑块自动验证未完成：%s", exc)
+            logger.warning("自动验证未完成：%s", type(exc).__name__)
             return False
-        for cookie in fresh:
-            if cookie.get("domain") and "zhihuishu" in cookie["domain"]:
-                self.session.cookies.set(cookie["name"], cookie["value"],
-                                         domain=cookie["domain"], path=cookie.get("path") or "/")
-        if validate:
-            logger.info("滑块验证已通过，已换回浏览器 cookie")
-            return True
-        return False
+        if not validate:
+            return False
+        try:
+            form = self._secure_form({"token": validate, "ev": ev, "checkType": 1}, "video")
+            result = self._request("POST", STUDY_GATEWAY + "/learning/validateSlideToken", data=form)
+        except (ZHSError, PlatformUnavailable, AuthenticationExpired):
+            logger.warning("智慧树未能确认验证结果")
+            return False
+        data = result.get("data")
+        accepted = isinstance(data, dict) and data.get("status") in (200, "200") and data.get("pass") is True
+        if accepted:
+            logger.info("智慧树已确认验证通过")
+        else:
+            logger.warning("智慧树未确认验证通过")
+        return accepted
 
     def login_qr(self):
         self._request(
@@ -563,17 +575,19 @@ class ZHSApi:
             logger.debug("读取课件信息失败：%s", exc)
             return None
 
-    def shared_save_cache(self, payload):
+    def shared_save_cache(self, payload, *, captcha_ev=None, captcha_vision=None):
         try:
-            return self.secure(STUDY_GATEWAY + "/learning/saveCacheIntervalTimeV2", payload)
+            return self.secure(STUDY_GATEWAY + "/learning/saveCacheIntervalTimeV2", payload,
+                               captcha_ev=captcha_ev, captcha_vision=captcha_vision)
         except (AuthenticationExpired, CaptchaRequired):
             raise
         except Exception as exc:
             logger.debug("保存缓存进度失败：%s", exc)
             return None
 
-    def shared_save_progress(self, payload):
-        return self.secure(STUDY_GATEWAY + "/learning/saveDatabaseIntervalTimeV2", payload)
+    def shared_save_progress(self, payload, *, captcha_ev=None, captcha_vision=None):
+        return self.secure(STUDY_GATEWAY + "/learning/saveDatabaseIntervalTimeV2", payload,
+                           captcha_ev=captcha_ev, captcha_vision=captcha_vision)
 
     def ai_course_basic(self, course_id, class_id):
         return self.secure(

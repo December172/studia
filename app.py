@@ -251,12 +251,18 @@ class Application:
         max_workers = self.store.concurrency()['study']
         inject = {}
         activity_ai = None
+        captcha_ai = None
         if version == 0:
             # Only MOOC learning posts AI discussions and a 5-star evaluation; a
             # failure to obtain a healthy AI client aborts instead of silently
             # reporting a successful study run.
             activity_ai = self.verify_ai(self.ai_configuration())
             inject['activity_ai'] = activity_ai
+        elif version == 2:
+            config = self.store.ai_config()
+            if config is not None:
+                captcha_ai = AIClient(config)
+                inject['captcha_ai'] = captcha_ai
         try:
             self.view.plan("学习管理", selected)
             if version == 2 and review_minutes:
@@ -277,6 +283,8 @@ class Application:
         finally:
             if activity_ai is not None:
                 activity_ai.session.close()
+            if captcha_ai is not None:
+                captcha_ai.session.close()
 
     def export(self):
         client, selected = self.client_and_courses(AIMoocApi)
