@@ -41,6 +41,9 @@ const ICON = {
   key: svg('<circle cx="5.5" cy="10.5" r="3"/><path d="m7.6 8.4 5.9-5.9M11 5l1.5 1.5"/>', 15),
   shield: svg('<path d="M8 1.8 13 3.6v4c0 3.2-2.1 5.4-5 6.6-2.9-1.2-5-3.4-5-6.6v-4z"/>', 15),
   login: svg('<path d="M9.5 2.5h3v11h-3M3 8h7M7.5 5l3 3-3 3"/>', 15),
+  back: svg('<path d="M10 3 5 8l5 5"/>', 18),
+  chev: svg('<path d="m6 3.5 4.5 4.5L6 12.5"/>', 14),
+  spark: svg('<path d="M8 1.8 9.4 6.6 14.2 8 9.4 9.4 8 14.2 6.6 9.4 1.8 8 6.6 6.6z"/>', 15),
   updown: svg('<path d="m5 6 3-3 3 3M5 10l3 3 3-3"/>', 12),
   play: '<svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><path d="M3 1.6v8.8L10.4 6z"/></svg>',
   repeat: svg('<path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5v3h-3"/>', 14),
@@ -78,7 +81,7 @@ async function api(path, { method = "GET", body } = {}) {
 }
 
 const state = {
-  platforms: [], courses: {}, papers: {}, units: {}, selected: {},
+  platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {},
   jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, lastDone: null,
   current: store.get("studia-platform", ""), meOpen: false, adminTab: "people", logFilter: "all", editPassword: false, adminEdit: null,
 };
@@ -225,7 +228,7 @@ function renderSidebar() {
   const role = me ? (me.role === "admin" ? "管理员" : "成员") : "只有这台电脑能访问";
   const admin = me?.role === "admin";
   const under = (...prefixes) => prefixes.some((x) => view.startsWith(x));
-  patch($(".side_foot"), `<button class="me" data-me aria-haspopup="menu" aria-expanded="${state.meOpen}" aria-current="${under("#/settings", "#/admin")}">
+  patch($(".side_foot"), `<button class="me" data-me aria-haspopup="menu" aria-expanded="${state.meOpen}" aria-current="${under("#/me", "#/settings", "#/admin")}">
       <span class="avatar">${esc(initial)}</span><span class="who"><b>${esc(name)}</b><small>${role}</small></span>
       <span class="chev">${ICON.updown}</span></button>
     ${state.meOpen ? `<div class="menu me_menu" role="menu">
@@ -236,29 +239,15 @@ function renderSidebar() {
       ${me ? `<div class="psep"></div><button class="menu_row danger" role="menuitem" data-signout>${ICON.logout}<span class="grow">退出 Studia</span></button>` : ""}
     </div>` : ""}`);
 
-  // Phones: a slim top bar with the platforms, three tabs at the bottom, and a tray
-  // that slides up from the tabs for the course list or the account.
-  patch($(".mbar_plat"), platforms);
+  // Phones: three tabs at the bottom; a page one level down (a course, a settings tab) gets a back
+  // button in the top bar instead of the logo. The platform switch only sits on the overview.
+  const back = under("#/course") ? ["#/home", "总览"] : under("#/settings", "#/admin") ? ["#/me", "我的"] : null;
+  patch($(".mbar"), back ? `<button class="mback" data-go="${back[0]}">${ICON.back}<span>${back[1]}</span></button><span class="grow"></span>`
+    : `<img class="mark" src="icon.svg" alt=""><b>Studia</b><span class="grow"></span>${under("#/home", "#/login") ? platforms : ""}`);
   patch($(".mtabs"), `
-    <button class="mtab" data-go="#/home" aria-current="${!state.tray && under("#/home", "#/course", "#/login")}">${ICON.cells}<span>课程</span></button>
-    <button class="mtab" data-go="#/jobs" aria-current="${!state.tray && view === "#/jobs"}">${ICON.pulse}<span>任务</span>${state.jobs.length ? `<b class="badge">${state.jobs.length}</b>` : ""}</button>
-    <button class="mtab" data-tray="me" aria-current="${state.tray === "me" || (!state.tray && under("#/settings", "#/admin"))}"><span class="avatar">${esc(initial)}</span><span>我的</span></button>`);
-  const row = (attrs, icon, label, extra = "", cls = "") => `<button class="tray_row ${cls}" ${attrs}>${icon}<span class="grow">${esc(label)}</span>${extra}</button>`;
-  let tray = "";
-  if (state.tray === "me") {
-    tray = `<div class="tray_head"><span class="avatar big">${esc(initial)}</span><span class="who"><b>${esc(name)}</b><small>${role}</small></span></div>
-      ${row('data-go="#/settings"', ICON.gear, "设置")}
-      ${admin ? row('data-go="#/admin"', ICON.shield, "管理后台") : ""}
-      ${row("data-toggle-theme", night ? ICON.sun : ICON.moon, night ? "日间模式" : "夜读模式")}
-      ${me ? row("data-signout", ICON.logout, "退出 Studia", "", "danger") : ""}`;
-  }
-  if (tray) patch($(".tray_body"), tray);
-}
-
-function setTray(which) {
-  state.tray = which || null;
-  document.body.classList.toggle("tray-open", !!state.tray);
-  renderSidebar();
+    <button class="mtab" data-go="#/home" aria-current="${under("#/home", "#/course", "#/login")}">${ICON.cells}<span>总览</span></button>
+    <button class="mtab" data-go="#/jobs" aria-current="${view === "#/jobs"}">${ICON.pulse}<span>任务</span>${state.jobs.length ? `<b class="badge">${state.jobs.length}</b>` : ""}</button>
+    <button class="mtab" data-go="#/me" aria-current="${under("#/me", "#/settings", "#/admin")}"><span class="avatar">${esc(initial)}</span><span>我的</span></button>`);
 }
 
 
@@ -588,6 +577,22 @@ const VIEWS = {
     setPage(`${head}${stats}${list.length ? `<div class="section"><h3>课程</h3></div><div class="course_cards">${list.map(card).join("")}</div>` : '<div class="empty">这个账号下没有课程</div>'}`);
   },
 
+  me() {
+    const me = session.user;
+    const row = (attrs, icon, label, sub = "", end = ICON.chev) =>
+      `<button class="lrow" ${attrs}>${icon}<span class="lrow_t"><b>${esc(label)}</b>${sub ? `<small>${esc(sub)}</small>` : ""}</span>${end}</button>`;
+    setPage(`<div class="me_card"><span class="avatar big">${esc(me ? me.username.slice(0, 1).toUpperCase() : "本")}</span>
+        <span class="who"><b>${esc(me ? me.username : "本机")}</b><small>${me ? (me.role === "admin" ? "管理员" : "成员") : "只有这台电脑能访问"}</small></span></div>
+      <div class="section"><h3>平台账号</h3></div>
+      <div class="lrows">${state.platforms.map((p) => row(`data-go="${p.logged_in ? "#/settings/account" : `#/login/${p.id}`}"`,
+        `<span class="plat ${p.id}">${INITIAL[p.id]}</span>`, p.name, platformStatus(p), p.logged_in ? ICON.chev : '<span class="lrow_go">登录</span>')).join("")}</div>
+      <div class="section"><h3>设置</h3></div>
+      <div class="lrows">${row('data-go="#/settings/models"', ICON.spark, "AI 模型")}${row('data-go="#/settings/account"', ICON.key, "账号")}
+        ${row('data-go="#/settings/study"', ICON.gear, "偏好")}${me?.role === "admin" ? row('data-go="#/admin"', ICON.shield, "管理后台") : ""}</div>
+      <div class="lrows" style="margin-top:14px">${row("data-toggle-theme", ICON.moon, "夜读模式", "", '<span class="switch" aria-hidden="true"></span>')}</div>
+      ${me ? '<button class="btn danger me_out" data-signout>退出 Studia</button>' : ""}`);
+  },
+
   login(pid) {
     const p = platformOf(pid);
     if (!p) return setPage(`<div class="empty">不支持这个平台</div>`);
@@ -837,12 +842,13 @@ function renderCourse(p, c, tab, full = false) {
   } else if (!p.features.answer) {
     body = `<div class="notice">${esc(p.name)} 的网页版答题还在接入中。现在可以在终端里运行 <code>python StartWork.py</code>，选这门课后进入「AI 答题」。</div>`;
   } else if (!papers) {
-    body = `<div class="empty">正在读取试卷…</div>`;
+    const failed = state.paperErrors[k];
+    body = failed ? `<div class="empty">${esc(failed)} · <button class="link" data-papers-retry="${esc(k)}">重试</button></div>` : `<div class="empty">正在读取试卷…</div>`;
   } else {
     const selected = selectedOf(k);
     const row = (x) => {
       const on = selected.has(x.id);
-      const pill = !x.available ? `<span class="pill">${esc(x.status)}</span>`
+      const pill = !x.available ? ""
         : x.redo_left != null ? `<span class="pill blue">可重做 · 剩 ${esc(x.redo_left)} 次</span>`
         : x.done ? `<span class="pill">已提交</span>` : "";
       const note = x.reason || (x.redo_left != null ? "重做会覆盖当前成绩" : x.hint) || (x.available ? x.status : "");
@@ -882,7 +888,7 @@ function renderCourse(p, c, tab, full = false) {
   const submit = $("[data-submit]", page);
   if (submit) submit.onclick = () => startJob({ platform: p.id, course: c.id, type: "answer", tasks: tasks(), auto_submit: true });
   if (tab === "study") loadUnits(p.id, c.id);
-  if (tab === "answer" && p.features.answer && !papers) loadPapers(p, c);
+  if (tab === "answer" && p.features.answer && !papers && !state.paperErrors[k]) loadPapers(p, c);
 }
 
 const loadingPapers = new Set();
@@ -893,11 +899,12 @@ async function loadPapers(p, c) {
   try {
     const papers = (await api(`/api/platforms/${p.id}/tasks?course=${encodeURIComponent(c.id)}`)).tasks;
     state.papers[k] = papers;
+    delete state.paperErrors[k];
     const selected = selectedOf(k);
     if (!selected.size) papers.filter((x) => x.available && !x.done).forEach((x) => selected.add(x.id));
   } catch (error) {
-    state.papers[k] = [];
-    toast(error.message);
+    // A failed read is not an empty course: keep it unloaded so a retry or the next login reads it again.
+    state.paperErrors[k] = error.message;
   } finally {
     loadingPapers.delete(k);
   }
@@ -1158,8 +1165,16 @@ async function browserLogin(pid) {
   }
 }
 
+// Papers, units and picks read under the old login (or while it had expired) are dropped.
+function forgetPlatform(pid) {
+  for (const cache of [state.papers, state.paperErrors, state.units, state.selected]) {
+    for (const k of Object.keys(cache)) if (k.startsWith(`${pid}:`)) delete cache[k];
+  }
+}
+
 async function afterLogin(pid) {
   toast("登录成功");
+  forgetPlatform(pid);
   await refreshState();
   await loadCourses(pid);
   switchPlatform(pid);
@@ -1214,7 +1229,7 @@ async function refreshState() {
       delete state.papers[key(gone.platform, gone.course)];
     }
     state.jobs = live;
-    for (const p of state.platforms) if (!p.logged_in) delete state.courses[p.id];
+    for (const p of state.platforms) if (!p.logged_in) { delete state.courses[p.id]; forgetPlatform(p.id); }
   } catch (error) { toast(error.message); }
   renderSidebar();
 }
@@ -1260,9 +1275,6 @@ document.addEventListener("click", (event) => {
   if (state.meOpen && !t.closest("[data-me]")) { state.meOpen = false; renderSidebar(); }
   if (t.closest("[data-me]")) { state.meOpen = !state.meOpen; renderSidebar(); return; }
   if (t.closest("[data-signout]")) { signOut(); return; }
-  const trayBtn = t.closest("[data-tray]"); if (trayBtn) { setTray(state.tray === trayBtn.dataset.tray ? null : trayBtn.dataset.tray); return; }
-  if (t.closest("[data-tray-close]")) { setTray(null); return; }
-  if (state.tray && t.closest("[data-go], [data-find], [data-signout]")) setTray(null);
   const sw = t.closest("[data-switch]"); if (sw) { switchPlatform(sw.dataset.switch); return; }
   const target = t.closest("[data-go]"); if (target) { closeSheet(); go(target.dataset.go); }
   if (t.closest("[data-find]")) openFinder();
@@ -1276,6 +1288,13 @@ document.addEventListener("click", (event) => {
   const focus = t.closest("[data-focus]"); if (focus) { state.focus = focus.dataset.focus; renderFocus(); renderPlayer(); }
   if (t.closest("[data-dismiss]")) { state.lastDone = null; repaint(); }
   const filter = t.closest("[data-filter]"); if (filter) { state.logFilter = filter.dataset.filter; renderFocus(); }
+  const papersRetry = t.closest("[data-papers-retry]");
+  if (papersRetry) {
+    const [pid, ...rest] = papersRetry.dataset.papersRetry.split(":"), p = platformOf(pid), c = courseOf(pid, rest.join(":"));
+    delete state.paperErrors[papersRetry.dataset.papersRetry];
+    if (p && c) loadPapers(p, c);
+    repaint();
+  }
   const retry = t.closest("[data-units-retry]");
   if (retry) { const [pid, ...rest] = retry.dataset.unitsRetry.split(":"); delete state.units[retry.dataset.unitsRetry]; loadUnits(pid, rest.join(":")); repaint(); }
 });
@@ -1295,7 +1314,6 @@ window.addEventListener("keydown", (event) => {
   if (mod && event.key.toLowerCase() === "k") { event.preventDefault(); openFinder(); return; }
   if (mod && event.key.toLowerCase() === "j") { event.preventDefault(); toggleTheme(); return; }
   if (mod && event.key === ",") { event.preventDefault(); go("#/settings"); return; }
-  if (event.key === "Escape" && state.tray) { setTray(null); return; }
   if (event.key === "Escape" && state.meOpen) { state.meOpen = false; renderSidebar(); return; }
   if (event.key === "Escape") { closeSheet(); return; }
   if (mod || event.altKey || event.target.closest("input, textarea, select") || document.body.classList.contains("signed-out")) return;
