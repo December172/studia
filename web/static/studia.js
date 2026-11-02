@@ -180,7 +180,7 @@ function renderSidebar() {
     `<button class="nav_item ${cls}" data-go="${hash}" aria-current="${view === hash}">${icon}${rolling(label)}${extra}</button>`;
   const platforms = `<div class="plat_seg" role="tablist">${state.platforms.map((x, i) =>
     `<button role="tab" aria-selected="${x.id === p.id}" data-switch="${x.id}" title="${esc(platformStatus(x))} · ⌘${i + 1}">${esc(x.short)}${
-      state.jobs.some((j) => j.platform === x.id) ? '<i class="busy"></i>' : x.logged_in ? "" : '<i class="out"></i>'}</button>`).join("")}</div>`;
+      state.jobs.some((j) => j.platform === x.id) ? '<i class="busy"></i>' : ""}</button>`).join("")}</div>`;
   patch($(".switcher_wrap"), platforms);
 
   const courses = [];
@@ -1275,7 +1275,7 @@ function showAuth(mode = "login") {
     : `<input name="${name}" ${attrs}>`}</label>`;
   box.innerHTML = `
     <section class="auth_art" aria-hidden="true">
-      <div class="brand"><span class="seal">S</span><b>Studia</b></div>
+      <div class="brand"><img class="mark" src="icon.svg" alt=""><b>Studia</b></div>
       <div class="auth_pitch"><h1>课程、视频和作业，<br>摊在一张书桌上。</h1>
         <p>自动学习还没学完的单元，AI 帮你作答试卷；每一格都看得见进度。</p></div>
       <div class="auth_grid">${authGrid()}</div>
