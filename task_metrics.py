@@ -26,6 +26,17 @@ def score_text(item):
     return text
 
 
+def completion_with_score(item, status):
+    """A MOOC row with a score (or 待批) has been handed in, whatever its answer record says.
+
+    The record check only knows code 2 (submitted) and 0 (draft); a graded paper whose record
+    carries another code came back "unknown" and was offered for answering again.
+    """
+    if status in ("unknown", "not_started") and score_text(item) not in ("?", "--"):
+        return "submitted"
+    return status
+
+
 def attempts_text(item, category=None):
     # The live homework catalog uses -1 when there is no retry opportunity.
     homework = category == 1

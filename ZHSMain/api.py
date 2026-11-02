@@ -293,7 +293,7 @@ class ZHSApi:
         }
 
     def secure(self, url, payload, *, key="video", ok=0, as_json=False, method="POST",
-               captcha_ev=None, captcha_vision=None):
+               captcha_ev=None, captcha_vision=None, optional=False):
         form = self._secure_form(payload, key)
         if method.upper() == "GET":
             result = self._request("GET", url, params=form)
@@ -323,8 +323,11 @@ class ZHSApi:
                 code = result.get("code", ok)
         if code != ok:
             message = result.get("message") or result.get("msg") or ""
-            _log_failure(method, url, getattr(result, "http_status", None), code=code, message=message,
-                         result=result, captcha=code == -12)
+            # An optional call refused by the platform is expected and handled by its caller;
+            # warning about it put a scary line in the user's job log on every run.
+            if not optional or code == -12:
+                _log_failure(method, url, getattr(result, "http_status", None), code=code, message=message,
+                             result=result, captcha=code == -12)
             if code == -12:
                 raise CaptchaRequired("智慧树要求验证码，请到网页完成验证后重试")
             raise ZHSApiError(code, message)
@@ -578,7 +581,7 @@ class ZHSApi:
     def shared_save_cache(self, payload, *, captcha_ev=None, captcha_vision=None):
         try:
             return self.secure(STUDY_GATEWAY + "/learning/saveCacheIntervalTimeV2", payload,
-                               captcha_ev=captcha_ev, captcha_vision=captcha_vision)
+                               captcha_ev=captcha_ev, captcha_vision=captcha_vision, optional=True)
         except (AuthenticationExpired, CaptchaRequired):
             raise
         except Exception as exc:

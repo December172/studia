@@ -106,6 +106,19 @@ class WebServerTest(unittest.TestCase):
         self.assertEqual((history[0]["platform"], history[0]["course_name"]), ("zhs", "网络课"))
         self.assertEqual(history[0]["lines"][0]["text"], "第一节 · 完成")
 
+    def test_job_progress_survives_a_page_opened_mid_run(self):
+        job = {"id": "j1", "lines": [], "progress": {}}
+        self.app.jobs["j1"] = job
+        report = self.app.progress_of(job)
+        report(ProgressEvent("begin", "智慧树学习", 2, unit="门课程"))
+        report(ProgressEvent("unit", "第二节", status="running", key="u2"))
+        report(ProgressEvent("result", "网络课", status="success"))
+        report(ProgressEvent("resources", "网络课", 616, unit="项资源", completed=165))
+        self.assertEqual(job["progress"], {
+            "overall": {"name": "智慧树学习", "total": 2, "done": 1, "unit": "门课程"},
+            "unit": {"name": "第二节", "key": "u2"},
+            "sub": {"name": "网络课", "done": 165, "total": 616, "unit": "项"}})
+
     def test_captcha_leaves_the_job_waiting_for_the_user(self):
         from ZHSMain.api import CaptchaRequired
         platform = self.app.platforms["zhs"]
