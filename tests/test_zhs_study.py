@@ -39,6 +39,7 @@ class FakeClient:
         self.lv = {}
         self.lesson = {}
         self.study_info_queue = None
+        self.cache_fails = False
         self.prelearning_queue = []
         self.prelearning_default = {"studiedLessonDto": {"id": 100, "studyTotalTime": 0}}
         self.question_points = []
@@ -105,6 +106,7 @@ class FakeClient:
 
     def shared_save_cache(self, payload):
         self._record("shared_save_cache", payload=payload)
+        return None if self.cache_fails else {"code": 0}
 
     def shared_save_progress(self, payload):
         self._record("shared_save_progress", payload=dict(payload))
@@ -396,6 +398,20 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(fields[6], "20")
         self.assertEqual(fields[7], "20")
         self.assertEqual(last["zwsds"], "MTAx")
+
+    def test_cache_save_carries_the_course_and_stops_after_a_failure(self):
+        for fails, expected in ((False, None), (True, 1)):
+            client = FakeClient()
+            client.videos = two_video_course()
+            client.lesson = {"100": {"watchState": 1, "studyTotalTime": 30}}
+            client.cache_fails = fails
+            run(client, [shared_row()])
+            caches = client.args_of("shared_save_cache")
+            self.assertTrue(all(call["payload"]["courseId"] == 42 for call in caches))
+            if expected:
+                self.assertEqual(len(caches), expected)   # one failure, then no more for this run
+            else:
+                self.assertEqual(len(caches), len(client.args_of("shared_save_progress")))
 
     def test_course_units_groups_videos_by_chapter(self):
         client = FakeClient()
