@@ -81,9 +81,9 @@ class FakeSharedClient:
                      (recruit_id, exam_id, stu_exam_id, school_id, course_id))
         return {"examBase": {"workExamParts": [{"questionDtos": self.questions}]}}
 
-    def shared_save_answer(self, answer_item, recruit_id, *, exam):
+    def shared_save_answer(self, answer_item, recruit_id, *, exam, captcha_vision=None):
         self._record("shared_save_answer", {"item": answer_item, "recruitId": recruit_id,
-                                            "exam": exam})
+                                            "exam": exam, "captcha_vision": captcha_vision})
 
     def shared_submit_homework(self, recruit_id, exam_id, stu_exam_id, count):
         self._record("shared_submit_homework", count)
@@ -189,9 +189,11 @@ class SharedHomeworkFlowTest(unittest.TestCase):
 
     def test_preview_does_not_submit(self):
         client = FakeSharedClient([shared_question("e1")])
-        result = runner(client, FakeAI(["B"]), auto_submit=False).run_paper(
+        ai = FakeAI(["B"])
+        result = runner(client, ai, auto_submit=False).run_paper(
             COURSE, homework_item(), 1)
         self.assertEqual(result["status"], "preview")
+        self.assertIs(client.call("shared_save_answer")[0]["captcha_vision"], ai)
         self.assertNotIn("shared_submit_homework", client.names())
 
     def test_bad_answer_stops_without_saving_or_submit(self):
@@ -206,7 +208,7 @@ class SharedHomeworkFlowTest(unittest.TestCase):
     def test_captcha_propagates(self):
         client = FakeSharedClient([shared_question("e1")])
 
-        def slider(answer_item, recruit_id, *, exam):
+        def slider(answer_item, recruit_id, *, exam, captcha_vision=None):
             raise CaptchaRequired("滑块")
 
         client.shared_save_answer = slider

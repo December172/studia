@@ -933,13 +933,45 @@ class ZHSApi:
              "schoolId": school_id, "courseId": course_id, "deviceId": ""},
         ).get("rt")
 
-    def shared_save_answer(self, answer_item, recruit_id, *, exam):
+    def shared_save_answer(self, answer_item, recruit_id, *, exam, captcha_vision=None):
         extra = {"source": "1"} if exam else None
-        return self.exam_form(
-            HOMEWORK_GATEWAY + "/answer/saveStudentAnswer",
-            {"stuExamAnswer": json.dumps([answer_item]), "recruitId": recruit_id},
-            extra=extra,
-        )
+        url = HOMEWORK_GATEWAY + "/answer/saveStudentAnswer"
+        payload = {"stuExamAnswer": json.dumps([answer_item]), "recruitId": recruit_id}
+        try:
+            result = self.exam_form(url, payload, extra=extra)
+        except CaptchaRequired as error:
+            chapter_id = answer_item.get("examId")
+            if exam or captcha_vision is None or not chapter_id or "滑块验证未通过" not in str(error):
+                raise
+            from ZHSMain import slider
+
+            accepted = False
+            try:
+                cookies = [{"name": c.name, "value": c.value, "domain": c.domain or "", "path": c.path or "/"}
+                           for c in self.session.cookies]
+                token, _ = slider.solve(cookies, page_url=EXAM_PAGE + "/stuExamWeb.html",
+                                        captcha_type="space", vision=captcha_vision)
+                if token:
+                    result = self.exam_form(HOMEWORK_GATEWAY + "/answer/validateSlideToken",
+                                            {"recruitId": recruit_id, "token": token,
+                                             "checkType": 1, "chapterId": chapter_id})
+                    accepted = result.get("pass") is True
+            except AuthenticationExpired:
+                raise
+            except Exception as exc:
+                logger.warning("作业自动验证未完成：%s", type(exc).__name__)
+            if accepted:
+                logger.info("智慧树已确认作业验证通过")
+                result = self.exam_form(url, payload, extra=extra)
+            else:
+                raise
+        rt = result.get("rt")
+        status = rt.get("statu") if isinstance(rt, dict) else None
+        if str(status) == "-10":
+            raise CaptchaRequired("智慧树要求进一步验证，请到网页完成验证后重试")
+        if str(status) != "1":
+            raise ZHSApiError(status, "平台未确认答案保存")
+        return result
 
     def shared_redo_homework(self, recruit_id, exam_id, course_id):
         return self.exam_form(

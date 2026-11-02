@@ -62,6 +62,72 @@ class CryptoTest(unittest.TestCase):
 
 
 class SecureTest(unittest.TestCase):
+    def test_homework_answer_retries_only_after_exam_captcha_is_confirmed(self):
+        client = make_api()
+        client.session.request.side_effect = [
+            json_response({"status": "-1", "msg": "滑块验证未通过，不能答题"}),
+            json_response({"status": "200", "pass": True}),
+            json_response({"status": "200", "rt": {"statu": 1}}),
+        ]
+        vision = Mock()
+        with patch("ZHSMain.slider.solve", return_value=("test-token", [])):
+            result = client.shared_save_answer({"examId": 200, "eid": "e1"}, 9,
+                                               exam=False, captcha_vision=vision)
+        self.assertEqual(result["rt"]["statu"], 1)
+        calls = client.session.request.call_args_list
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[1].args[1], api.HOMEWORK_GATEWAY + "/answer/validateSlideToken")
+        validation = json.loads(decrypt(calls[1].kwargs["data"]["secretStr"], KEYS["exam"]))
+        self.assertEqual(validation, {"recruitId": 9, "token": "test-token", "checkType": 1, "chapterId": 200})
+        self.assertEqual(calls[0].kwargs["data"], calls[2].kwargs["data"])
+
+    def test_homework_answer_does_not_retry_when_exam_captcha_is_rejected(self):
+        client = make_api()
+        client.session.request.side_effect = [
+            json_response({"status": "-1", "msg": "滑块验证未通过，不能答题"}),
+            json_response({"status": "200", "pass": False}),
+        ]
+        with patch("ZHSMain.slider.solve", return_value=("test-token", [])):
+            with self.assertRaises(CaptchaRequired):
+                client.shared_save_answer({"examId": 200, "eid": "e1"}, 9,
+                                          exam=False, captcha_vision=Mock())
+        self.assertEqual(client.session.request.call_count, 2)
+
+    def test_homework_captcha_does_not_guess_for_other_cases(self):
+        for message, exam, vision, item in [
+            ("滑块验证未通过，不能答题", False, None, {"examId": 200}),
+            ("滑块验证未通过，不能答题", True, Mock(), {"examId": 200}),
+            ("滑块验证未通过，不能答题", False, Mock(), {}),
+            ("需要短信验证", False, Mock(), {"examId": 200}),
+        ]:
+            with self.subTest(message=message, exam=exam, item=item):
+                client = make_api()
+                client.session.request.return_value = json_response({"status": "-1", "msg": message})
+                with patch("ZHSMain.slider.solve") as solve, self.assertRaises(CaptchaRequired):
+                    client.shared_save_answer(item, 9, exam=exam, captcha_vision=vision)
+                solve.assert_not_called()
+                self.assertEqual(client.session.request.call_count, 1)
+
+    def test_homework_captcha_is_not_solved_twice_if_retry_is_rejected(self):
+        client = make_api()
+        blocked = {"status": "-1", "msg": "滑块验证未通过，不能答题"}
+        client.session.request.side_effect = [json_response(blocked),
+                                              json_response({"status": "200", "pass": True}),
+                                              json_response(blocked)]
+        with patch("ZHSMain.slider.solve", return_value=("test-token", [])) as solve:
+            with self.assertRaises(CaptchaRequired):
+                client.shared_save_answer({"examId": 200}, 9, exam=False, captcha_vision=Mock())
+        self.assertEqual(client.session.request.call_count, 3)
+        solve.assert_called_once()
+
+    def test_answer_save_does_not_accept_a_nested_platform_rejection(self):
+        for status in (-10, -20):
+            with self.subTest(status=status):
+                client = make_api()
+                client.session.request.return_value = json_response({"status": "200", "rt": {"statu": status}})
+                with self.assertRaises(ZHSError):
+                    client.shared_save_answer({"examId": 200}, 9, exam=False)
+
     def test_form_post_and_decrypt_body(self):
         client = make_api()
         client.session.request.return_value = json_response({"code": 0, "data": {"ok": 1}})
