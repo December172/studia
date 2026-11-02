@@ -233,12 +233,13 @@ class IsolationUnitTest(unittest.TestCase):
     def test_jobs_beyond_the_personal_limit_wait_their_turn(self):
         app = Studia.__new__(Studia)
         app.lock, app.history, app.events, app.jobs = threading.RLock(), [], [], {}
+        app.store, app.closing = None, False
         app.publish = app.events.append
         app.job_limit = lambda: 1
         gate = threading.Event()
 
         def job(jid, started):
-            app.jobs[jid] = {"id": jid, "title": jid, "course": jid, "course_name": jid, "platform": "zhs",
+            app.jobs[jid] = {"id": jid, "kind": "study", "title": jid, "course": jid, "course_name": jid, "platform": "zhs",
                              "state": "queued", "summary": "", "started": started, "ended": None, "lines": [],
                              "cancel": threading.Event()}
             with app.lock:

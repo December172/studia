@@ -221,6 +221,12 @@ class FailureDiagnosticsTest(unittest.TestCase):
         self.assertNotIn('"B"', line)
         self.assert_nothing_secret(line)
 
+    def test_optional_cache_save_refused_by_the_platform_stays_out_of_the_log(self):
+        client = self.client({"code": -1, "message": "系统发生了不可预期的错误了", "data": None})
+        with self.assertLogs("ZHSMain.api", "DEBUG") as logs:  # assertNoLogs needs Python 3.10
+            self.assertIsNone(client.shared_save_cache({"courseId": 1}))
+        self.assertEqual([r.levelname for r in logs.records], ["DEBUG"])
+
     def test_the_line_reaches_the_web_job_log(self):
         import logging
         import threading

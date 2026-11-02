@@ -85,8 +85,8 @@ function fakeJob(body) {
     }, 1500 * (i + 1)));
     return job.id;
   }
-  const todo = units[body.course].flatMap((ch) => ch.units).filter((u) => u.state === "queued" || u.state === "failed");
-  const total = units[body.course].flatMap((ch) => ch.units).length;
+  const todo = (units[body.course] || []).flatMap((ch) => ch.units).filter((u) => u.state === "queued" || u.state === "failed");
+  const total = (units[body.course] || []).flatMap((ch) => ch.units).length;
   send({ type: "progress", kind: "begin", name: title, total: 1, unit: "门课程" });
   let i = 0, ticks = 0;
   const step = () => {
