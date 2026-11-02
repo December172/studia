@@ -25,6 +25,7 @@ from base.auth import AuthenticationExpired, PlatformUnavailable
 from base.concurrency import INTERACTIVE_WORKERS
 from settings import SettingsStore, SettingsError
 from task_capabilities import task_availability
+from task_metrics import completion_with_score
 
 logger = Logger(__name__).get_log()
 
@@ -345,7 +346,7 @@ class Application:
             open_ids = list(dict.fromkeys(paper_exam_id(item) for _, item, category in listed
                                           if task_availability(item, category).available))
             statuses = dict(zip(open_ids, pool.map(status, open_ids)))
-        return [(course, dict(item, _completion_status=statuses[paper_exam_id(item)]
+        return [(course, dict(item, _completion_status=completion_with_score(item, statuses[paper_exam_id(item)])
                               if task_availability(item, category).available else "unsupported"), category)
                 for course, item, category in listed]
 

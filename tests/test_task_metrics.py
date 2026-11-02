@@ -56,5 +56,15 @@ class TaskMetricsTests(unittest.TestCase):
         self.assertEqual(text, ('85', '1'))
 
 
+    def test_a_graded_mooc_paper_counts_as_submitted_whatever_its_record_code(self):
+        from task_metrics import completion_with_score
+        # 第二次测试: 91 points on the list, but its answer record code was neither 2 nor 0.
+        self.assertEqual(completion_with_score({'score': 91}, 'unknown'), 'submitted')
+        self.assertEqual(completion_with_score({'score': None, 'status': 1}, 'not_started'), 'submitted')  # 待批
+        self.assertEqual(completion_with_score({'score': None}, 'not_started'), 'not_started')
+        self.assertEqual(completion_with_score({'score': None}, 'unknown'), 'unknown')
+        self.assertEqual(completion_with_score({'score': 60}, 'draft'), 'draft')
+
+
 if __name__ == '__main__':
     unittest.main()

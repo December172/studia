@@ -32,7 +32,7 @@ from base.auth import AuthenticationExpired, PlatformUnavailable
 from NewMoocMain.oauth_login import oauth_login
 from settings import DEFAULT_PROFILE_ID, SettingsError, SettingsStore
 from task_capabilities import task_availability, task_type_label
-from task_metrics import score_text
+from task_metrics import completion_with_score, score_text
 from ZHSMain.answer import ZHSAnswerRunner, catalog
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi, ZHSError
 from ZHSMain.main import ZHSHandler, course_units as zhs_units
@@ -794,7 +794,7 @@ STATUS_TEXT = {"success": "完成", "skipped": "跳过", "error": "出错", "sub
                "ai_error": "AI 出错", "submission_unknown": "交卷结果未知", "waiting": "等你操作"}
 
 
-STATUS_LABEL = {"submitted": "已提交", "draft": "未提交", "not_started": "未作答"}
+STATUS_LABEL = {"submitted": "已提交", "draft": "未提交", "not_started": "未作答", "unknown": "状态未知"}
 
 
 def _task_id(pid, item, category):
@@ -820,7 +820,7 @@ def _mooc_catalog(client, row):
         open_ids = list(dict.fromkeys(paper_exam_id(item) for _, item, category in listed
                                       if task_availability(item, category).available))
         statuses = dict(zip(open_ids, pool.map(status, open_ids)))
-    return [(course, dict(item, _completion_status=statuses.get(paper_exam_id(item), "unsupported")), category)
+    return [(course, dict(item, _completion_status=completion_with_score(item, statuses.get(paper_exam_id(item), "unsupported"))), category)
             for course, item, category in listed]
 
 
