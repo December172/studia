@@ -182,6 +182,14 @@ class Accounts:
             self.db.execute("UPDATE users SET last_login = ? WHERE id = ?", (time.time(), row["id"]))
         return self.user(row["id"])
 
+    def touch(self, uid, every=60):
+        """Record activity: last_login is shown as "last seen", so a 7-day cookie or a fresh
+        registration counts too, not only typing the password. Written at most once a minute."""
+        now = time.time()
+        with self.transaction():
+            self.db.execute("UPDATE users SET last_login = ? WHERE id = ? AND (last_login IS NULL OR last_login < ?)",
+                            (now, uid, now - every))
+
     def set_password(self, uid, password, old_password=None):
         if len(password or "") < MIN_PASSWORD:
             raise AccountError("密码至少 %d 位" % MIN_PASSWORD)

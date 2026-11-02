@@ -371,6 +371,7 @@ class HostedAccess:
             raise HttpError(401, "账号已停用或不存在")
         if method == "POST" and not hmac.compare_digest(request.headers.get("X-Studia-CSRF", ""), session["csrf"]):
             raise HttpError(403, "请求校验失败，请刷新页面后重试")
+        self.hub.accounts.touch(user["id"])
         return {"app": self.hub.app(user["id"]), "user": user, "session": session, "token": token}
 
     def private(self, request, method, path, query, body, ctx):

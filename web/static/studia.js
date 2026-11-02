@@ -143,8 +143,9 @@ function ago(seconds) {
   const diff = Date.now() / 1000 - seconds;
   if (diff < 60) return "刚刚";
   if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
-  const d = new Date(seconds * 1000);
-  return diff < 86400 ? `今天 ${d.toTimeString().slice(0, 5)}` : `${d.getMonth() + 1}月${d.getDate()}日`;
+  const d = new Date(seconds * 1000), time = d.toTimeString().slice(0, 5);
+  const days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(d).setHours(0, 0, 0, 0)) / 86400000);
+  return days === 0 ? `今天 ${time}` : days === 1 ? `昨天 ${time}` : `${d.getMonth() + 1}月${d.getDate()}日`;
 }
 const pad = (n) => String(n).padStart(2, "0");
 function clock(sec) {
@@ -413,7 +414,7 @@ const VIEWS = {
       body = `<div class="section"><h3>用户</h3><span class="aside">${users.length} 人</span></div>
         <div class="models">${users.map((u) => `<div class="model"><span class="avatar big">${esc(u.username.slice(0, 1).toUpperCase())}</span>
             <span class="m1"><b>${esc(u.username)}</b>${u.role === "admin" ? '<span class="pill blue">管理员</span>' : ""}${u.disabled ? '<span class="pill red">已停用</span>' : ""}<span class="pill">同时 ${u.job_limit} 个${u.max_jobs ? "（单独设置）" : ""}</span>
-            <small class="sans">${u.jobs?.length ? u.jobs.map((j) => `${esc(j.title)} · ${esc(j.course_name)}${j.state === "queued" ? "（排队）" : ""}`).join("；") : u.last_login ? `上次登录 ${ago(u.last_login)}` : "还没登录过"}</small></span><span></span>
+            <small class="sans">${u.jobs?.some((j) => j.state !== "queued") ? "学习中" : u.jobs?.length ? "排队中" : u.last_login ? `上次在线 ${ago(u.last_login)}` : "还没登录过"}</small></span><span></span>
             <span class="row_btns">${u.jobs?.length ? `<button class="btn small danger" data-stop-user="${u.id}" data-confirm="确认全部停止">停止全部任务</button>` : ""}
               <button class="btn small" data-row-edit="limit" data-uid="${u.id}" aria-pressed="${edit(u, "limit")}">任务上限</button>
               <button class="btn small" data-row-edit="password" data-uid="${u.id}" aria-pressed="${edit(u, "password")}">重置密码</button>
@@ -615,7 +616,7 @@ const VIEWS = {
         <div class="models">
           <div class="model plain"><span class="account_who"><span class="avatar big">${esc(me.username.slice(0, 1).toUpperCase())}</span>
             <span class="m1"><b>${esc(me.username)}</b><span class="pill ${me.role === "admin" ? "blue" : ""}">${me.role === "admin" ? "管理员" : "成员"}</span>
-            <small class="sans">${me.last_login ? `上次登录 ${ago(me.last_login)}` : ""}${me.created ? ` · ${new Date(me.created * 1000).toLocaleDateString()} 加入` : ""}</small></span></span></div>
+            <small class="sans">${me.created ? `${new Date(me.created * 1000).toLocaleDateString()} 加入` : ""}</small></span></span></div>
           ${state.editPassword ? `<form class="model plain password_form" data-password>
             <span class="m1"><b>修改密码</b><small class="sans">其他设备会退出登录</small></span>
             <span class="pw_fields">
