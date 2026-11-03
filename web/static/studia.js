@@ -1333,13 +1333,15 @@ async function qrLogin(pid) {
   const box = $(".qr", page), status = $("[data-status]", page);
   const say = (title, text) => { status.innerHTML = `<b>${esc(title)}</b><p>${esc(text)}</p>`; };
   const setImage = (src) => { box.innerHTML = `<img alt="登录二维码" src="${src}">`; };
-  try { setImage((await api(`/api/platforms/${pid}/login`, { method: "POST" })).qr); }
+  let started;
+  try { started = await api(`/api/platforms/${pid}/login`, { method: "POST" }); setImage(started.qr); }
   catch (error) { say("获取二维码失败", error.message); return; }
   while (!token.cancelled) {
     await sleep(1500);
     if (token.cancelled || !box.isConnected) return;
     let result;
-    try { result = await api(`/api/platforms/${pid}/login`); } catch (error) { say("网络异常", error.message); continue; }
+    // This page's own code: another tab or device showing a code must not swap it out.
+    try { result = await api(`/api/platforms/${pid}/login?id=${encodeURIComponent(started.id || "")}`); } catch (error) { say("网络异常", error.message); continue; }
     if (result.qr) setImage(result.qr);
     if (result.status === "scanned") say("已扫码", "请在手机上确认登录。");
     else if (result.status === "refreshed") say("二维码已刷新", "旧二维码过期了，请扫描新的。");
