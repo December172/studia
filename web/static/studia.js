@@ -1176,11 +1176,17 @@ function repaint() {
 
 function connectEvents() {
   if (MOCK) { import("./mock.js").then((m) => m.subscribe(handleEvent)); return; }
-  const source = new EventSource(session.mode === "hosted" ? "/api/events" : `/api/events?t=${encodeURIComponent(TOKEN)}`);
-  source.onmessage = (message) => handleEvent(JSON.parse(message.data));
-  // Events sent while the stream was down are lost; catch up from the server on reconnect.
-  let opened = false;
-  source.onopen = () => { if (opened) refreshState().then(repaint); opened = true; };
+  let source = null, heard = 0, opened = false;
+  const open = () => {
+    source?.close();
+    source = new EventSource(session.mode === "hosted" ? "/api/events" : `/api/events?t=${encodeURIComponent(TOKEN)}`);
+    source.onmessage = (message) => { heard = Date.now(); const event = JSON.parse(message.data); if (event.type !== "ping") handleEvent(event); };
+    // Events sent while the stream was down (or the tab was frozen) are lost; catch up from the server.
+    source.onopen = () => { heard = Date.now(); if (opened) refreshState(true).then(repaint); opened = true; };
+  };
+  open();
+  // The server pings every 15 s. A stream silent for 40 s is dead even if the browser hasn't noticed.
+  setInterval(() => { if (heard && Date.now() - heard > 40000) { heard = 0; open(); } }, 10000);
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refreshState().then(repaint); });
 }
 
@@ -1272,7 +1278,8 @@ function pumpBackground() {
   }
 }
 
-async function refreshState() {
+// catchUp: events may have been missed, so also reread the grids the live jobs are filling.
+async function refreshState(catchUp = false) {
   try {
     const data = await api("/api/state");
     state.platforms = data.platforms;
@@ -1281,10 +1288,9 @@ async function refreshState() {
     state.zhsParallel = Boolean(data.zhs_parallel);
     const live = data.jobs || [];
     for (const job of live) {
-      if (state.jobs.some((j) => j.id === job.id)) continue;
-      // A page opened mid-run missed the earlier progress events; start from the server's tally.
-      Object.assign(runOf(job.id), job.progress || {}, { lines: job.lines || [] });
-      if (jobType(job) !== "answer") loadUnits(job.platform, job.course);
+      // The server's tally is the truth for a page opened mid-run or one that missed events while away.
+      state.runs[job.id] = Object.assign(freshRun(), job.progress || {}, { lines: job.lines || [] });
+      if (jobType(job) !== "answer" && (catchUp || !state.jobs.some((j) => j.id === job.id))) loadUnits(job.platform, job.course, catchUp);
     }
     // Jobs that ended while we were away: drop them and refresh what they changed.
     for (const gone of state.jobs.filter((j) => !live.some((x) => x.id === j.id))) {
