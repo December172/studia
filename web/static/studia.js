@@ -560,9 +560,11 @@ const VIEWS = {
       const job = state.jobs.find((j) => j.platform === p.id && j.course === c.id);
       const last = state.history.find((j) => j.platform === p.id && j.course === c.id);
       const open = (state.papers[key(p.id, c.id)] || []).filter((x) => x.available && !x.done).length;
-      const line = job ? `<span class="live">${job.state === "queued" ? "排队中" : LIVE_WORD[job.title] || "进行中"}</span>`
-        : last?.state === "waiting" ? '<span class="live waiting">等你操作</span>'
-        : open ? `<span class="todo">${open} 份试卷可作答</span>` : last ? `上次 ${ago(last.ended || last.started)}` : "还没学过";
+      // What is running and what is left to answer are separate facts: show both, never one hiding the other.
+      const status = job ? `<span class="live">${job.state === "queued" ? "排队中" : LIVE_WORD[job.title] || "进行中"}</span>`
+        : last?.state === "waiting" ? '<span class="live waiting">等你操作</span>' : "";
+      const papers = open ? `<span class="todo">${open} 份试卷可作答</span>` : state.paperErrors[key(p.id, c.id)] ? "试卷没读到" : "";
+      const line = [status, papers].filter(Boolean).join('<span class="sep">·</span>') || (last ? `上次 ${ago(last.ended || last.started)}` : "还没学过");
       return `<button class="course_card" style="--c:${inkOf(c)}" data-go="#/course/${p.id}/${c.id}">${coverHtml(p, c)}
         <span class="cc_body"><b>${esc(c.name)}</b><small>${esc(c.type || p.short)}</small>
           <span class="cc_bar"><span class="bar"><i style="width:${Number(c.progress) || 0}%"></i></span><span class="mono">${c.progress == null ? "—" : `${esc(c.progress)}%`}</span></span>
