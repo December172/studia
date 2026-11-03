@@ -1,4 +1,4 @@
-"""智慧树问答区（qah5）：用 Playwright 复用已登录 Cookie 取题、答题。
+"""智慧树问答区（qah5）：用 Playwright 复用已登录 Cookie 取题、提问、答题。
 
 为什么不直接用 requests：问答区每个请求都要 `secretStr`，它由页面里的全局函数
 `yxyz(params, dynStr)` 生成，`dynStr` 每次登录都会变；仓库现有的 `ZHSApi.secure()`
@@ -21,6 +21,7 @@ import json
 import time
 
 from MoocMain.log import Logger
+from base.auth import PlatformUnavailable
 from ZHSMain.api import AuthenticationExpired, CaptchaRequired, ZHSApiError
 
 logger = Logger(__name__).get_log()
@@ -70,6 +71,17 @@ async ({qid, content, courseId, recruitId}) => {
   return await window.__studiaQa('saveAnswer', {
     annexs: [], qid, source: store.roleId, aContent: content,
     courseId, recruitId, validate: '', saveSource: 1,
+  });
+}
+"""
+
+
+ASK_JS = """
+async ({content, courseId, recruitId, chapterId}) => {
+  const store = document.querySelector('#app').__vue__.$store.state.baseData;
+  return await window.__studiaQa('saveQuestion', {
+    annexs: [], content, courseId, recruitId, chapterId: chapterId || 0,
+    sourceType: store.roleId, validate: '', saveSource: 1,
   });
 }
 """
@@ -131,7 +143,7 @@ class QaBridge:
                 return
             except PlaywrightError:
                 time.sleep(1.5)  # 页面在跳转时执行上下文会被销毁，再开一次
-        raise ZHSApiError("问答区页面没有加载完成，请稍后重试")
+        raise PlatformUnavailable("问答区页面没有加载完成，请稍后重试")
 
     def _eval(self, script, arg):
         try:
@@ -170,8 +182,23 @@ class QaBridge:
         if str(result.get("code")) == "1010":
             raise CaptchaRequired("问答区要求完成验证，请在页面上验证后重试")
         if str(result.get("status")) != "200":
-            raise ZHSApiError("发布回答失败：%s" % (result.get("msg") or "未知原因"))
+            raise ZHSApiError(result.get("code") or result.get("status"),
+                              result.get("msg") or "发布回答失败")
         return (result.get("rt") or {}).get("answerId")
+
+
+    # ---------------------------------------------------------------- 提问
+
+    def ask(self, content, chapter_id=0):
+        """在课程问答区发一条提问。chapterId 传 0 表示不挂到具体章节（课程问答）。"""
+        result = self._eval(ASK_JS, {"content": content, "courseId": self.course_id,
+                                     "recruitId": self.recruit_id, "chapterId": int(chapter_id or 0)})
+        if str(result.get("code")) == "1010":
+            raise CaptchaRequired("问答区要求完成验证，请在页面上验证后重试")
+        if str(result.get("status")) != "200":
+            raise ZHSApiError(result.get("code") or result.get("status"),
+                              result.get("msg") or "发布提问失败")
+        return (result.get("rt") or {}).get("questionId")
 
 
 def answer_questions(qa, ai, *, max_answers=1, limit=10, interval=60, state_path=None,
