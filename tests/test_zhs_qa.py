@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from ZHSMain.qa import CaptchaRequired, answer_questions
+from ZHSMain.qa import CaptchaRequired, QaBridge, answer_questions
 
 LONG = "这是一段超过三十个字的回答，用来通过最小长度校验，确保回答不会为空。"
 
@@ -74,6 +74,29 @@ class QaQueueTest(unittest.TestCase):
             self.assertEqual(stats["ids"], [3, 4, 5])
             with open(path, encoding="utf-8") as handle:
                 self.assertEqual(json.load(handle), [1, 2, 3, 4, 5])
+
+
+class AskTest(unittest.TestCase):
+    def bridge(self, payload):
+        qa = QaBridge.__new__(QaBridge)  # 不启动浏览器，只测响应处理
+        qa.course_id, qa.recruit_id = 1, 2
+        qa._eval = lambda script, arg: payload
+        return qa
+
+    def test_returns_question_id(self):
+        qa = self.bridge({"status": "200", "rt": {"questionId": 99}})
+        self.assertEqual(qa.ask("问题？"), 99)
+
+    def test_captcha_is_raised(self):
+        qa = self.bridge({"status": "200", "code": 1010})
+        with self.assertRaises(CaptchaRequired):
+            qa.ask("问题？")
+
+    def test_failure_message(self):
+        qa = self.bridge({"status": "500", "msg": "频率过快"})
+        with self.assertRaises(Exception) as caught:
+            qa.ask("问题？")
+        self.assertIn("频率过快", str(caught.exception))
 
 
 if __name__ == "__main__":
