@@ -37,6 +37,7 @@ from ZHSMain.answer import ZHSAnswerRunner, catalog
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi, ZHSError
 from ZHSMain.main import ZHSHandler, course_units as zhs_units
 from ZHSMain.memory import AnswerMemory
+from ZHSMain.qa import QaBridge, answer_questions
 from ai.memory import MoocAnswerMemory
 from ZYKMoocMain.api import ZYKMoocApi
 from ZYKMoocMain.main import ZYKMoocHandler
@@ -51,9 +52,9 @@ MAX_JOBS = 4
 MAX_PENDING = 20
 # The platform's unit and paper lists take seconds to tens of seconds; reuse them for a while.
 CACHE_TTL = 600
-LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题"}
+LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题", "qa": "问答区答题"}
 # Jobs that play course content conflict with each other; answering is separate.
-GROUP = {"study": "learn", "review": "learn", "answer": "answer"}
+GROUP = {"study": "learn", "review": "learn", "answer": "answer", "qa": "answer"}
 # Running job id -> its Studia app. A job thread is named "studia-job-<id>" and passes that
 # name on to the helper threads it starts, so a log line can be traced back to its job.
 JOBS = {}
@@ -85,7 +86,7 @@ PLATFORMS = {
     "zyk": {"name": "资源库", "short": "资源库", "login": "browser", "api": ZYKMoocApi,
             "handler": ZYKMoocHandler, "units": None, "answer": False, "review": False, "needs_ai": False, "hidden": True},
     "zhs": {"name": "智慧树", "short": "智慧树", "login": "qr", "api": ZHSApi,
-            "handler": ZHSHandler, "units": zhs_units, "answer": True, "review": True, "needs_ai": False},
+            "handler": ZHSHandler, "units": zhs_units, "answer": True, "review": True, "qa": True, "needs_ai": False},
 }
 
 
@@ -116,7 +117,7 @@ class Platform:
     def public(self, logged_in):
         spec = self.spec
         return {"id": self.id, "name": spec["name"], "short": spec["short"], "login": spec["login"],
-                "logged_in": logged_in, "features": {"answer": spec["answer"], "review": spec["review"]}}
+                "logged_in": logged_in, "features": {"answer": spec["answer"], "review": spec["review"], "qa": bool(spec.get("qa"))}}
 
 
 class Studia:
@@ -408,7 +409,7 @@ class Studia:
         platform = self.platform(str(body.get("platform", "")))
         kind = body.get("type")
         course_id = str(body.get("course", ""))
-        allowed = {"study"} | ({"review"} if platform.spec["review"] else set()) | ({"answer"} if platform.spec["answer"] else set())
+        allowed = {"study"} | ({"review"} if platform.spec["review"] else set()) | ({"answer"} if platform.spec["answer"] else set()) | ({"qa"} if platform.spec.get("qa") else set())
         if kind not in allowed:
             raise HttpError(400, "这个平台暂不支持该操作")
         row = self.find_row(platform, course_id)
@@ -423,6 +424,9 @@ class Studia:
             if kind == "answer":
                 selected = self._selected(platform, course_id, body.get("tasks") or [])
                 target = lambda: self._answer(platform, selected, bool(body.get("auto_submit")), job)
+            elif kind == "qa":
+                options = _qa_options(body)
+                target = lambda: self._qa(platform, row, options, job)
             else:
                 job["minutes"] = (REVIEW_MINUTES if minutes is None else minutes) if kind == "review" else 0
                 target = lambda: self._study(platform, row, job["minutes"], job)
@@ -500,7 +504,7 @@ class Studia:
                 state, summary = "stopped", "已停止"
         except KeyboardInterrupt:
             state, summary = "stopped", "已停止"
-        except (CaptchaRequired, StudyTimeLimit) as exc:
+        except (CaptchaRequired, StudyTimeLimit, NeedsRetry) as exc:
             # Only the user can clear these: solve the captcha on the platform, or come back tomorrow.
             state, summary = "waiting", str(exc) or "平台要求验证"
         except AuthenticationExpired:
@@ -588,7 +592,7 @@ class Studia:
 
     def resume(self):
         """Start again the jobs a restart interrupted. Learning continues from the progress the platform
-        recorded; answering is left to the person, since a paper may already have been handed in."""
+        recorded; answering and Q&A posting are left to the person, since a paper may already be in or an answer public."""
         data = self._saved()
         active = [entry for entry in data.get("active") or [] if isinstance(entry, dict) and entry.get("type") in LABEL]
         if not active:
@@ -598,7 +602,7 @@ class Studia:
             kind = entry["type"]
             if kind == "review" and entry.get("minutes", 0) < 1:
                 continue
-            if kind == "answer" or not fresh or entry.get("resumes", 0) >= RESUME_LIMIT:
+            if kind in ("answer", "qa") or not fresh or entry.get("resumes", 0) >= RESUME_LIMIT:
                 self._record(entry, "stopped", INTERRUPTED)
                 continue
             body = {"platform": entry.get("platform"), "type": kind, "course": entry.get("course")}
@@ -714,6 +718,44 @@ class Studia:
                 if result.get("stop_queue") or status in ("ai_error", "submission_unknown", "submitting", "paused"):
                     break
             return f"处理完成 {done}/{len(selected)} 份试卷"
+        finally:
+            ai.session.close()
+
+    def _qa(self, platform, row, options, job):
+        """问答区：取题目 → AI 写回答 → 发布。只在平台返回 200 后计数。"""
+        course = row.get("zhs") or {}
+        # 共享课带 recruitId；智慧课程只有 classId，问答区 URL 需要两者之一。
+        course_id = course.get("courseId")
+        recruit_id = course.get("recruitId") or course.get("classId")
+        if not course_id or not recruit_id:
+            raise HttpError(400, "这门课没有可作答的问答区（缺少课程或班级 ID）")
+        api = self.client(platform)
+        ai = self._ai("请先在设置里添加 AI 模型")
+        limit = options["limit"]
+
+        def event(kind, name, status=""):
+            if kind == "begin":
+                self.progress_event(job, "begin", "问答区答题", total=limit, unit="条")
+            elif kind == "result":
+                self.progress_event(job, "result", name, status=status)
+
+        try:
+            with QaBridge(api.access_token, course_id=course_id, recruit_id=recruit_id) as qa:
+                stats = answer_questions(
+                    qa, ai,
+                    max_answers=options["max_answers"],
+                    limit=limit,
+                    interval=options["interval"],
+                    state_path=str(Path(self.store.path).parent / "zhs-qa-answers.json"),
+                    should_stop=job["cancel"].is_set,
+                    on_event=event,
+                    sleep=job["cancel"].wait,  # 停止或更新时不必等满间隔
+                )
+            return "问答区发布 %(answered)d 条，失败 %(failed)d 条" % stats
+        except AuthenticationExpired:
+            # 问答区自己的会话比智慧树登录短，进站还要走一次单点登录跳转；被跳到登录页
+            # 不等于整个登录失效。只停下这个任务，不删登录：真过期了，学习任务会照常发现。
+            raise NeedsRetry("问答区没进去，稍后重试；一直不行就重新扫码智慧树") from None
         finally:
             ai.session.close()
 
@@ -852,6 +894,27 @@ def _mooc_catalog(client, row):
         statuses = dict(zip(open_ids, pool.map(status, open_ids)))
     return [(course, dict(item, _completion_status=completion_with_score(item, statuses.get(paper_exam_id(item), "unsupported"))), category)
             for course, item, category in listed]
+
+
+class NeedsRetry(Exception):
+    """A job stops and waits for the person, without the platform sign-in being dropped."""
+
+
+def _qa_options(body):
+    """问答区参数：条数 1–50、只答回答数不超过 0–20 的题、每条间隔 30–600 秒。"""
+    def number(name, default, low, high):
+        value = body.get(name)
+        if value is None or value == "":
+            return default
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            raise HttpError(400, "问答区参数 %s 必须是整数" % name)
+        if not low <= value <= high:
+            raise HttpError(400, "问答区参数 %s 要在 %d–%d 之间" % (name, low, high))
+        return value
+    return {"limit": number("limit", 10, 1, 50), "max_answers": number("max_answers", 1, 0, 20),
+            "interval": number("interval", 60, 30, 600)}
 
 
 def _history_line(event):

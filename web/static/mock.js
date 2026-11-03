@@ -3,7 +3,7 @@ const listeners = new Set();
 const emit = (event) => listeners.forEach((listener) => listener(event));
 const platforms = [
   { id: "mooc", name: "MOOC", short: "MOOC", login: "browser", logged_in: true, features: { answer: true, review: false } },
-  { id: "zhs", name: "智慧树", short: "智慧树", login: "qr", logged_in: true, features: { answer: true, review: true } },
+  { id: "zhs", name: "智慧树", short: "智慧树", login: "qr", logged_in: true, features: { answer: true, review: true, qa: true } },
 ];
 const courses = {
   mooc: [{ id: "m1", platform: "mooc", name: "大学英语（二）", type: "第 7 期开课", kind: "mooc", progress: 62 }, { id: "m2", platform: "mooc", name: "中外音乐与民族技艺实践", type: "第 3 期开课", kind: "mooc", progress: 100 }],
@@ -56,7 +56,7 @@ const units = {
     ["复用技术", 5], ["计算机网络的发展历程", 6], ["网络体系结构", 7], ["物理层", 6], ["数据链路层", 8], ["网络层", 9], ["传输层", 7], ["应用层", 6]], 66),
 };
 
-const GROUP = { study: "learn", review: "learn", answer: "answer" };
+const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "answer" };
 function fakeJob(body) {
   const course = courses[body.platform].find((c) => c.id === body.course);
   for (const o of Object.values(jobs)) {
@@ -64,7 +64,7 @@ function fakeJob(body) {
     if (o.course === body.course) throw new Error(`这门课正在${o.title}，请等它结束或先停止`);
     if (body.platform === "zhs" && GROUP[body.type] === "learn") throw new Error(`智慧树同一账号同时只能播放一个视频，请等「${o.course_name}」的${o.title}结束`);
   }
-  const title = { study: "自动学习", review: "每日复习", answer: "AI 答题" }[body.type];
+  const title = { study: "自动学习", review: "每日复习", answer: "AI 答题", qa: "问答区答题" }[body.type];
   const job = { type: "job", kind: body.type, id: "j" + Date.now().toString(16), title, course: body.course, course_name: course.name, platform: body.platform,
     state: "running", summary: "", started: Date.now() / 1000, ended: null, lines: [] };
   jobs[job.id] = job;
@@ -78,6 +78,16 @@ function fakeJob(body) {
     history.unshift(finished);
     emit(finished);
   };
+  if (body.type === "qa") {
+    const asked = ["TCP 和 UDP 各适合什么场景？", "交换机和路由器的区别是什么？", "为什么要分层设计网络协议？"];
+    send({ type: "progress", kind: "begin", name: title, total: asked.length, unit: "条" });
+    asked.forEach((q, i) => setTimeout(() => {
+      send({ type: "progress", kind: "detail", name: `第 ${i + 1} 条 · ${q}` });
+      send({ type: "progress", kind: "result", name: q.slice(0, 20), status: "success" });
+      if (i === asked.length - 1) setTimeout(() => finish("done", `问答区发布 ${asked.length} 条，失败 0 条`), 800);
+    }, 1500 * (i + 1)));
+    return job.id;
+  }
   if (body.type === "answer") {
     const steps = (body.tasks || []).map((id) => tasks.find((t) => t.id === id)?.name || "试卷");
     send({ type: "progress", kind: "begin", name: title, total: steps.length, unit: "份试卷" });

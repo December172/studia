@@ -456,6 +456,111 @@ class Application:
                     ai_client.session.close()
         return results
 
+    def _zhs_qa_courses(self, client, courses, run, label):
+        """按课程打开问答区执行 run(qa, event)，返回 {ok, failed, skipped} 计数。
+
+        run 上报 status=success/error，跳过由上层的业务返回值决定时也算在这里。
+        验证码和登录问题会停止其余课程：同账号继续只会继续失败。
+        """
+        from ZHSMain.qa import QaBridge
+        from ZHSMain.api import ZHSApiError
+
+        totals = {"ok": 0, "failed": 0, "skipped": 0}
+        counted = {"success": "ok", "error": "failed", "skipped": "skipped"}
+        for row in courses:
+            course = (row or {}).get("zhs") or {}
+            course_id = course.get("courseId")
+            # 共享课带 recruitId；智慧课程只有 classId，问答区两者取其一。
+            recruit_id = course.get("recruitId") or course.get("classId")
+            name = row.get("courseName") or "当前课程"
+            if not course_id or not recruit_id:
+                self.view.log(f"{name}：没有可作答的问答区，已跳过。", "warning")
+                continue
+            before = dict(totals)
+
+            def event(kind, title, status="", _name=name):
+                if kind != "result":
+                    return
+                if status in counted:
+                    totals[counted[status]] += 1
+                self.progress.result(f"{_name} · {title}", status)
+
+            try:
+                with QaBridge(client.access_token, course_id=course_id,
+                              recruit_id=recruit_id) as qa:
+                    run(qa, event)
+            except (CaptchaRequired, AuthenticationExpired, PlatformUnavailable,
+                    ZHSApiError) as exc:
+                self.view.log(f"{name}：{exc}；其余课程未执行。", "warning")
+                break
+            self.view.log(f"{name}：{label} {totals['ok'] - before['ok']} 条，"
+                          f"失败 {totals['failed'] - before['failed']} 条。")
+        return totals
+
+    def execute_zhs_qa(self, client, courses, config, options):
+        """问答区答题：取题 → AI 写回答 → 发布。一条失败不打断队列。"""
+        from ZHSMain.qa import answer_questions
+
+        limit = int(options.get("limit") or 10)
+        max_answers = int(options.get("max_answers") or 0)
+        interval = options.get("interval")
+        interval = 60 if interval is None else int(interval)
+        state_path = Path(self.store.path).parent / "zhs-qa-answers.json"
+        with self.view.activity("问答区答题"):
+            self.progress.begin("问答区答题", limit * len(courses), "条")
+            ai = self.verify_ai(config)
+            try:
+                def run(qa, event):
+                    answer_questions(qa, ai, max_answers=max_answers, limit=limit,
+                                     interval=interval, state_path=state_path, on_event=event)
+
+                totals = self._zhs_qa_courses(client, courses, run, "发布")
+            finally:
+                ai.session.close()
+        return {"answered": totals["ok"], "failed": totals["failed"],
+                "skipped": totals["skipped"]}
+
+    def generate_zhs_questions(self, client, courses, config, options):
+        """从回答较少的提问里挑方向，让 AI 写新提问；要读一次问答区列表。"""
+        from ZHSMain.qa import REFERENCE_ANSWERS, QaBridge, write_questions
+
+        count = int(options.get("count") or 1)
+        row = (courses or [{}])[0] or {}
+        course = row.get("zhs") or {}
+        course_id = course.get("courseId")
+        recruit_id = course.get("recruitId") or course.get("classId")
+        name = row.get("courseName") or "这门课"
+        ai = self.verify_ai(config)
+        try:
+            reference = []
+            if course_id and recruit_id:
+                with QaBridge(client.access_token, course_id=course_id,
+                              recruit_id=recruit_id) as qa:
+                    reference = [item["content"] for item in
+                                 qa.questions(max_answers=REFERENCE_ANSWERS, limit=30)]
+                self.view.log(f"参考 {len(reference)} 条回答较少的提问出题。" if reference
+                              else "问答区还没有回答较少的提问，按课程主题出题。")
+            else:
+                self.view.log(f"{name}：没有可读取的问答区，按课程主题出题。", "warning")
+            return write_questions(ai, reference, count, course_name=name)
+        finally:
+            ai.session.close()
+
+    def execute_zhs_ask(self, client, courses, texts, options):
+        """问答区提问：把准备好的正文逐条发布。"""
+        from ZHSMain.qa import publish_questions
+
+        interval = options.get("interval")
+        interval = 60 if interval is None else int(interval)
+        with self.view.activity("问答区提问"):
+            self.progress.begin("问答区提问", len(texts) * len(courses), "条")
+
+            def run(qa, event):
+                publish_questions(qa, texts, interval=interval, on_event=event)
+
+            totals = self._zhs_qa_courses(client, courses, run, "发布提问")
+        return {"published": totals["ok"], "failed": totals["failed"]}
+
     def run(self):
         from course_flow import CourseWorkspace
         self.remember(self.store.ensure_default_model)
