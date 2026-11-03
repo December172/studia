@@ -852,13 +852,13 @@ function qaBody(p, c) {
       <button class="btn primary" data-qa-start ${block ? "disabled" : ""}>开始</button></span></div>`;
   const texts = draft?.texts || [];
   const ask = `<div class="model plain qa_row"><span class="m1"><b>发起提问</b><small class="sans">${esc(
-      draft?.loading ? "正在读问答区、出题，约半分钟…" : draft?.error || "AI 从回答少的话题里出题，你改好再发")}</small></span>
+      draft?.loading ? `正在出第 ${draft.loading}/${draft.total} 条…` : draft?.error || "AI 从回答少的话题里出题，你改好再发")}</small></span>
     <span class="row_btns"><span class="sizes">${ASK_SIZES.map((s) => `<button class="chip" data-ask-size="${s}" aria-pressed="${s === askSize()}">${s} 条</button>`).join("")}</span>
       <button class="btn" data-qa-draft ${draft?.loading ? "disabled" : ""}>${texts.length ? "换一批" : "出题"}</button></span></div>
     ${texts.map((t, i) => `<div class="model plain qa_draft"><textarea rows="2" data-qa-edit="${i}" maxlength="200">${esc(t)}</textarea>
       <button class="btn small" data-qa-drop="${i}" aria-label="删掉这条">删掉</button></div>`).join("")}
     ${texts.length ? `<div class="model plain qa_row"><span class="m1"><small class="sans">${esc(block || "发出后挂在你的账号名下")}</small></span>
-      <span class="row_btns"><button class="btn primary" data-qa-ask ${block ? "disabled" : ""}>发布 ${texts.length} 条</button></span></div>` : ""}`;
+      <span class="row_btns"><button class="btn primary" data-qa-ask ${block || draft?.loading ? "disabled" : ""}>发布 ${texts.length} 条</button></span></div>` : ""}`;
   const list = !posts ? '<div class="empty">正在读取…</div>' : !posts.length ? '<div class="empty">还没在这门课发过</div>'
     : `<div class="runs">${posts.map((x) => {
       // Keyed by the post itself, so a new post on top does not move which one is open.
@@ -881,13 +881,17 @@ async function loadQaPosts(p, c) {
   finally { loadingPosts.delete(k); }
   repaint();
 }
+// One question per request, shown as it comes: a slow model takes a minute or two for each,
+// and one request for all of them could outlast the browser or a proxy in between.
 async function draftQuestions(p, c) {
-  const k = key(p.id, c.id);
-  state.qaDraft[k] = { loading: true, texts: state.qaDraft[k]?.texts || [] };
-  repaint();
-  try { state.qaDraft[k] = { texts: (await api(`/api/platforms/${p.id}/qa/draft`, { method: "POST", body: { course: c.id, count: askSize() } })).questions }; }
-  catch (error) { state.qaDraft[k] = { texts: state.qaDraft[k].texts, error: error.message }; }
-  if (!state.qaDraft[k].texts.length && !state.qaDraft[k].error) state.qaDraft[k].error = "AI 这次没出成，换一批试试";
+  const draft = state.qaDraft[key(p.id, c.id)] = { texts: [], total: askSize(), loading: 1 };
+  for (; draft.loading <= draft.total; draft.loading++) {
+    repaint();
+    try { draft.texts.push(...(await api(`/api/platforms/${p.id}/qa/draft`, { method: "POST", body: { course: c.id, have: draft.texts } })).questions); }
+    catch (error) { draft.error = error.message; break; }
+  }
+  draft.loading = 0;
+  if (!draft.texts.length && !draft.error) draft.error = "AI 这次没出成，换一批试试";
   repaint();
 }
 

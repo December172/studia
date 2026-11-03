@@ -14,7 +14,7 @@ import secrets
 import threading
 import time
 import webbrowser
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -60,6 +60,7 @@ GROUP = {"study": "learn", "review": "learn", "answer": "answer", "qa": "answer"
 # Seconds between two Q&A posts, drawn afresh each time: an even beat reads like a script.
 QA_PACE = (45, 90)
 QA_POSTS = 300  # posts kept per account for the web list
+DRAFT_TIMEOUT = 300  # reasoning models take one to two minutes to write a single question
 # Running job id -> its Studia app. A job thread is named "studia-job-<id>" and passes that
 # name on to the helper threads it starts, so a log line can be traced back to its job.
 JOBS = {}
@@ -716,11 +717,16 @@ class Studia:
             del self.history[HISTORY:]
         self.publish(dict(_job_public(job), type="job"))
 
-    def _ai(self, cancel_message):
+    def _ai(self, cancel_message, timeout=0):
+        """An AI client for the configured model. With a timeout, each call may take at least that long
+        and a model whose request format is known is not tested first: on a slow reasoning model the
+        test is another minute the person sits waiting for."""
         config = self.store.ai_config()
         if config is None:
             raise HttpError(400, cancel_message)
-        ai = AIClient(config)
+        ai = AIClient(replace(config, timeout=max(int(config.timeout or 0), timeout)))
+        if timeout and config.api_format != "auto":
+            return ai
         try:
             ai.check_connection()
         except AIError as exc:
@@ -861,17 +867,23 @@ class Studia:
         shares = (platform.cache.get(("shares", (row.get("zhs") or {}).get("courseId"))) or (0, None))[1]
         if not course_features(platform.id, row, shares)["qa"]:
             raise HttpError(400, "这门课的考核里没有问答互动分，不用刷问答区")
-        count = _qa_number(body, "count", 3, 1, 5)
-        ai = self._ai("请先在设置里添加 AI 模型")
+        # The page asks for one question at a time and shows each as it comes; the ones it already has
+        # lead the reference list, so the model steers away from them and a repeat is dropped.
+        have = [str(text)[:MAX_QUESTION] for text in body.get("have") or [] if isinstance(text, str)][:5] \
+            if isinstance(body.get("have"), list) else []
+        ai = self._ai("请先在设置里添加 AI 模型", timeout=DRAFT_TIMEOUT)
         try:
             try:
-                with self._board(platform, row) as board:
-                    reference = [item["content"] for item in board.bridge.questions(max_answers=REFERENCE_ANSWERS, limit=30)]
+                reference = self._cached(platform, ("qa_reference", course_id), False, lambda: self._reference(platform, row))
             except AuthenticationExpired:
                 raise HttpError(409, "问答区没进去，稍后重试；一直不行就重新扫码智慧树") from None
-            return {"questions": write_questions(ai, reference, count, course_name=row.get("courseName") or "这门课")}
+            return {"questions": write_questions(ai, have + reference, 1, course_name=row.get("courseName") or "这门课")}
         finally:
             ai.session.close()
+
+    def _reference(self, platform, row):
+        with self._board(platform, row) as board:
+            return [item["content"] for item in board.bridge.questions(max_answers=REFERENCE_ANSWERS, limit=30)]
 
     def qa_posts(self, pid, course_id):
         platform = self.platform(pid)
