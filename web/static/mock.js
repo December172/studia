@@ -89,7 +89,7 @@ function fakeJob(body) {
     body.texts.forEach((q, i) => setTimeout(() => {
       qaPosts.push({ kind: "ask", question: q, text: "", at: Date.now() / 1000 });
       send({ type: "progress", kind: "result", name: q.slice(0, 20), status: "success" });
-      if (i === body.texts.length - 1) setTimeout(() => finish("done", `问答区发布提问 ${body.texts.length} 条，失败 0 条`), 600);
+      if (i === body.texts.length - 1) setTimeout(() => finish("done", `发布了 ${body.texts.length} 条提问`), 600);
     }, 1200 * (i + 1)));
     return job.id;
   }
@@ -100,7 +100,7 @@ function fakeJob(body) {
       send({ type: "progress", kind: "detail", name: `第 ${i + 1} 条 · ${q}` });
       qaPosts.push({ kind: "answer", question: q, text: "这是 AI 写的回答示例：先讲清概念，再举一个课程里的例子说明适用场景。", at: Date.now() / 1000 });
       send({ type: "progress", kind: "result", name: q.slice(0, 20), status: "success" });
-      if (i === asked.length - 1) setTimeout(() => finish("done", `问答区发布 ${asked.length} 条，失败 0 条`), 800);
+      if (i === asked.length - 1) setTimeout(() => finish("done", `回答了 ${asked.length} 条提问`), 800);
     }, 1500 * (i + 1)));
     return job.id;
   }
