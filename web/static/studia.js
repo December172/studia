@@ -336,12 +336,22 @@ function gridHtml(k) {
     <div class="legend">${legend.map(([s, label]) => `<span><i class="cell ${s}"></i>${label}</span>`).join("")}</div></div>`;
 }
 
+// The platform only knows done and not done; the unit a live job is on comes from the job itself
+// (its last "running" event, which the server keeps for pages opened mid-run).
+function markLive(k) {
+  for (const job of state.jobs) {
+    if (key(job.platform, job.course) !== k) continue;
+    const u = findUnit(k, runOf(job.id).unit?.key);
+    if (u && u.state !== "done") u.state = "running";
+  }
+}
+
 const loadingUnits = new Set();
 async function loadUnits(pid, cid, force = false) {
   const k = key(pid, cid);
   if (loadingUnits.has(k) || (state.units[k] && !force)) return;
   loadingUnits.add(k);
-  try { state.units[k] = { chapters: (await api(`/api/platforms/${pid}/units?course=${encodeURIComponent(cid)}${force ? "&fresh=1" : ""}`)).chapters }; }
+  try { state.units[k] = { chapters: (await api(`/api/platforms/${pid}/units?course=${encodeURIComponent(cid)}${force ? "&fresh=1" : ""}`)).chapters }; markLive(k); }
   catch (error) { if (!state.units[k]?.chapters) state.units[k] = { error: error.message }; }
   finally { loadingUnits.delete(k); }
   repaint();
@@ -1284,6 +1294,7 @@ async function refreshState() {
       delete state.papers[key(gone.platform, gone.course)];
     }
     state.jobs = live;
+    for (const job of live) markLive(key(job.platform, job.course));
     for (const p of state.platforms) if (!p.logged_in) { delete state.courses[p.id]; forgetPlatform(p.id); }
   } catch (error) { toast(error.message); }
   renderSidebar();
