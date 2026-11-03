@@ -205,6 +205,7 @@ class Studia:
             platform.client, platform.rows, platform.entries, platform.cache = None, [], {}, {}
 
     def expire(self, platform):
+        logger.warning("%s 登录已失效，已删除保存的登录状态", platform.spec["name"])
         self.store.clear_session(platform.id)
         self.drop(platform)
         return HttpError(401, "%s 登录已过期，请重新登录" % platform.spec["name"])
@@ -284,6 +285,7 @@ class Studia:
                 self.drop(platform)
                 platform.client, platform.login = client, None
                 self.store.save_session(platform.id, client)
+                logger.info("%s 扫码登录成功", platform.spec["name"])
                 return {"status": "done", "message": "登录成功"}
             if status == 2:
                 login["refreshes"] += 1
