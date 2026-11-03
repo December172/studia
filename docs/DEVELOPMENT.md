@@ -25,7 +25,7 @@
 | `ai/memory.py` | MOOC 答案记忆：从已交卷记录（`/course/exam/record/getInfo`）学习标准答案，按课程和试卷限定范围复用 |
 | `ZYKMoocMain/` | 资源库平台接口与学习管理 |
 | `ZHSMain/` | 智慧树：扫码登录、接口加密、共享课/智慧课程学习、AI 答题与按课程的答案记忆 |
-| `ZHSMain/qa.py` | 智慧树问答区（qah5）：用 Playwright 复用已登录 Cookie，页面内签名取题、提问与发布回答；网页版以任务类型 `qa` 调用，按 `max_answers` 过滤题目 |
+| `ZHSMain/qa.py` | 智慧树问答区（qah5）：用 Playwright 复用已登录 Cookie，页面内签名取题、提问与发布回答；终端「问答区答题」和网页任务类型 `qa` 共用 `answer_questions()`，按 `max_answers` 过滤题目 |
 | `web/server.py` | 网页版后端：本机模式的 HTTP 接口、任务队列、SSE 事件推送 |
 | `web/hosting.py` | 服务器模式：多用户会话、CSRF、加密配置存储、审计日志、管理接口 |
 | `web/accounts.py` | 服务器模式的账号、邀请码、登录会话（SQLite：`数据目录/studia.db`）与登录限流 |
