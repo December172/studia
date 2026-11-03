@@ -10,6 +10,7 @@ from rich.console import Console
 
 import theme
 from app import Application
+from base.auth import PlatformUnavailable
 from settings import SettingsStore
 from ui import TerminalUI
 from ZHSMain.qa import CaptchaRequired, QaBridge, answer_questions
@@ -108,6 +109,31 @@ class AskTest(unittest.TestCase):
         with self.assertRaises(Exception) as caught:
             qa.ask("问题？")
         self.assertIn("频率过快", str(caught.exception))
+
+
+class BridgeLifecycleTest(unittest.TestCase):
+    """__enter__ 失败时 with 不会调用 __exit__：浏览器和事件循环必须在这里关掉。"""
+
+    def test_failed_enter_releases_playwright(self):
+        qa = QaBridge("[]", course_id=1, recruit_id=2)
+        qa._prepare = Mock(side_effect=PlatformUnavailable("页面没有加载完成"))
+        playwright = Mock()
+        with patch("playwright.sync_api.sync_playwright") as start:
+            start.return_value.start.return_value = playwright
+            with self.assertRaises(PlatformUnavailable):
+                qa.__enter__()
+        playwright.chromium.launch.return_value.close.assert_called_once()
+        playwright.stop.assert_called_once()
+
+    def test_launch_failure_still_stops_playwright(self):
+        qa = QaBridge("[]", course_id=1, recruit_id=2)
+        playwright = Mock()
+        playwright.chromium.launch.side_effect = RuntimeError("没有可用的浏览器")
+        with patch("playwright.sync_api.sync_playwright") as start:
+            start.return_value.start.return_value = playwright
+            with self.assertRaises(RuntimeError):
+                qa.__enter__()
+        playwright.stop.assert_called_once()
 
 
 class QaSettingsTest(unittest.TestCase):
