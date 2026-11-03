@@ -504,7 +504,7 @@ class Studia:
                 state, summary = "stopped", "已停止"
         except KeyboardInterrupt:
             state, summary = "stopped", "已停止"
-        except (CaptchaRequired, StudyTimeLimit) as exc:
+        except (CaptchaRequired, StudyTimeLimit, NeedsRetry) as exc:
             # Only the user can clear these: solve the captcha on the platform, or come back tomorrow.
             state, summary = "waiting", str(exc) or "平台要求验证"
         except AuthenticationExpired:
@@ -752,6 +752,10 @@ class Studia:
                     sleep=job["cancel"].wait,  # 停止或更新时不必等满间隔
                 )
             return "问答区发布 %(answered)d 条，失败 %(failed)d 条" % stats
+        except AuthenticationExpired:
+            # 问答区自己的会话比智慧树登录短，进站还要走一次单点登录跳转；被跳到登录页
+            # 不等于整个登录失效。只停下这个任务，不删登录：真过期了，学习任务会照常发现。
+            raise NeedsRetry("问答区没进去，稍后重试；一直不行就重新扫码智慧树") from None
         finally:
             ai.session.close()
 
@@ -890,6 +894,10 @@ def _mooc_catalog(client, row):
         statuses = dict(zip(open_ids, pool.map(status, open_ids)))
     return [(course, dict(item, _completion_status=completion_with_score(item, statuses.get(paper_exam_id(item), "unsupported"))), category)
             for course, item, category in listed]
+
+
+class NeedsRetry(Exception):
+    """A job stops and waits for the person, without the platform sign-in being dropped."""
 
 
 def _qa_options(body):

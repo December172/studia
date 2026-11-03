@@ -5,6 +5,7 @@ import unittest
 import threading
 from unittest.mock import Mock, patch
 
+from base.auth import AuthenticationExpired
 from settings import SettingsStore
 from web.server import INTERRUPTED, JOBS, HttpError, Studia, _qa_options, drain
 
@@ -115,6 +116,19 @@ class ResumeJobsTest(unittest.TestCase):
             drain(5)
         self.assertLess(time.time() - started, 3)
         self.assertEqual(app.history[0]["state"], "stopped")
+
+    def test_a_qa_page_bounced_to_sign_in_keeps_the_platform_login(self):
+        self.store.save_session("zhs", Mock(access_token="still-good"))
+        app = self.app()
+        app.platforms["zhs"].rows = [{"courseName": "网络课", "zhs": {"kind": "ai", "courseId": "c1", "classId": "k1"}}]
+        app._ai = Mock()
+        with patch("web.server.QaBridge", side_effect=AuthenticationExpired("智慧树登录已过期，请重新扫码")):
+            app.start_job({"platform": "zhs", "type": "qa", "course": "ai-c1"})
+            drain(5)
+        self.assertEqual(app.history[0]["state"], "waiting")
+        self.assertIn("问答区没进去", app.history[0]["summary"])
+        self.assertEqual(self.store.session("zhs")["access_token"], "still-good")
+        self.assertIsNotNone(app.platforms["zhs"].client)
 
     def test_history_survives_a_restart(self):
         app = self.app()
