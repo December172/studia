@@ -13,7 +13,8 @@ from app import Application
 from base.auth import PlatformUnavailable
 from settings import SettingsStore
 from ui import TerminalUI
-from ZHSMain.qa import CaptchaRequired, QaBridge, answer_questions
+from ZHSMain.qa import (CaptchaRequired, QaBridge, answer_questions, publish_questions,
+                        write_questions)
 
 LONG = "这是一段超过三十个字的回答，用来通过最小长度校验，确保回答不会为空。"
 COURSE = {"courseName": "国家安全教育", "zhs": {"courseId": 1000119877, "recruitId": 426135}}
@@ -38,11 +39,12 @@ class FakeQa:
 
 class FakeAi:
     def __init__(self, text=LONG):
-        self.text, self.calls = text, 0
+        self.text, self.calls, self.questions = text, 0, []
         self.session = Mock()
 
     def answer(self, question):
         self.calls += 1
+        self.questions.append(question)
         return {"answer": self.text}
 
 
@@ -136,6 +138,109 @@ class BridgeLifecycleTest(unittest.TestCase):
         playwright.stop.assert_called_once()
 
 
+class FakeAsk:
+    """只实现 ask() 的桥替身，用来验证提问队列。"""
+
+    def __init__(self, fail_on=None, captcha_on=None):
+        self.published, self.fail_on, self.captcha_on = [], fail_on, captcha_on
+
+    def ask(self, text, chapter_id=0):
+        if text == self.captcha_on:
+            raise CaptchaRequired("需要验证")
+        if text == self.fail_on:
+            raise ZHSApiError("500", "平台拒绝")
+        self.published.append(text)
+        return 5000 + len(self.published)
+
+
+QUESTIONS = ["第一章里的两个概念有什么区别？", "为什么这里要用比例而不是绝对值？"]
+
+
+class WriteQuestionsTest(unittest.TestCase):
+    def test_writes_requested_questions(self):
+        ai = FakeAi(LONG)
+        self.assertEqual(write_questions(ai, "主题", 2), [LONG])  # 重复的只发一条
+        self.assertEqual(ai.calls, 2)
+
+    def test_short_and_repeated_answers_are_skipped(self):
+        ai = FakeAi("太短")
+        self.assertEqual(write_questions(ai, "主题", 2), [])
+        repeated = write_questions(FakeAi(LONG), "主题", 3)
+        self.assertEqual(len(repeated), 1)
+
+    def test_prompt_names_the_course_and_topic(self):
+        ai = FakeAi(LONG)
+        write_questions(ai, "合同效力", 1, course_name="国家安全教育")
+        title = ai.questions[0]["title"]
+        self.assertIn("国家安全教育", title)
+        self.assertIn("合同效力", title)
+
+
+class PublishQuestionsTest(unittest.TestCase):
+    def test_publishes_all_questions(self):
+        qa = FakeAsk()
+        stats = publish_questions(qa, QUESTIONS, interval=0)
+        self.assertEqual((stats["published"], stats["failed"]), (2, 0))
+        self.assertEqual(qa.published, QUESTIONS)
+        self.assertEqual(stats["ids"], [5001, 5002])
+
+    def test_failure_does_not_stop_queue(self):
+        qa = FakeAsk(fail_on=QUESTIONS[0])
+        stats = publish_questions(qa, QUESTIONS, interval=0)
+        self.assertEqual((stats["published"], stats["failed"]), (1, 1))
+        self.assertEqual(qa.published, [QUESTIONS[1]])
+
+    def test_captcha_propagates(self):
+        qa = FakeAsk(captcha_on=QUESTIONS[1])
+        with self.assertRaises(CaptchaRequired):
+            publish_questions(qa, QUESTIONS, interval=0)
+        self.assertEqual(qa.published, [QUESTIONS[0]])
+
+    def test_missing_id_counts_as_failure(self):
+        qa = FakeAsk()
+        qa.ask = lambda text, chapter_id=0: None
+        stats = publish_questions(qa, QUESTIONS, interval=0)
+        self.assertEqual((stats["published"], stats["failed"]), (0, 2))
+
+
+class QaAskSettingsTest(unittest.TestCase):
+    def view(self, answers):
+        output = io.StringIO()
+        inputs = iter(answers)
+        return TerminalUI(console=Console(file=output, theme=theme.THEME, width=120),
+                          input_fn=lambda: next(inputs)), output
+
+    def test_manual_text_is_kept(self):
+        view, _ = self.view(["1", "第一章的两个概念有什么区别？", "", "y"])
+        options = view.qa_ask_settings({})
+        self.assertEqual(options["source"], "manual")
+        self.assertEqual(options["text"], "第一章的两个概念有什么区别？")
+        self.assertEqual(options["interval"], 60)
+
+    def test_short_text_is_asked_again(self):
+        view, output = self.view(["1", "太短", "第一章的两个概念有什么区别？", "", "y"])
+        self.assertEqual(view.qa_ask_settings({})["text"], "第一章的两个概念有什么区别？")
+        self.assertIn("请输入 10–120 个字。", output.getvalue())
+
+    def test_ai_mode_asks_topic_and_count(self):
+        view, _ = self.view(["2", "合同效力", "2", "", "y"])
+        options = view.qa_ask_settings({})
+        self.assertEqual((options["source"], options["topic"], options["count"]),
+                         ("ai", "合同效力", 2))
+
+    def test_saved_values_become_defaults(self):
+        view, _ = self.view(["2", "", "", "", "y"])
+        saved = {"source": "ai", "topic": "合同效力", "count": 3, "interval": 30}
+        options = view.qa_ask_settings(saved)
+        self.assertEqual({key: options[key] for key in saved}, saved)
+
+    def test_review_requires_confirmation(self):
+        view, _ = self.view(["y"])
+        self.assertEqual(view.qa_questions_review(QUESTIONS), QUESTIONS)
+        view, _ = self.view(["n"])
+        self.assertEqual(view.qa_questions_review(QUESTIONS), [])
+
+
 class QaSettingsTest(unittest.TestCase):
     def view(self, answers):
         output = io.StringIO()
@@ -207,6 +312,46 @@ class TuiExecuteTest(unittest.TestCase):
         self.assertEqual(json.loads(path.read_text(encoding="utf-8")), [1, 2])
 
 
+class TuiAskTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.view = TerminalUI(console=Console(file=io.StringIO(), theme=theme.THEME, width=120),
+                               input_fn=lambda: "")
+        self.app = Application(self.view, SettingsStore(Path(self.temp.name)))
+
+    def publish(self, courses, qa):
+        bridge = Mock()
+        bridge.return_value.__enter__ = Mock(return_value=qa)
+        bridge.return_value.__exit__ = Mock(return_value=False)
+        with patch("ZHSMain.qa.QaBridge", bridge):
+            stats = self.app.execute_zhs_ask(Mock(access_token="[]"), courses, QUESTIONS,
+                                             {"interval": 0})
+        return stats, bridge
+
+    def test_publishes_questions(self):
+        qa = FakeAsk()
+        stats, bridge = self.publish([COURSE], qa)
+        self.assertEqual(stats, {"published": 2, "failed": 0})
+        self.assertEqual(qa.published, QUESTIONS)
+        self.assertEqual(bridge.call_args.kwargs["recruit_id"], 426135)
+
+    def test_captcha_stops_remaining_courses(self):
+        qa = FakeAsk(captcha_on=QUESTIONS[1])
+        stats, bridge = self.publish([COURSE, dict(COURSE, courseName="课程二")], qa)
+        self.assertEqual(stats["published"], 1)
+        self.assertEqual(bridge.call_count, 1)
+
+    def test_generate_uses_ai_without_browser(self):
+        ai = FakeAi(LONG)
+        self.app.verify_ai = Mock(return_value=ai)
+        with patch("ZHSMain.qa.QaBridge") as bridge:
+            texts = self.app.generate_zhs_questions(Mock(), "合同效力", 2, "国家安全教育")
+        self.assertEqual(texts, [LONG])
+        bridge.assert_not_called()
+        self.assertTrue(ai.session.close.called)
+
+
 class WorkspaceTest(unittest.TestCase):
     def test_course_menu_enters_qa_area(self):
         from course_flow import CourseWorkspace
@@ -230,6 +375,26 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(view.operation_result.call_args.args[0], [])
         self.assertEqual(app.store.set.call_args.args,
                          ("qa", {"limit": 2, "max_answers": 0, "interval": 30}))
+
+    def test_course_menu_publishes_questions(self):
+        from course_flow import CourseWorkspace
+        from ui import Back
+
+        view = MagicMock()
+        view.course_menu.side_effect = [5, Back()]
+        view.qa_ask_settings.return_value = {"source": "manual", "text": QUESTIONS[0],
+                                             "count": 1, "interval": 30}
+        view.qa_questions_review.return_value = [QUESTIONS[0]]
+        app = MagicMock()
+        app.store.get.return_value = {}
+        app.remember.side_effect = lambda operation: operation()
+        workspace = CourseWorkspace(app)
+        workspace.view, workspace.store, workspace.platform = view, app.store, 2
+        workspace.client = Mock()
+        workspace.course_loop([COURSE])
+        app.execute_zhs_ask.assert_called_once()
+        self.assertEqual(app.execute_zhs_ask.call_args.args[2], [QUESTIONS[0]])
+        self.assertEqual(view.operation_result.call_args.args[0], [])
 
 
 if __name__ == "__main__":

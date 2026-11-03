@@ -456,56 +456,94 @@ class Application:
                     ai_client.session.close()
         return results
 
-    def execute_zhs_qa(self, client, courses, config, options):
-        """问答区：取题 → AI 写回答 → 发布。一条失败不打断队列，登录/验证码问题停止其余课程。"""
-        from ZHSMain.qa import QaBridge, answer_questions
+    def _zhs_qa_courses(self, client, courses, run, label):
+        """按课程打开问答区执行 run(qa, event)，返回 {ok, failed, skipped} 计数。
+
+        run 上报 status=success/error，跳过由上层的业务返回值决定时也算在这里。
+        验证码和登录问题会停止其余课程：同账号继续只会继续失败。
+        """
+        from ZHSMain.qa import QaBridge
         from ZHSMain.api import ZHSApiError
+
+        totals = {"ok": 0, "failed": 0, "skipped": 0}
+        counted = {"success": "ok", "error": "failed", "skipped": "skipped"}
+        for row in courses:
+            course = (row or {}).get("zhs") or {}
+            course_id = course.get("courseId")
+            # 共享课带 recruitId；智慧课程只有 classId，问答区两者取其一。
+            recruit_id = course.get("recruitId") or course.get("classId")
+            name = row.get("courseName") or "当前课程"
+            if not course_id or not recruit_id:
+                self.view.log(f"{name}：没有可作答的问答区，已跳过。", "warning")
+                continue
+            before = dict(totals)
+
+            def event(kind, title, status="", _name=name):
+                if kind != "result":
+                    return
+                if status in counted:
+                    totals[counted[status]] += 1
+                self.progress.result(f"{_name} · {title}", status)
+
+            try:
+                with QaBridge(client.access_token, course_id=course_id,
+                              recruit_id=recruit_id) as qa:
+                    run(qa, event)
+            except (CaptchaRequired, AuthenticationExpired, PlatformUnavailable,
+                    ZHSApiError) as exc:
+                self.view.log(f"{name}：{exc}；其余课程未执行。", "warning")
+                break
+            self.view.log(f"{name}：{label} {totals['ok'] - before['ok']} 条，"
+                          f"失败 {totals['failed'] - before['failed']} 条。")
+        return totals
+
+    def execute_zhs_qa(self, client, courses, config, options):
+        """问答区答题：取题 → AI 写回答 → 发布。一条失败不打断队列。"""
+        from ZHSMain.qa import answer_questions
 
         limit = int(options.get("limit") or 10)
         max_answers = int(options.get("max_answers") or 0)
         interval = options.get("interval")
         interval = 60 if interval is None else int(interval)
         state_path = Path(self.store.path).parent / "zhs-qa-answers.json"
-        # 计数只认已经到手的发布结果：验证码中断时队列里的统计会随异常一起丢掉。
-        totals = {"answered": 0, "failed": 0, "skipped": 0}
-        counted = {"success": "answered", "error": "failed", "skipped": "skipped"}
         with self.view.activity("问答区答题"):
             self.progress.begin("问答区答题", limit * len(courses), "条")
             ai = self.verify_ai(config)
             try:
-                for row in courses:
-                    course = (row or {}).get("zhs") or {}
-                    course_id = course.get("courseId")
-                    # 共享课带 recruitId；智慧课程只有 classId，问答区两者取其一。
-                    recruit_id = course.get("recruitId") or course.get("classId")
-                    name = row.get("courseName") or "当前课程"
-                    if not course_id or not recruit_id:
-                        self.view.log(f"{name}：没有可作答的问答区，已跳过。", "warning")
-                        continue
-                    before = dict(totals)
+                def run(qa, event):
+                    answer_questions(qa, ai, max_answers=max_answers, limit=limit,
+                                     interval=interval, state_path=state_path, on_event=event)
 
-                    def event(kind, title, status=""):
-                        if kind != "result":
-                            return
-                        if status in counted:
-                            totals[counted[status]] += 1
-                        self.progress.result(f"{name} · {title}", status)
-
-                    try:
-                        with QaBridge(client.access_token, course_id=course_id,
-                                      recruit_id=recruit_id) as qa:
-                            answer_questions(
-                                qa, ai, max_answers=max_answers, limit=limit, interval=interval,
-                                state_path=state_path, on_event=event)
-                    except (CaptchaRequired, AuthenticationExpired, PlatformUnavailable,
-                            ZHSApiError) as exc:
-                        self.view.log(f"{name}：{exc}；其余课程未执行。", "warning")
-                        break
-                    self.view.log(f"{name}：发布 {totals['answered'] - before['answered']} 条，"
-                                  f"失败 {totals['failed'] - before['failed']} 条。")
+                totals = self._zhs_qa_courses(client, courses, run, "发布")
             finally:
                 ai.session.close()
-        return totals
+        return {"answered": totals["ok"], "failed": totals["failed"],
+                "skipped": totals["skipped"]}
+
+    def generate_zhs_questions(self, config, topic, count, course_name=""):
+        """AI 按主题写提问正文；只调用模型，不打开浏览器。"""
+        from ZHSMain.qa import write_questions
+
+        ai = self.verify_ai(config)
+        try:
+            return write_questions(ai, topic, count, course_name=course_name)
+        finally:
+            ai.session.close()
+
+    def execute_zhs_ask(self, client, courses, texts, options):
+        """问答区提问：把准备好的正文逐条发布。"""
+        from ZHSMain.qa import publish_questions
+
+        interval = options.get("interval")
+        interval = 60 if interval is None else int(interval)
+        with self.view.activity("问答区提问"):
+            self.progress.begin("问答区提问", len(texts) * len(courses), "条")
+
+            def run(qa, event):
+                publish_questions(qa, texts, interval=interval, on_event=event)
+
+            totals = self._zhs_qa_courses(client, courses, run, "发布提问")
+        return {"published": totals["ok"], "failed": totals["failed"]}
 
     def run(self):
         from course_flow import CourseWorkspace

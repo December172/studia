@@ -257,3 +257,68 @@ def answer_questions(qa, ai, *, max_answers=1, limit=10, interval=60, state_path
             sleep(interval)
     on_event("done", "问答区答题", "done")
     return stats
+
+
+# 让模型的「问答题」能力产出提问正文：它只需把问题写成答案，答卷格式不变。
+QUESTION_PROMPT = (
+    "这门课是「%s」。请以学生口吻，围绕「%s」提出第 %d 个用于课程问答区的问题。\n"
+    "要求：一到两句话、具体到可以讨论、不要序号和 Markdown、不要自己作答。"
+)
+MIN_QUESTION, MAX_QUESTION = 8, 200
+
+
+def _clean_question(text):
+    """去掉模型爱加的引号、序号和多余空白，剩下的才拿去发布。"""
+    text = " ".join(str(text or "").split())
+    text = text.strip("\"'“”‘’` ")
+    if len(text) > 2 and text[0].isdigit() and text[1] in ".、)）":
+        text = text[2:].strip()
+    return text
+
+
+def write_questions(ai, topic, count, *, course_name=""):
+    """让模型写 count 条互不重复的提问；不合格的跳过，其余照常返回。"""
+    texts = []
+    for index in range(1, max(1, int(count)) + 1):
+        prompt = QUESTION_PROMPT % (course_name or "这门课", topic, index)
+        answer = ai.answer({"type": "问答题", "title": prompt}).get("answer")
+        text = _clean_question(answer)
+        if not MIN_QUESTION <= len(text) <= MAX_QUESTION:
+            logger.warning("AI 给出的第 %d 条提问不可用：%s", index, text[:40])
+            continue
+        if text in texts:
+            logger.warning("AI 重复了同一条提问，已跳过：%s", text[:40])
+            continue
+        texts.append(text)
+    return texts
+
+
+def publish_questions(qa, texts, *, interval=60, should_stop=lambda: False,
+                      on_event=lambda kind, name, status="": None, sleep=time.sleep):
+    """逐条发布提问，返回统计。qa 只需 ask 一个方法，便于测试替身。"""
+    stats = {"published": 0, "failed": 0, "ids": []}
+    on_event("begin", "问答区提问", "running")
+    for index, text in enumerate(texts, 1):
+        if should_stop():
+            break
+        title = text[:20]
+        try:
+            question_id = qa.ask(text)
+        except CaptchaRequired:
+            raise
+        except Exception as exc:  # 一条失败不影响后续提问
+            stats["failed"] += 1
+            logger.warning("问答区第 %d 条提问失败：%s", index, exc)
+            on_event("result", title, "error")
+            continue
+        if not question_id:
+            stats["failed"] += 1
+            on_event("result", title, "error")
+            continue
+        stats["published"] += 1
+        stats["ids"].append(question_id)
+        on_event("result", title, "success")
+        if index < len(texts) and interval:
+            sleep(interval)
+    on_event("done", "问答区提问", "done")
+    return stats
