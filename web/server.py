@@ -834,7 +834,7 @@ class Studia:
                 stats = answer_questions(board, ai, max_answers=0, limit=limit, interval=1,
                                          state_path=str(Path(self.store.path).parent / "zhs-qa-answers.json"),
                                          should_stop=job["cancel"].is_set, on_event=event, sleep=self._pace(job))
-            return "问答区发布 %(answered)d 条，失败 %(failed)d 条" % stats
+            return _tally("回答了 %d 条提问", stats["answered"], stats["failed"])
         except AuthenticationExpired:
             # 问答区自己的会话比智慧树登录短，进站还要走一次单点登录跳转；被跳到登录页
             # 不等于整个登录失效。只停下这个任务，不删登录：真过期了，学习任务会照常发现。
@@ -854,7 +854,7 @@ class Studia:
             with self._board(platform, row) as board:
                 stats = publish_questions(board, texts, interval=1, should_stop=job["cancel"].is_set,
                                           on_event=event, sleep=self._pace(job))
-            return "问答区发布提问 %(published)d 条，失败 %(failed)d 条" % stats
+            return _tally("发布了 %d 条提问", stats["published"], stats["failed"])
         except AuthenticationExpired:
             raise NeedsRetry("问答区没进去，稍后重试；一直不行就重新扫码智慧树") from None
 
@@ -1050,6 +1050,11 @@ def _mooc_catalog(client, row):
 
 class NeedsRetry(Exception):
     """A job stops and waits for the person, without the platform sign-in being dropped."""
+
+
+def _tally(done, count, failed):
+    """A Q&A job's summary: what it did, and failures only when there were some."""
+    return done % count + ("，失败 %d 条" % failed if failed else "")
 
 
 def _qa_number(body, name, default, low, high):
