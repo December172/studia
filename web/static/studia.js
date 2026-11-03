@@ -1134,6 +1134,8 @@ function handleEvent(event) {
       loadCourses(event.platform);
       setTimeout(repaint, 61000);
     }
+  } else if (event.type === "account") {
+    refreshState().then(repaint);
   } else if (event.type === "progress" || event.type === "log") {
     const job = state.jobs.find((j) => j.id === event.job);
     if (!job) return;
@@ -1172,6 +1174,7 @@ function repaint() {
       if (name === "jobs") VIEWS.jobs(a);
       else if (name === "home") VIEWS.home();
       else if (name === "me") VIEWS.me();
+      else if (name === "login" && platformOf(a)?.logged_in) go(homeOf(platformOf(a)));  // signed in elsewhere
       else if (name === "course") {
         const p = platformOf(a), course = courseOf(a, decodeURIComponent(b || ""));
         if (p && course) renderCourse(p, course, c === "answer" ? "answer" : "study");
@@ -1254,11 +1257,15 @@ async function afterLogin(pid) {
   toast("登录成功");
   forgetPlatform(pid);
   await refreshState();
-  await loadCourses(pid);
   switchPlatform(pid);
 }
 
-async function loadCourses(pid) {
+// One read per platform at a time: a login seen by this tab and by the server's account event asks twice.
+const coursesLoading = {};
+function loadCourses(pid) {
+  return (coursesLoading[pid] ||= readCourses(pid).finally(() => delete coursesLoading[pid]));
+}
+async function readCourses(pid) {
   try { state.courses[pid] = (await api(`/api/platforms/${pid}/courses`)).courses; }
   catch (error) { toast(error.message); state.courses[pid] = state.courses[pid] || []; }
   repaint();
@@ -1289,6 +1296,8 @@ function pumpBackground() {
 async function refreshState(catchUp = false) {
   try {
     const data = await api("/api/state");
+    // Before the first read nothing was signed in, and boot loads the courses itself.
+    const before = state.platforms.length ? new Set(state.platforms.filter((p) => p.logged_in).map((p) => p.id)) : null;
     state.platforms = data.platforms;
     state.history = data.history || [];
     state.jobLimit = data.job_limit || state.jobLimit;
@@ -1309,6 +1318,8 @@ async function refreshState(catchUp = false) {
     state.jobs = live;
     for (const job of live) markLive(key(job.platform, job.course));
     for (const p of state.platforms) if (!p.logged_in) { delete state.courses[p.id]; forgetPlatform(p.id); }
+    // Signed in from another tab or device: this tab has no course list for it yet.
+    if (before) await Promise.all(state.platforms.filter((p) => p.logged_in && !before.has(p.id)).map((p) => loadCourses(p.id)));
   } catch (error) { toast(error.message); }
   renderSidebar();
 }
