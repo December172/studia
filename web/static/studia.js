@@ -873,17 +873,16 @@ function qaBody(p, c) {
 // Boxes Studia can fill are inked; the rest (exams, meet sessions) stay outlined.
 const SHARES = [["progress", "学习", 1], ["habit", "习惯", 1], ["interactive", "互动", 1], ["knowledge", "掌握度", 0],
   ["test", "测试", 1], ["meet", "见面课", 0], ["final", "期末", 0]];
-// With the earned points loaded each box reads "9/20 习惯" and fills to that share.
+// Each box is as wide as its share and fills as far as the points earned; the numbers live in the tooltip.
 const pts = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
 function fingerprint(shares, earned) {
   const parts = shares ? SHARES.filter(([k]) => shares[k] > 0) : [];
   if (!parts.length) return "";
-  const usual = ["progress", "habit", "interactive", "knowledge"].reduce((sum, k) => sum + (shares[k] || 0), 0);
-  return `<div class="shares" title="这门课的考核构成，满分 100">${parts.map(([k, word, auto]) => {
+  return `<div class="shares">${parts.map(([k, word, auto]) => {
     const got = earned?.[k], none = earned && !got && (k === "final" || k === "meet");
     const fill = earned && !none ? Math.min(100, (got / shares[k]) * 100) : 0;
-    return `<span class="share ${auto ? "auto" : ""}" style="flex:${shares[k]};--fill:${fill}%"><b>${earned ? `${none ? "—" : pts(got)}/` : ""}${shares[k]}</b>${word}</span>`;
-  }).join("")}</div>${earned ? `<p class="score_now">当前 <b>${pts(earned.total)}</b> 分 · 平时 ${pts(earned.usual)}/${usual}</p>` : ""}`;
+    return `<span class="share ${auto ? "auto" : ""}" style="flex:${shares[k]};--fill:${fill}%" title="${word} ${earned ? `${none ? "未开始" : pts(got)} / ` : ""}${shares[k]} 分">${word}</span>`;
+  }).join("")}</div>${earned ? `<p class="score_now">当前 <b>${pts(earned.total)}</b> 分</p>` : ""}`;
 }
 const loadingEarned = new Set();
 async function loadEarned(p, c) {
