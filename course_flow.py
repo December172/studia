@@ -110,6 +110,20 @@ class CourseWorkspace:
                         return []
 
                     result = self.execute(answer, "问答区答题")
+                elif mode == 5 and self.platform == 2:
+                    options = self.view.qa_ask_settings(self.store.get("qa_ask", {}))
+                    self.app.remember(lambda: self.store.set("qa_ask", options))
+                    self.view.qa_ask_plan(options)
+                    texts = self.prepare_questions(courses, options)
+                    if not texts:
+                        result = 1
+                    else:
+                        def ask():
+                            # 正文已经确认过，这里只负责发布；提问不产生文件。
+                            self.app.execute_zhs_ask(self.client, courses, texts, options)
+                            return []
+
+                        result = self.execute(ask, "问答区提问")
                 else:
                     result = self.tasks(courses, mode, task_state.setdefault(mode, {}))
                 if result == 2:
@@ -123,6 +137,27 @@ class CourseWorkspace:
                 self.view.pending_error = str(exc)
                 if self.view.operation_result() == 2:
                     return
+
+    def prepare_questions(self, courses, options):
+        """按设置准备提问正文并请用户确认；取消或失败都返回空列表，停在课程菜单。"""
+        try:
+            if options["source"] == "ai":
+                config = self.app.ai_configuration()
+                with self.view.activity("生成提问"):
+                    texts = self.app.generate_zhs_questions(
+                        config, options["topic"], options["count"],
+                        courses[0].get("courseName", "") if courses else "")
+            else:
+                texts = [options["text"]]
+        except (Cancelled, EOFError, Back):
+            raise
+        except Exception as exc:  # AI 或格式问题：说清楚，别把用户留在坏状态
+            self.view.log(f"生成提问失败：{exc}", "error")
+            return []
+        if not texts:
+            self.view.log("没有生成可发布的提问，换个主题再试。", "warning")
+            return []
+        return self.view.qa_questions_review(texts)
 
     def catalog_for(self, courses):
         if self.platform == 2:
