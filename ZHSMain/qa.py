@@ -92,6 +92,7 @@ class QaBridge:
         self.cookies = _playwright_cookies(access_token)
         self.course_id, self.recruit_id = int(course_id), int(recruit_id)
         self.headless, self.timeout = headless, timeout
+        self.url = QA_URL % (self.course_id, self.recruit_id)
         self._pw = self._browser = self._page = None
 
     def __enter__(self):
@@ -102,14 +103,44 @@ class QaBridge:
         context = self._browser.new_context()
         context.add_cookies(self.cookies)
         self._page = context.new_page()
-        self._page.goto(QA_URL % (self.course_id, self.recruit_id), wait_until="domcontentloaded",
-                        timeout=self.timeout)
-        if "/login" in self._page.url:
-            raise AuthenticationExpired("智慧树登录已过期，请重新扫码")
-        self._page.wait_for_function("() => window.yxyz && document.querySelector('#app').__vue__",
-                                     timeout=self.timeout)
-        self._page.evaluate(BRIDGE_JS)
+        self._prepare()
         return self
+
+    def _prepare(self):
+        """打开问答区并注入签名桥。登录后第一次进站会被 SSO 弹一次，重试即可。"""
+        from playwright.sync_api import Error as PlaywrightError
+
+        for _ in range(3):
+            try:
+                self._page.goto(self.url, wait_until="domcontentloaded", timeout=self.timeout)
+                self._page.wait_for_load_state("networkidle", timeout=15000)
+            except PlaywrightError:
+                time.sleep(1.5)
+                continue
+            if any(part in self._page.url for part in ("/login", "passport.")):
+                raise AuthenticationExpired("智慧树登录已过期，请重新扫码")
+            try:
+                # dynStr 要等首页数据回来才是字符串，早读会拿到 null，
+                # 签名函数只会抛一句看不懂的 TypeError。
+                self._page.wait_for_function(
+                    "() => window.yxyz && (() => { const app = document.querySelector('#app');"
+                    " const base = app && app.__vue__ && app.__vue__.$store.state.baseData;"
+                    " return !!base && typeof base.dynStr === 'string' && base.dynStr.length > 0; })()",
+                    timeout=25000)
+                self._page.evaluate(BRIDGE_JS)
+                return
+            except PlaywrightError:
+                time.sleep(1.5)  # 页面在跳转时执行上下文会被销毁，再开一次
+        raise ZHSApiError("问答区页面没有加载完成，请稍后重试")
+
+    def _eval(self, script, arg):
+        try:
+            return self._page.evaluate(script, arg)
+        except Exception as exc:  # 运行中页面刷新：重新注入一次再试
+            if "Execution context was destroyed" not in str(exc):
+                raise
+            self._prepare()
+            return self._page.evaluate(script, arg)
 
     def close(self):
         for close in (getattr(self._browser, "close", None), getattr(self._pw, "stop", None)):
@@ -125,17 +156,17 @@ class QaBridge:
     # ---------------------------------------------------------------- 取题
 
     def questions(self, max_answers=1, limit=10, page_size=50):
-        items = self._page.evaluate(LIST_JS, {"courseId": self.course_id, "recruitId": self.recruit_id,
-                                              "maxAnswers": int(max_answers), "limit": int(limit),
-                                              "pageSize": int(page_size)})
+        items = self._eval(LIST_JS, {"courseId": self.course_id, "recruitId": self.recruit_id,
+                                        "maxAnswers": int(max_answers), "limit": int(limit),
+                                        "pageSize": int(page_size)})
         logger.info("问答区取到 %d 条（回答数≤%d）", len(items), max_answers)
         return items
 
     # ---------------------------------------------------------------- 发布
 
     def publish(self, question_id, text):
-        result = self._page.evaluate(PUBLISH_JS, {"qid": int(question_id), "content": text,
-                                                  "courseId": self.course_id, "recruitId": self.recruit_id})
+        result = self._eval(PUBLISH_JS, {"qid": int(question_id), "content": text,
+                                        "courseId": self.course_id, "recruitId": self.recruit_id})
         if str(result.get("code")) == "1010":
             raise CaptchaRequired("问答区要求完成验证，请在页面上验证后重试")
         if str(result.get("status")) != "200":
