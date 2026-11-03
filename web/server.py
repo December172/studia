@@ -37,6 +37,7 @@ from ZHSMain.answer import ZHSAnswerRunner, catalog
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi, ZHSError
 from ZHSMain.main import ZHSHandler, course_units as zhs_units
 from ZHSMain.memory import AnswerMemory
+from ZHSMain.qa import QaBridge, answer_questions
 from ai.memory import MoocAnswerMemory
 from ZYKMoocMain.api import ZYKMoocApi
 from ZYKMoocMain.main import ZYKMoocHandler
@@ -51,9 +52,9 @@ MAX_JOBS = 4
 MAX_PENDING = 20
 # The platform's unit and paper lists take seconds to tens of seconds; reuse them for a while.
 CACHE_TTL = 600
-LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题"}
+LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题", "qa": "问答区答题"}
 # Jobs that play course content conflict with each other; answering is separate.
-GROUP = {"study": "learn", "review": "learn", "answer": "answer"}
+GROUP = {"study": "learn", "review": "learn", "answer": "answer", "qa": "answer"}
 # Running job id -> its Studia app. A job thread is named "studia-job-<id>" and passes that
 # name on to the helper threads it starts, so a log line can be traced back to its job.
 JOBS = {}
@@ -84,7 +85,7 @@ PLATFORMS = {
     "zyk": {"name": "资源库", "short": "资源库", "login": "browser", "api": ZYKMoocApi,
             "handler": ZYKMoocHandler, "units": None, "answer": False, "review": False, "needs_ai": False, "hidden": True},
     "zhs": {"name": "智慧树", "short": "智慧树", "login": "qr", "api": ZHSApi,
-            "handler": ZHSHandler, "units": zhs_units, "answer": True, "review": True, "needs_ai": False},
+            "handler": ZHSHandler, "units": zhs_units, "answer": True, "review": True, "qa": True, "needs_ai": False},
 }
 
 
@@ -405,7 +406,7 @@ class Studia:
         platform = self.platform(str(body.get("platform", "")))
         kind = body.get("type")
         course_id = str(body.get("course", ""))
-        allowed = {"study"} | ({"review"} if platform.spec["review"] else set()) | ({"answer"} if platform.spec["answer"] else set())
+        allowed = {"study"} | ({"review"} if platform.spec["review"] else set()) | ({"answer"} if platform.spec["answer"] else set()) | ({"qa"} if platform.spec.get("qa") else set())
         if kind not in allowed:
             raise HttpError(400, "这个平台暂不支持该操作")
         row = self.find_row(platform, course_id)
@@ -420,6 +421,8 @@ class Studia:
             if kind == "answer":
                 selected = self._selected(platform, course_id, body.get("tasks") or [])
                 target = lambda: self._answer(platform, selected, bool(body.get("auto_submit")), job)
+            elif kind == "qa":
+                target = lambda: self._qa(platform, row, body, job)
             else:
                 job["minutes"] = (REVIEW_MINUTES if minutes is None else minutes) if kind == "review" else 0
                 target = lambda: self._study(platform, row, job["minutes"], job)
@@ -693,6 +696,39 @@ class Studia:
                 if result.get("stop_queue") or status in ("ai_error", "submission_unknown", "submitting", "paused"):
                     break
             return f"处理完成 {done}/{len(selected)} 份试卷"
+        finally:
+            ai.session.close()
+
+    def _qa(self, platform, row, body, job):
+        """问答区：取题目 → AI 写回答 → 发布。只在平台返回 200 后计数。"""
+        course = row.get("zhs") or {}
+        # 共享课带 recruitId；智慧课程只有 classId，问答区 URL 需要两者之一。
+        course_id = course.get("courseId")
+        recruit_id = course.get("recruitId") or course.get("classId")
+        if not course_id or not recruit_id:
+            raise HttpError(400, "这门课没有可作答的问答区（缺少课程或班级 ID）")
+        api = self.client(platform)
+        ai = self._ai("请先在设置里添加 AI 模型")
+        limit = max(1, min(int(body.get("limit") or 10), 50))
+
+        def event(kind, name, status=""):
+            if kind == "begin":
+                self.progress_event(job, "begin", "问答区答题", total=limit, unit="条")
+            elif kind == "result":
+                self.progress_event(job, "result", name, status=status)
+
+        try:
+            with QaBridge(api.access_token, course_id=course_id, recruit_id=recruit_id) as qa:
+                stats = answer_questions(
+                    qa, ai,
+                    max_answers=int(body.get("max_answers") or 1),
+                    limit=limit,
+                    interval=int(body.get("interval") or 60),
+                    state_path=str(Path(self.store.path).parent / "zhs-qa-answers.json"),
+                    should_stop=job["cancel"].is_set,
+                    on_event=event,
+                )
+            return "问答区发布 %(answered)d 条，失败 %(failed)d 条" % stats
         finally:
             ai.session.close()
 
