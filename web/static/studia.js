@@ -81,7 +81,7 @@ async function api(path, { method = "GET", body } = {}) {
 }
 
 const state = {
-  platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {},
+  platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {}, earned: {},
   jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, lastDone: null,
   current: store.get("studia-platform", ""), meOpen: false, adminTab: "people", logFilter: "all", editPassword: false, adminEdit: null,
 };
@@ -572,11 +572,11 @@ const VIEWS = {
     const card = (c) => {
       const job = state.jobs.find((j) => j.platform === p.id && j.course === c.id);
       const last = state.history.find((j) => j.platform === p.id && j.course === c.id);
-      const open = (state.papers[key(p.id, c.id)] || []).filter((x) => x.available && !x.done).length;
+      const open = (state.papers[key(p.id, c.id)] || []).filter((x) => x.available && !x.done && !x.redo).length;
       // What is running and what is left to answer are separate facts: show both, never one hiding the other.
       const status = job ? `<span class="live">${job.state === "queued" ? "排队中" : LIVE_WORD[job.title] || "进行中"}</span>`
         : last?.state === "waiting" ? '<span class="live waiting">等你操作</span>' : "";
-      const papers = open ? `<span class="todo">${open} 份试卷可作答</span>` : state.paperErrors[key(p.id, c.id)] ? "试卷没读到" : "";
+      const papers = open ? `<span class="todo">${open} 份未作答</span>` : state.paperErrors[key(p.id, c.id)] ? "试卷没读到" : "";
       const line = [status, papers].filter(Boolean).join('<span class="sep">·</span>') || (last ? `上次 ${ago(last.ended || last.started)}` : "还没学过");
       return `<button class="course_card" style="--c:${inkOf(c)}" data-go="#/course/${p.id}/${c.id}">${coverHtml(p, c)}
         <span class="cc_body"><b>${esc(c.name)}</b><small>${esc(c.type || p.short)}</small>
@@ -871,13 +871,29 @@ function qaBody(p, c) {
 
 // The course's fingerprint: where its points come from, one box per share sized by its weight.
 // Boxes Studia can fill are inked; the rest (exams, meet sessions) stay outlined.
-const SHARES = [["progress", "进度", 1], ["habit", "习惯", 1], ["interactive", "互动", 1], ["knowledge", "掌握度", 0],
+const SHARES = [["progress", "学习", 1], ["habit", "习惯", 1], ["interactive", "互动", 1], ["knowledge", "掌握度", 0],
   ["test", "测试", 1], ["meet", "见面课", 0], ["final", "期末", 0]];
-function fingerprint(shares) {
+// With the earned points loaded each box reads "9/20 习惯" and fills to that share.
+const pts = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
+function fingerprint(shares, earned) {
   const parts = shares ? SHARES.filter(([k]) => shares[k] > 0) : [];
   if (!parts.length) return "";
-  return `<div class="shares" title="这门课的考核构成，满分 100">${parts.map(([k, word, auto]) =>
-    `<span class="share ${auto ? "auto" : ""}" style="flex:${shares[k]}"><b>${shares[k]}</b>${word}</span>`).join("")}</div>`;
+  const usual = ["progress", "habit", "interactive", "knowledge"].reduce((sum, k) => sum + (shares[k] || 0), 0);
+  return `<div class="shares" title="这门课的考核构成，满分 100">${parts.map(([k, word, auto]) => {
+    const got = earned?.[k], none = earned && !got && (k === "final" || k === "meet");
+    const fill = earned && !none ? Math.min(100, (got / shares[k]) * 100) : 0;
+    return `<span class="share ${auto ? "auto" : ""}" style="flex:${shares[k]};--fill:${fill}%"><b>${earned ? `${none ? "—" : pts(got)}/` : ""}${shares[k]}</b>${word}</span>`;
+  }).join("")}</div>${earned ? `<p class="score_now">当前 <b>${pts(earned.total)}</b> 分 · 平时 ${pts(earned.usual)}/${usual}</p>` : ""}`;
+}
+const loadingEarned = new Set();
+async function loadEarned(p, c) {
+  const k = key(p.id, c.id);
+  if (loadingEarned.has(k) || state.earned[k]) return;
+  loadingEarned.add(k);
+  try { state.earned[k] = (await api(`/api/platforms/${p.id}/score?course=${encodeURIComponent(c.id)}`)).earned; }
+  catch { /* the shares alone still read fine */ }
+  finally { loadingEarned.delete(k); }
+  repaint();
 }
 const STAMP = { 考试: "k", 测验: "c" };
 
@@ -893,7 +909,7 @@ function renderCourse(p, c, tab, full = false) {
       <div class="hero_main">
         <div class="crumb"><span class="dot ${p.id}"></span>${esc(p.short)}<span>/</span>${esc(c.type || p.name)}</div>
         <h1 class="title">${esc(c.name)}</h1>
-        ${c.shares ? fingerprint(c.shares) : c.kind === "ai" ? paperSummary(papers) : ""}
+        ${c.shares ? fingerprint(c.shares, state.earned[k]) : c.kind === "ai" ? paperSummary(papers) : ""}
       </div>
       <div class="hero_side">
         <div class="hero_stat"><span class="hero_label">学习进度</span>
@@ -988,6 +1004,7 @@ function renderCourse(p, c, tab, full = false) {
   const submit = $("[data-submit]", page);
   if (submit) submit.onclick = () => startJob({ platform: p.id, course: c.id, type: "answer", tasks: tasks(), auto_submit: true });
   if (tab === "study") loadUnits(p.id, c.id);
+  if (c.shares) loadEarned(p, c);
   if (tab === "answer" && p.features.answer && !papers && !state.paperErrors[k]) loadPapers(p, c);
 }
 
@@ -1188,6 +1205,7 @@ function handleEvent(event) {
       toast(`${event.title} · ${event.summary || STATE_WORD[event.state] || "结束"}`);
       finishUnits(event);
       delete state.papers[key(event.platform, event.course)];
+      delete state.earned[key(event.platform, event.course)];
       loadCourses(event.platform);
       setTimeout(repaint, 61000);
     }

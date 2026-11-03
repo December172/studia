@@ -348,6 +348,20 @@ class Studia:
             found = list(pool.map(read, shared))
         return {_course_id(platform.id, row): value for row, value in zip(shared, found) if value is not None}
 
+    def score(self, pid, course_id, fresh=False):
+        """One shared course's earned points per share (the 成绩分析 page), read when its page opens."""
+        platform = self.platform(pid)
+        row = self.find_row(platform, course_id)
+        z = row.get("zhs") or {}
+        if pid != "zhs" or z.get("kind") != "shared":
+            raise HttpError(400, "这门课没有考核得分可读")
+        client = self.client(platform)
+        try:
+            return {"earned": self._cached(platform, ("earned", z["courseId"]), fresh,
+                                           lambda: client.score_earned(z["courseId"], z["recruitId"]))}
+        except AuthenticationExpired:
+            raise self.expire(platform)
+
     def find_row(self, platform, course_id):
         if not platform.rows:
             self.courses(platform.id)
@@ -547,6 +561,8 @@ class Studia:
                 # The job changed this course's progress and papers; read them afresh next time.
                 platform.cache.pop(("units", job["course"]), None)
                 platform.cache.pop(("tasks", job["course"]), None)
+                for stale in [k for k in platform.cache if k[0] == "earned"]:  # points may have moved
+                    platform.cache.pop(stale, None)
                 self.save_sessions(platform)
             with self.lock:
                 if self.closing and state == "stopped":
@@ -1029,6 +1045,7 @@ ROUTES = [
     ("POST", r"/api/platforms/(\w+)/logout", lambda app, m, q, b: app.logout(m[1])),
     ("GET", r"/api/platforms/(\w+)/courses", lambda app, m, q, b: app.courses(m[1])),
     ("GET", r"/api/platforms/(\w+)/units", lambda app, m, q, b: app.units(m[1], (q.get("course") or [""])[0], (q.get("fresh") or [""])[0] == "1")),
+    ("GET", r"/api/platforms/(\w+)/score", lambda app, m, q, b: app.score(m[1], (q.get("course") or [""])[0], (q.get("fresh") or [""])[0] == "1")),
     ("GET", r"/api/platforms/(\w+)/tasks", lambda app, m, q, b: app.tasks(m[1], (q.get("course") or [""])[0], (q.get("fresh") or [""])[0] == "1")),
     ("GET", r"/api/jobs", lambda app, m, q, b: app.jobs_state()),
     ("POST", r"/api/jobs", lambda app, m, q, b: app.start_job(b)),
