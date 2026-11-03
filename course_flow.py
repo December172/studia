@@ -151,6 +151,9 @@ class CourseWorkspace:
                 texts = [options["text"]]
         except (Cancelled, EOFError, Back):
             raise
+        except KeyboardInterrupt:  # 生成阶段还能中断，不必退出整个工具
+            self.view.log("已取消生成提问。", "warning")
+            return []
         except Exception as exc:  # AI 或格式问题：说清楚，别把用户留在坏状态
             self.view.log(f"生成提问失败：{exc}", "error")
             return []
