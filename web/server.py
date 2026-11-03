@@ -47,6 +47,7 @@ from ZYKMoocMain.main import ZYKMoocHandler
 STATIC = Path(__file__).resolve().parent / "static"
 REVIEW_MINUTES = 30
 QR_REFRESHES = 5
+QR_TABS = 3  # QR codes kept open per platform: one per tab or device showing the login page
 HISTORY = 20
 # Jobs one person runs at once (an administrator can change it in hosted mode); more wait in line.
 MAX_JOBS = 4
@@ -83,7 +84,8 @@ def _job_context():
 
 
 MoocMain.log.line_context = _job_context
-logger = logging.getLogger(__name__)
+# Into the daily log file like the platform modules, so the admin's log export shows sign-ins and expiries.
+logger = MoocMain.log.Logger(__name__).get_log()
 
 # Order is the sidebar order. "answer"/"review" mark what the web UI can run today.
 PLATFORMS = {
@@ -119,6 +121,10 @@ class Platform:
         # (kind, course id) -> (time, value) for the slow unit and paper lists.
         self.cache = {}
         self.login = None
+        # QR login id -> {"client", "qr", "refreshes"}. Each page showing a code polls its own: with one
+        # shared code, a second tab starting over swapped the code out under the first, whose scans then
+        # never registered and people scanned again and again.
+        self.qr = {}
 
     def public(self, logged_in):
         spec = self.spec
@@ -212,6 +218,10 @@ class Studia:
                 platform.client.close()
             platform.client, platform.rows, platform.entries, platform.cache = None, [], {}, {}
 
+    def who(self):
+        """Log prefix naming the Studia account on a hosted server; request threads carry no job tag."""
+        return "%s · " % self.owner if self.owner else ""
+
     def signed_in(self, platform):
         """Ask the platform plainly whether the login still holds: True, False, or None when it cannot tell.
         A 401/403 from one business call is not proof; rate limiting and a course the account cannot open
@@ -233,9 +243,9 @@ class Studia:
         """A call came back unauthorized. Delete the saved login only once the platform confirms it is gone."""
         name = platform.spec["name"]
         if self.signed_in(platform) is not False:
-            logger.warning("%s 拒绝了一次请求，但登录仍然有效，保留登录", name)
+            logger.warning("%s%s 拒绝了一次请求，但登录仍然有效，保留登录", self.who(), name)
             return HttpError(503, "%s 暂时拒绝了请求，请稍后重试" % name)
-        logger.warning("%s 登录已失效，已删除保存的登录状态", name)
+        logger.warning("%s%s 登录已失效，已删除保存的登录状态", self.who(), name)
         with self.lock:
             self.drop(platform)
             self.store.clear_session(platform.id)
@@ -248,12 +258,14 @@ class Studia:
         platform = self.platform(pid)
         with self.lock:
             if platform.spec["login"] == "qr":
-                if platform.login and platform.login.get("client"):
-                    platform.login["client"].close()
                 client = ZHSApi()
                 qr_token, image = client.login_qr()
-                platform.login = {"client": client, "qr": qr_token, "refreshes": 0}
-                return {"qr": _data_url(image)}
+                qid = secrets.token_hex(6)
+                platform.qr[qid] = {"client": client, "qr": qr_token, "refreshes": 0}
+                for old in list(platform.qr)[:-QR_TABS]:
+                    platform.qr.pop(old)["client"].close()
+                logger.info("%s%s 出了登录二维码（%d 个页面在等扫码）", self.who(), platform.spec["name"], len(platform.qr))
+                return {"qr": _data_url(image), "id": qid}
             if self.oauth_url is not None:
                 platform.login = {"status": "waiting", "message": "请在新打开的页面登录职教云，完成后会自动回到这里"}
                 return {"status": "waiting", "message": platform.login["message"], "open": self.oauth_url(pid)}
@@ -284,21 +296,26 @@ class Studia:
             platform.client = client
             self.store.save_session(platform.id, client)
             state.update(status="done", message="登录成功")
+            logger.info("%s%s 登录成功", self.who(), platform.spec["name"])
             self.publish({"type": "account"})
         except Exception as exc:
-            logger.exception("%s 浏览器登录失败", platform.id)
+            logger.exception("%s%s 浏览器登录失败", self.who(), platform.spec["name"])
             state.update(status="failed", message=str(exc) or "登录失败")
 
-    def login_status(self, pid):
+    def login_status(self, pid, qid=""):
         platform = self.platform(pid)
+        name = platform.spec["name"]
         with self.lock:
-            login = platform.login
-            if login is None:
-                raise HttpError(409, "请先开始登录")
             if platform.spec["login"] == "browser":
+                login = platform.login
+                if login is None:
+                    raise HttpError(409, "请先开始登录")
                 if login["status"] != "waiting":
                     platform.login = None
                 return {"status": login["status"], "message": login["message"]}
+            login = platform.qr.get(qid)
+            if login is None:  # a newer page took its place, or it already finished
+                return {"status": "failed", "message": "这个二维码已失效，请点击刷新"}
             try:
                 result = login["client"].login_qr_status(login["qr"])
             except PlatformUnavailable as exc:
@@ -309,27 +326,36 @@ class Studia:
             if status == 0:
                 return {"status": "scanned", "message": "已扫码，请在手机上确认登录"}
             if status == 1:
-                client = login["client"]
-                client.finish_qr_login(result.get("oncePassword", ""))
+                client = platform.qr.pop(qid)["client"]
+                try:
+                    client.finish_qr_login(result.get("oncePassword", ""))
+                except Exception as exc:  # 手机上已确认，但换登录状态失败：说出来，别让页面一直转
+                    logger.exception("%s%s 扫码已确认，但登录没完成", self.who(), name)
+                    client.close()
+                    return {"status": "failed", "message": "扫码已确认，但登录没完成（%s），请刷新二维码重试" % (str(exc) or "平台没响应")}
                 try:
                     client.shared_exam_sso()
                 except (AuthenticationExpired, PlatformUnavailable, ZHSError):
                     logger.warning("考试会话初始化失败，进入共享课试卷时将重新尝试")
+                for other in platform.qr.values():  # the other pages' codes are moot now
+                    other["client"].close()
+                platform.qr.clear()
                 self.drop(platform)
-                platform.client, platform.login = client, None
+                platform.client = client
                 self.store.save_session(platform.id, client)
-                logger.info("%s 扫码登录成功", platform.spec["name"])
+                logger.info("%s%s 扫码登录成功", self.who(), name)
                 self.publish({"type": "account"})  # other tabs and devices pick up the login
                 return {"status": "done", "message": "登录成功"}
             if status == 2:
                 login["refreshes"] += 1
                 if login["refreshes"] > QR_REFRESHES:
-                    platform.login = None
+                    platform.qr.pop(qid)["client"].close()
                     return {"status": "failed", "message": "二维码多次过期，请点击刷新"}
                 login["qr"], image = login["client"].login_qr()
                 return {"status": "refreshed", "message": "二维码已过期，已自动刷新", "qr": _data_url(image)}
             if status == 3:
-                platform.login = None
+                platform.qr.pop(qid)["client"].close()
+                logger.info("%s%s 在手机上取消了扫码登录", self.who(), name)
                 return {"status": "failed", "message": "已在手机上取消登录"}
             return {"status": "waiting", "message": ""}
 
@@ -338,6 +364,7 @@ class Studia:
         with self.lock:  # under the lock so save_sessions() cannot write the old cookies back in between
             self.drop(platform)
             self.store.clear_session(pid)
+        logger.info("%s%s 退出登录", self.who(), platform.spec["name"])
         self.publish({"type": "account"})
         return {}
 
@@ -1204,7 +1231,7 @@ def _course(pid, row, shares=None):
 ROUTES = [
     ("GET", r"/api/state", lambda app, m, q, b: app.state()),
     ("POST", r"/api/platforms/(\w+)/login", lambda app, m, q, b: app.login_start(m[1])),
-    ("GET", r"/api/platforms/(\w+)/login", lambda app, m, q, b: app.login_status(m[1])),
+    ("GET", r"/api/platforms/(\w+)/login", lambda app, m, q, b: app.login_status(m[1], (q.get("id") or [""])[0])),
     ("POST", r"/api/platforms/(\w+)/logout", lambda app, m, q, b: app.logout(m[1])),
     ("GET", r"/api/platforms/(\w+)/courses", lambda app, m, q, b: app.courses(m[1])),
     ("GET", r"/api/platforms/(\w+)/units", lambda app, m, q, b: app.units(m[1], (q.get("course") or [""])[0], (q.get("fresh") or [""])[0] == "1")),
