@@ -68,6 +68,7 @@ class WebQaTest(unittest.TestCase):
         job = self.run_job({"type": "ask", "texts": ["  请问 TCP 三次握手为什么不能是两次？ ", "云计算和边缘计算各适合什么场景？"]}, bridge)
         self.assertEqual(job["state"], "done")
         self.assertEqual(bridge.asked, ["TCP 三次握手为什么不能是两次？", "云计算和边缘计算各适合什么场景？"])
+        self.assertEqual(job["summary"], "发布了 2 条提问")  # not to be mistaken for the answering job
         self.assertEqual(self.app.qa_posts("zhs", "shared-1000091138")["posts"][0]["kind"], "ask")
 
     def test_ask_texts_are_checked(self):
