@@ -233,6 +233,7 @@ class Studia:
         with self.lock:
             self.drop(platform)
             self.store.clear_session(platform.id)
+        self.publish({"type": "account"})
         return HttpError(401, "%s 登录已过期，请重新登录" % name)
 
     # ------------------------------------------------------------ login
@@ -277,6 +278,7 @@ class Studia:
             platform.client = client
             self.store.save_session(platform.id, client)
             state.update(status="done", message="登录成功")
+            self.publish({"type": "account"})
         except Exception as exc:
             logger.exception("%s 浏览器登录失败", platform.id)
             state.update(status="failed", message=str(exc) or "登录失败")
@@ -311,6 +313,7 @@ class Studia:
                 platform.client, platform.login = client, None
                 self.store.save_session(platform.id, client)
                 logger.info("%s 扫码登录成功", platform.spec["name"])
+                self.publish({"type": "account"})  # other tabs and devices pick up the login
                 return {"status": "done", "message": "登录成功"}
             if status == 2:
                 login["refreshes"] += 1
@@ -329,6 +332,7 @@ class Studia:
         with self.lock:  # under the lock so save_sessions() cannot write the old cookies back in between
             self.drop(platform)
             self.store.clear_session(pid)
+        self.publish({"type": "account"})
         return {}
 
     # ------------------------------------------------------------ courses

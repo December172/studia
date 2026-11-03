@@ -1,4 +1,5 @@
 """A 401/403 from one call only deletes the saved login once the platform confirms it is gone."""
+import queue
 import tempfile
 import time
 import unittest
@@ -41,6 +42,14 @@ class ExpireTest(unittest.TestCase):
         self.assertEqual(error.status, 401)
         self.assertIsNone(self.store.session("zhs"))
         self.assertIsNone(self.platform.client)
+
+    def test_other_tabs_hear_about_sign_in_changes(self):
+        tab = queue.Queue()
+        self.app.subscribers.add(tab)
+        self.expire(return_value=True)
+        self.assertTrue(tab.empty())
+        self.app.logout("zhs")
+        self.assertEqual(tab.get_nowait(), {"type": "account"})
 
     def test_mooc_asks_for_the_account(self):
         platform = self.app.platforms["mooc"]
