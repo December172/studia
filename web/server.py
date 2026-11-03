@@ -1042,7 +1042,8 @@ def make_handler(access):
                         event = subscriber.get(timeout=15)
                         chunk = "data: %s\n\n" % json.dumps(event, ensure_ascii=False)
                     except queue.Empty:
-                        chunk = ": ping\n\n"
+                        # A real message, not an SSE comment, so the page can tell a live stream from a dead one.
+                        chunk = 'data: {"type": "ping"}\n\n'
                     self.wfile.write(chunk.encode("utf-8"))
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError, OSError):
