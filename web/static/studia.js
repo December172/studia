@@ -678,19 +678,27 @@ const VIEWS = {
   },
 };
 
+let stepTimer = 0;
 function paintSettings(tab, head, data, again) {
   if (tab === "study") {
+    // Small numbers: tap − / +, saved as soon as the taps stop. No keyboard, no save button.
+    const row = (k, label, note) => `<div class="model plain stepper_row"><span class="m1"><b>${label}</b><small class="sans">${note}</small></span>
+      <span class="stepper"><button class="btn small" data-step="${k}" data-d="-1" aria-label="减少" ${data.concurrency[k] <= 1 ? "disabled" : ""}>−</button>
+        <output>${data.concurrency[k]}</output><button class="btn small" data-step="${k}" data-d="1" aria-label="增加" ${data.concurrency[k] >= 8 ? "disabled" : ""}>＋</button></span></div>`;
     quiet = again;
-    setPage(`${head}<div class="section"><h3>并发数量</h3></div>
-      <div class="models"><div class="form_card" style="margin:0;box-shadow:none">
-        <div class="field"><label>AI 答题</label><input type="number" min="1" max="8" name="ai" value="${data.concurrency.ai}"></div>
-        <div class="field"><label>自动学习</label><input type="number" min="1" max="8" name="study" value="${data.concurrency.study}"></div>
-        <div class="form_btns"><button class="btn primary" data-concurrency>保存</button></div></div></div>`);
+    setPage(`${head}<div class="section"><h3>并发数量</h3><span class="aside">1–8</span></div>
+      <div class="models">${row("ai", "AI 答题", "同时作答的题数")}${row("study", "自动学习", "同时学的资源数，智慧树固定 1 个")}</div>`);
     quiet = false;
-    $("[data-concurrency]", page).onclick = async () => {
-      const body = { ai: Number($('input[name="ai"]', page).value), study: Number($('input[name="study"]', page).value) };
-      try { await api("/api/settings/concurrency", { method: "POST", body }); state.settings.concurrency = body; toast("已保存"); } catch (e) { toast(e.message); }
-    };
+    page.querySelectorAll("[data-step]").forEach((el) => (el.onclick = () => {
+      const c = state.settings.concurrency, k = el.dataset.step;
+      c[k] = Math.max(1, Math.min(8, c[k] + Number(el.dataset.d)));
+      paintSettings(tab, head, state.settings, true);
+      clearTimeout(stepTimer);
+      stepTimer = setTimeout(async () => {
+        try { await api("/api/settings/concurrency", { method: "POST", body: { ai: c.ai, study: c.study } }); toast("已保存"); }
+        catch (e) { toast(e.message); state.settings = null; VIEWS.settings(tab); }
+      }, 600);
+    }));
     return;
   }
   renderModels(head, data.models, null, again);
@@ -854,6 +862,7 @@ function renderCourse(p, c, tab, full = false) {
     body = failed ? `<div class="empty">${esc(failed)} · <button class="link" data-papers-retry="${esc(k)}">重试</button></div>` : `<div class="empty">正在读取试卷…</div>`;
   } else {
     const selected = selectedOf(k);
+    for (const id of selected) if (!papers.some((x) => x.id === id && x.available)) selected.delete(id);
     const row = (x) => {
       const on = selected.has(x.id);
       const pill = !x.available ? ""
@@ -871,8 +880,10 @@ function renderCourse(p, c, tab, full = false) {
     const categories = [...new Set(papers.map((x) => x.category))].sort((a, b) => rank(a) - rank(b));
     const n = selected.size;
     body = categories.map((label) => {
-      const list = papers.filter((x) => x.category === label);
-      return `<div class="section"><h3>${esc(label)}</h3><span class="aside">${list.filter((x) => x.available).length} / ${list.length} 份可选</span></div>
+      const list = papers.filter((x) => x.category === label), open = list.filter((x) => x.available);
+      const all = open.length && open.every((x) => selected.has(x.id));
+      return `<div class="section"><h3>${esc(label)}</h3><span class="aside">${open.length} / ${list.length} 份可选</span>
+          ${open.length > 1 ? `<button class="link" data-pick-all="${esc(label)}">${all ? "取消全选" : "全选"}</button>` : ""}</div>
         <div class="papers">${list.map(row).join("")}</div>`;
     }).join("") || `<div class="empty">这门课没有作业、测验或考试</div>`;
     if (categories.length) body += `<div class="dock"><span class="info">${answerBlock ? esc(answerBlock) : n ? `已选 <b>${n}</b> 份 · 交卷前会再确认一次` : "勾选要作答的试卷"}</span>
@@ -888,6 +899,12 @@ function renderCourse(p, c, tab, full = false) {
     if (!x.available) { toast(x.reason || "这份试卷暂不可选"); return; }
     const selected = selectedOf(k);
     selected.has(x.id) ? selected.delete(x.id) : selected.add(x.id);
+    renderCourse(p, c, tab);
+  }));
+  page.querySelectorAll("[data-pick-all]").forEach((el) => (el.onclick = () => {
+    const open = papers.filter((x) => x.category === el.dataset.pickAll && x.available), selected = selectedOf(k);
+    const all = open.every((x) => selected.has(x.id));
+    open.forEach((x) => (all ? selected.delete(x.id) : selected.add(x.id)));
     renderCourse(p, c, tab);
   }));
   const tasks = () => [...selectedOf(k)];
@@ -1135,6 +1152,7 @@ function repaint() {
     try {
       if (name === "jobs") VIEWS.jobs(a);
       else if (name === "home") VIEWS.home();
+      else if (name === "me") VIEWS.me();
       else if (name === "course") {
         const p = platformOf(a), course = courseOf(a, decodeURIComponent(b || ""));
         if (p && course) renderCourse(p, course, c === "answer" ? "answer" : "study");
