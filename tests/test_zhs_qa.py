@@ -192,6 +192,13 @@ class WriteQuestionsTest(unittest.TestCase):
         self.assertIn("问题 7 号？", title)
         self.assertNotIn("问题 8 号？", title)
 
+    def test_prompt_forbids_address_and_identity_framing(self):
+        ai = FakeAi(LONG)
+        write_questions(ai, [], 1, course_name="国家安全教育")
+        title = ai.questions[0]["title"]
+        for banned in ("作为大学生", "请问", "老师", "序号", "Markdown"):
+            self.assertIn(banned, title)
+
     def test_prompt_falls_back_to_course_topic(self):
         ai = FakeAi(LONG)
         write_questions(ai, [], 1, course_name="国家安全教育")
