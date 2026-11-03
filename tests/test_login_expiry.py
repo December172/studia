@@ -79,19 +79,12 @@ class ExpireTest(unittest.TestCase):
 
 
 class SignedInTest(unittest.TestCase):
-    def client(self, status, location=""):
+    def test_asks_a_business_api_not_the_passport(self):
         api = ZHSApi()
-        response = Mock(status_code=status, headers={"Location": location})
-        api.session.request = Mock(return_value=response)
-        return api
-
-    def test_passport_hands_back_a_ticket(self):
-        self.assertTrue(self.client(302, "https://x/?ticket=ST-1").signed_in())
-
-    def test_passport_asks_to_sign_in(self):
-        self.assertFalse(self.client(302, "https://passport.zhihuishu.com/login").signed_in())
-        self.assertFalse(self.client(200).signed_in())
-        self.assertFalse(self.client(403).signed_in())
+        api.ai_courses = Mock(return_value=[])
+        self.assertTrue(api.signed_in())
+        api.ai_courses.side_effect = AuthenticationExpired("401")
+        self.assertFalse(api.signed_in())
 
     def test_network_failure_is_not_an_answer(self):
         api = ZHSApi()

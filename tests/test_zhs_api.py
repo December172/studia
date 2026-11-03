@@ -591,11 +591,14 @@ class SharedExamApiTest(unittest.TestCase):
         client.shared_exam_sso()
         self.assertEqual(client.session.request.call_count, 2)
 
-    def test_shared_exam_sso_expired(self):
+    def test_shared_exam_sso_expired_keeps_the_exam_session(self):
+        # The passport ticket dies hours before the account's login does; papers still load
+        # with the exam session made at sign-in, so this is no reason to sign anyone out.
         client = make_api()
         client.session.request.return_value = Mock(status_code=200, headers={})
-        with self.assertRaises(AuthenticationExpired):
-            client.shared_exam_sso()
+        client.shared_exam_sso()
+        client.shared_exam_sso()
+        self.assertEqual(client.session.request.call_count, 1)
 
     def test_shared_submit_exam_checks_statu(self):
         client = make_api()
