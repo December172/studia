@@ -1358,12 +1358,12 @@ class TerminalUI:
         self.note("提问发布后公开在你的账号名下，不能编辑；AI 模式会把参考题目发给所选服务。")
 
     def qa_questions_review(self, texts):
-        """发布前把最终提问摆出来；用户确认后才返回，Esc 视为放弃。"""
+        """发布前把最终提问摆出来；回车即发布，Esc 或 n 放弃。"""
         self.table("待发布的提问", ["编号", "内容"],
                    [(index, text) for index, text in enumerate(texts, 1)])
         self.note(f"共 {len(texts)} 条 · 发布后公开在你的账号名下，不能编辑。")
         try:
-            confirmed = self.confirm("确认发布这些提问", default=False)
+            confirmed = self.confirm("确认发布这些提问", default=True)
         except Back:
             return []
         return texts if confirmed else []

@@ -164,7 +164,10 @@ class CourseWorkspace:
         if not texts:
             self.view.note("没有生成可发布的提问，稍后再试或自己写一条。", "warning")
             return []
-        return self.view.qa_questions_review(texts)
+        reviewed = self.view.qa_questions_review(texts)
+        if not reviewed:  # 回车即发布；这里只处理「n」或 Esc
+            self.view.note("已取消：没有发布任何提问。", "warning")
+        return reviewed
 
     def catalog_for(self, courses):
         if self.platform == 2:
