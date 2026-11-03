@@ -206,12 +206,35 @@ class Studia:
                 platform.client.close()
             platform.client, platform.rows, platform.entries, platform.cache = None, [], {}, {}
 
+    def signed_in(self, platform):
+        """Ask the platform plainly whether the login still holds: True, False, or None when it cannot tell.
+        A 401/403 from one business call is not proof; rate limiting and a course the account cannot open
+        answer the same way, and wiping the login over them signed people out after nothing had expired."""
+        client = platform.client
+        if client is None:
+            return False
+        try:
+            if hasattr(client, "signed_in"):
+                return bool(client.signed_in())
+            client.get_info(strict=True)
+            return True
+        except AuthenticationExpired:
+            return False
+        except Exception:
+            return None
+
     def expire(self, platform):
-        logger.warning("%s 登录已失效，已删除保存的登录状态", platform.spec["name"])
+        """A call came back unauthorized. Delete the saved login only once the platform confirms it is gone."""
+        name = platform.spec["name"]
+        if self.signed_in(platform) is not False:
+            logger.warning("%s 拒绝了一次请求，但登录仍然有效，保留登录", name)
+            return HttpError(503, "%s 暂时拒绝了请求，请稍后重试" % name)
+        logger.warning("%s 登录已失效，已删除保存的登录状态", name)
         with self.lock:
             self.drop(platform)
             self.store.clear_session(platform.id)
-        return HttpError(401, "%s 登录已过期，请重新登录" % platform.spec["name"])
+        self.publish({"type": "account"})
+        return HttpError(401, "%s 登录已过期，请重新登录" % name)
 
     # ------------------------------------------------------------ login
 
@@ -255,6 +278,7 @@ class Studia:
             platform.client = client
             self.store.save_session(platform.id, client)
             state.update(status="done", message="登录成功")
+            self.publish({"type": "account"})
         except Exception as exc:
             logger.exception("%s 浏览器登录失败", platform.id)
             state.update(status="failed", message=str(exc) or "登录失败")
@@ -289,6 +313,7 @@ class Studia:
                 platform.client, platform.login = client, None
                 self.store.save_session(platform.id, client)
                 logger.info("%s 扫码登录成功", platform.spec["name"])
+                self.publish({"type": "account"})  # other tabs and devices pick up the login
                 return {"status": "done", "message": "登录成功"}
             if status == 2:
                 login["refreshes"] += 1
@@ -307,6 +332,7 @@ class Studia:
         with self.lock:  # under the lock so save_sessions() cannot write the old cookies back in between
             self.drop(platform)
             self.store.clear_session(pid)
+        self.publish({"type": "account"})
         return {}
 
     # ------------------------------------------------------------ courses
@@ -508,8 +534,7 @@ class Studia:
             # Only the user can clear these: solve the captcha on the platform, or come back tomorrow.
             state, summary = "waiting", str(exc) or "平台要求验证"
         except AuthenticationExpired:
-            self.expire(platform)
-            state, summary = "waiting", "%s 登录已过期，请重新登录" % platform.spec["name"]
+            state, summary = "waiting", str(self.expire(platform))
         except Exception as exc:
             logger.exception("网页任务失败")
             state, summary = "error", str(exc) or "任务失败"
