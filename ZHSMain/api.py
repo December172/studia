@@ -915,22 +915,16 @@ class ZHSApi:
         return result
 
     def signed_in(self):
-        """单点登录还认不认这份 cookie：认的话 passport 直接带 ticket 跳回去。
+        """这份登录还能不能用：问一个学习时也要用的业务接口，没登录它回 401/403。
 
-        业务接口回 401/403 不一定是登录掉了（限流、某门课没权限也会），删登录前先问这里。
-        连不上时抛 PlatformUnavailable，由调用方当作「说不准」。
+        不问 passport 单点登录：那张票据过两三个小时就失效，业务登录却还能用，
+        拿它判断会把正在学习的账号当成掉线、删掉登录。连不上时抛 PlatformUnavailable。
         """
         try:
-            response = self._request(
-                "GET",
-                PASSPORT + "/cas/login",
-                params={"service": HOMEWORK + "/studentExam/gateway/t/v1/student/getStudentHomework"},
-                allow_redirects=False,
-                expect_json=False,
-            )
+            self.ai_courses()
         except AuthenticationExpired:
             return False
-        return response.status_code == 302 and "ticket=" in (response.headers.get("Location") or "")
+        return True
 
     def shared_exam_sso(self):
         if self._shared_sso_done:
@@ -944,7 +938,11 @@ class ZHSApi:
         )
         location = response.headers.get("Location") or ""
         if response.status_code != 302 or "ticket=" not in location:
-            raise AuthenticationExpired("智慧树登录已过期，请重新扫码")
+            # 单点登录的票据比业务登录短命；它过期时，扫码时建好的考试会话通常还能用。
+            # 不当成掉线：真不能用了，考试接口自己会回 401/403。
+            logger.warning("智慧树单点登录已过期，沿用已有的考试会话")
+            self._shared_sso_done = True
+            return
         self._request("GET", location, allow_redirects=True, expect_json=False)
         self._shared_sso_done = True
 
