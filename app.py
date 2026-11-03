@@ -1,6 +1,8 @@
 """Application orchestration. Menus/rendering are provided by the view (ui.py)."""
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import random
+import time
 
 from MoocMain.log import Logger
 
@@ -507,17 +509,14 @@ class Application:
         from ZHSMain.qa import answer_questions
 
         limit = int(options.get("limit") or 10)
-        max_answers = int(options.get("max_answers") or 0)
-        interval = options.get("interval")
-        interval = 60 if interval is None else int(interval)
         state_path = Path(self.store.path).parent / "zhs-qa-answers.json"
         with self.view.activity("问答区答题"):
             self.progress.begin("问答区答题", limit * len(courses), "条")
             ai = self.verify_ai(config)
             try:
                 def run(qa, event):
-                    answer_questions(qa, ai, max_answers=max_answers, limit=limit,
-                                     interval=interval, state_path=state_path, on_event=event)
+                    answer_questions(qa, ai, max_answers=1, limit=limit, state_path=state_path,
+                                     on_event=event, sleep=_qa_pause)
 
                 totals = self._zhs_qa_courses(client, courses, run, "发布")
             finally:
@@ -560,17 +559,15 @@ class Application:
         finally:
             ai.session.close()
 
-    def execute_zhs_ask(self, client, courses, texts, options):
+    def execute_zhs_ask(self, client, courses, texts):
         """问答区提问：把准备好的正文逐条发布。"""
         from ZHSMain.qa import publish_questions
 
-        interval = options.get("interval")
-        interval = 60 if interval is None else int(interval)
         with self.view.activity("问答区提问"):
             self.progress.begin("问答区提问", len(texts) * len(courses), "条")
 
             def run(qa, event):
-                publish_questions(qa, texts, interval=interval, on_event=event)
+                publish_questions(qa, texts, on_event=event, sleep=_qa_pause)
 
             totals = self._zhs_qa_courses(client, courses, run, "发布提问")
         return {"published": totals["ok"], "failed": totals["failed"]}
@@ -627,3 +624,9 @@ class Application:
                     message = f"已退出{label}登录。"
                 else:
                     message = "退出失败，登录状态未更改，请重试。"
+
+
+def _qa_pause(_seconds):
+    """问答区两条之间随机停一会儿（和网页一样），不用 answer_questions 给的固定间隔。"""
+    from ZHSMain.qa import QA_PACE
+    time.sleep(random.uniform(*QA_PACE))
