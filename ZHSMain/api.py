@@ -464,10 +464,16 @@ class ZHSApi:
         habit = read("loadStuHabit/", type="l", courseTypeEs=1)
         forum = read("loadCourseForum/", type="l", courseTypeEs=1)
         number = lambda value: float(nonnegative_number(value) or 0)
+        mine = ((forum.get("qaStatisticsMap") or {}).get("myInteractionDto")) or {}
+        count = lambda *names: int(next((number(mine[n]) for n in names if mine.get(n) is not None), 0))
         return {"progress": number(ssd.get("courseScore")), "habit": number(habit.get("learnedHabitScore")),
                 "interactive": number(forum.get("learnedInteractiveScore")), "test": number(ssd.get("examScore")),
                 "meet": number(ssd.get("meetScore")), "final": number(ssd.get("finalScore")),
-                "usual": number(ssd.get("usualScore")), "total": number(ssd.get("totalScore"))}
+                "usual": number(ssd.get("usualScore")), "total": number(ssd.get("totalScore")),
+                # 「我的互动」：有效回答、有效提问、自己的提问收到的回答
+                "qa": {"answers": count("validAnswerAmount", "effectiveAnswer"),
+                       "questions": count("validQuestionAmount", "effectiveQuestion"),
+                       "received": count("getAnswer")}}
 
     def ai_courses(self):
         result = self.secure(

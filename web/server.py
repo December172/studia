@@ -8,6 +8,7 @@ import logging
 import mimetypes
 import os
 import queue
+import random
 import re
 import secrets
 import threading
@@ -37,7 +38,8 @@ from ZHSMain.answer import ZHSAnswerRunner, catalog
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi, ZHSError, course_offers
 from ZHSMain.main import ZHSHandler, course_units as zhs_units
 from ZHSMain.memory import AnswerMemory
-from ZHSMain.qa import QaBridge, answer_questions
+from ZHSMain.qa import REFERENCE_ANSWERS, MAX_QUESTION, MIN_QUESTION, QaBridge, _clean_question, answer_questions, \
+    publish_questions, write_questions
 from ai.memory import MoocAnswerMemory
 from ZYKMoocMain.api import ZYKMoocApi
 from ZYKMoocMain.main import ZYKMoocHandler
@@ -52,9 +54,12 @@ MAX_JOBS = 4
 MAX_PENDING = 20
 # The platform's unit and paper lists take seconds to tens of seconds; reuse them for a while.
 CACHE_TTL = 600
-LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题", "qa": "问答区答题"}
+LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题", "qa": "问答区答题", "ask": "问答区提问"}
 # Jobs that play course content conflict with each other; answering is separate.
-GROUP = {"study": "learn", "review": "learn", "answer": "answer", "qa": "answer"}
+GROUP = {"study": "learn", "review": "learn", "answer": "answer", "qa": "answer", "ask": "answer"}
+# Seconds between two Q&A posts, drawn afresh each time: an even beat reads like a script.
+QA_PACE = (45, 90)
+QA_POSTS = 300  # posts kept per account for the web list
 # Running job id -> its Studia app. A job thread is named "studia-job-<id>" and passes that
 # name on to the helper threads it starts, so a log line can be traced back to its job.
 JOBS = {}
@@ -447,13 +452,13 @@ class Studia:
         platform = self.platform(str(body.get("platform", "")))
         kind = body.get("type")
         course_id = str(body.get("course", ""))
-        allowed = {"study"} | ({"review"} if platform.spec["review"] else set()) | ({"answer"} if platform.spec["answer"] else set()) | ({"qa"} if platform.spec.get("qa") else set())
+        allowed = {"study"} | ({"review"} if platform.spec["review"] else set()) | ({"answer"} if platform.spec["answer"] else set()) | ({"qa", "ask"} if platform.spec.get("qa") else set())
         if kind not in allowed:
             raise HttpError(400, "这个平台暂不支持该操作")
         row = self.find_row(platform, course_id)
-        if kind in ("review", "qa"):
+        if kind in ("review", "qa", "ask"):
             shares = (platform.cache.get(("shares", (row.get("zhs") or {}).get("courseId"))) or (0, None))[1]
-            if not course_features(platform.id, row, shares)[kind]:
+            if not course_features(platform.id, row, shares)["qa" if kind == "ask" else kind]:
                 raise HttpError(400, "这门课的考核里没有%s，不用%s" % (
                     ("学习习惯分", "每日复习") if kind == "review" else ("问答互动分", "刷问答区")))
         with self.lock:
@@ -470,6 +475,9 @@ class Studia:
             elif kind == "qa":
                 options = _qa_options(body)
                 target = lambda: self._qa(platform, row, options, job)
+            elif kind == "ask":
+                texts = _ask_texts(body)
+                target = lambda: self._ask(platform, row, texts, job)
             else:
                 job["minutes"] = (REVIEW_MINUTES if minutes is None else minutes) if kind == "review" else 0
                 target = lambda: self._study(platform, row, job["minutes"], job)
@@ -647,7 +655,7 @@ class Studia:
             kind = entry["type"]
             if kind == "review" and entry.get("minutes", 0) < 1:
                 continue
-            if kind in ("answer", "qa") or not fresh or entry.get("resumes", 0) >= RESUME_LIMIT:
+            if kind in ("answer", "qa", "ask") or not fresh or entry.get("resumes", 0) >= RESUME_LIMIT:
                 self._record(entry, "stopped", INTERRUPTED)
                 continue
             body = {"platform": entry.get("platform"), "type": kind, "course": entry.get("course")}
@@ -766,15 +774,21 @@ class Studia:
         finally:
             ai.session.close()
 
-    def _qa(self, platform, row, options, job):
-        """问答区：取题目 → AI 写回答 → 发布。只在平台返回 200 后计数。"""
-        course = row.get("zhs") or {}
+    def _board(self, platform, row):
+        """Open the course's Q&A board, wrapped so what gets posted is remembered for the web list."""
+        z = row.get("zhs") or {}
         # 共享课带 recruitId；智慧课程只有 classId，问答区 URL 需要两者之一。
-        course_id = course.get("courseId")
-        recruit_id = course.get("recruitId") or course.get("classId")
+        course_id, recruit_id = z.get("courseId"), z.get("recruitId") or z.get("classId")
         if not course_id or not recruit_id:
             raise HttpError(400, "这门课没有可作答的问答区（缺少课程或班级 ID）")
-        api = self.client(platform)
+        record = lambda kind, question, text, post_id: self._record_post(course_id, kind, question, text, post_id)
+        return _Board(QaBridge(self.client(platform).access_token, course_id=course_id, recruit_id=recruit_id), record)
+
+    def _pace(self, job):
+        return lambda _interval: job["cancel"].wait(random.uniform(*QA_PACE))  # wakes at once on stop
+
+    def _qa(self, platform, row, options, job):
+        """问答区：取题目 → AI 写回答 → 发布。只在平台返回 200 后计数。"""
         ai = self._ai("请先在设置里添加 AI 模型")
         limit = options["limit"]
 
@@ -785,17 +799,10 @@ class Studia:
                 self.progress_event(job, "result", name, status=status)
 
         try:
-            with QaBridge(api.access_token, course_id=course_id, recruit_id=recruit_id) as qa:
-                stats = answer_questions(
-                    qa, ai,
-                    max_answers=options["max_answers"],
-                    limit=limit,
-                    interval=options["interval"],
-                    state_path=str(Path(self.store.path).parent / "zhs-qa-answers.json"),
-                    should_stop=job["cancel"].is_set,
-                    on_event=event,
-                    sleep=job["cancel"].wait,  # 停止或更新时不必等满间隔
-                )
+            with self._board(platform, row) as board:
+                stats = answer_questions(board, ai, max_answers=0, limit=limit, interval=1,
+                                         state_path=str(Path(self.store.path).parent / "zhs-qa-answers.json"),
+                                         should_stop=job["cancel"].is_set, on_event=event, sleep=self._pace(job))
             return "问答区发布 %(answered)d 条，失败 %(failed)d 条" % stats
         except AuthenticationExpired:
             # 问答区自己的会话比智慧树登录短，进站还要走一次单点登录跳转；被跳到登录页
@@ -803,6 +810,69 @@ class Studia:
             raise NeedsRetry("问答区没进去，稍后重试；一直不行就重新扫码智慧树") from None
         finally:
             ai.session.close()
+
+    def _ask(self, platform, row, texts, job):
+        """问答区提问：把用户确认过的提问逐条发布。"""
+        def event(kind, name, status=""):
+            if kind == "begin":
+                self.progress_event(job, "begin", "问答区提问", total=len(texts), unit="条")
+            elif kind == "result":
+                self.progress_event(job, "result", name, status=status)
+
+        try:
+            with self._board(platform, row) as board:
+                stats = publish_questions(board, texts, interval=1, should_stop=job["cancel"].is_set,
+                                          on_event=event, sleep=self._pace(job))
+            return "问答区发布提问 %(published)d 条，失败 %(failed)d 条" % stats
+        except AuthenticationExpired:
+            raise NeedsRetry("问答区没进去，稍后重试；一直不行就重新扫码智慧树") from None
+
+    def qa_draft(self, pid, body):
+        """AI drafts new questions for one course, picking up threads its board has barely answered.
+        Nothing is posted: the person reads and edits them, then starts an "ask" job."""
+        platform = self.platform(pid)
+        course_id = str(body.get("course", ""))
+        row = self.find_row(platform, course_id)
+        shares = (platform.cache.get(("shares", (row.get("zhs") or {}).get("courseId"))) or (0, None))[1]
+        if not course_features(platform.id, row, shares)["qa"]:
+            raise HttpError(400, "这门课的考核里没有问答互动分，不用刷问答区")
+        count = _qa_number(body, "count", 3, 1, 5)
+        ai = self._ai("请先在设置里添加 AI 模型")
+        try:
+            try:
+                with self._board(platform, row) as board:
+                    reference = [item["content"] for item in board.bridge.questions(max_answers=REFERENCE_ANSWERS, limit=30)]
+            except AuthenticationExpired:
+                raise HttpError(409, "问答区没进去，稍后重试；一直不行就重新扫码智慧树") from None
+            return {"questions": write_questions(ai, reference, count, course_name=row.get("courseName") or "这门课")}
+        finally:
+            ai.session.close()
+
+    def qa_posts(self, pid, course_id):
+        platform = self.platform(pid)
+        z = self.find_row(platform, course_id).get("zhs") or {}
+        mine = [p for p in self._posts() if str(p.get("course")) == str(z.get("courseId"))]
+        return {"posts": mine[-50:][::-1]}
+
+    def _posts_path(self):
+        return Path(self.store.path).parent / "zhs-qa-posts.json"
+
+    def _posts(self):
+        try:
+            data = json.loads(self._posts_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        return data if isinstance(data, list) else []
+
+    def _record_post(self, course_id, kind, question, text, post_id):
+        with self.lock:
+            posts = self._posts()
+            posts.append({"course": course_id, "kind": kind, "question": question, "text": text,
+                          "id": post_id, "at": time.time()})
+            path = self._posts_path()
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(posts[-QA_POSTS:], ensure_ascii=False), encoding="utf-8")
+            os.replace(temporary, path)
 
     # ------------------------------------------------------------ settings
 
@@ -945,21 +1015,72 @@ class NeedsRetry(Exception):
     """A job stops and waits for the person, without the platform sign-in being dropped."""
 
 
+def _qa_number(body, name, default, low, high):
+    value = body.get(name)
+    if value is None or value == "":
+        return default
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        raise HttpError(400, "问答区参数 %s 必须是整数" % name)
+    if not low <= value <= high:
+        raise HttpError(400, "问答区参数 %s 要在 %d–%d 之间" % (name, low, high))
+    return value
+
+
 def _qa_options(body):
-    """问答区参数：条数 1–50、只答回答数不超过 0–20 的题、每条间隔 30–600 秒。"""
-    def number(name, default, low, high):
-        value = body.get(name)
-        if value is None or value == "":
-            return default
-        try:
-            value = int(value)
-        except (TypeError, ValueError):
-            raise HttpError(400, "问答区参数 %s 必须是整数" % name)
-        if not low <= value <= high:
-            raise HttpError(400, "问答区参数 %s 要在 %d–%d 之间" % (name, low, high))
-        return value
-    return {"limit": number("limit", 10, 1, 50), "max_answers": number("max_answers", 1, 0, 20),
-            "interval": number("interval", 60, 30, 600)}
+    """问答区答题只让人选一次发几条（1–50）；挑哪些题、隔多久由 _Board 和 QA_PACE 决定。"""
+    return {"limit": _qa_number(body, "limit", 10, 1, 50)}
+
+
+def _ask_texts(body):
+    """要发布的提问：1–5 条，每条清理后 MIN_QUESTION–MAX_QUESTION 个字，不重复。"""
+    raw = body.get("texts")
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 5:
+        raise HttpError(400, "一次发布 1–5 条提问")
+    texts = []
+    for item in raw:
+        text = _clean_question(item if isinstance(item, str) else "")
+        if not MIN_QUESTION <= len(text) <= MAX_QUESTION:
+            raise HttpError(400, "每条提问要 %d–%d 个字" % (MIN_QUESTION, MAX_QUESTION))
+        if text not in texts:
+            texts.append(text)
+    return texts
+
+
+class _Board:
+    """The Q&A board for one job. Picks questions nobody has answered first, then those with one
+    answer; remembers each post (question and text) so the web page can list what went out."""
+
+    def __init__(self, bridge, record):
+        self.bridge, self.record, self.asked = bridge, record, {}
+
+    def __enter__(self):
+        self.bridge.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        self.bridge.__exit__(*exc)
+
+    def questions(self, max_answers=0, limit=10, **_):
+        found = self.bridge.questions(max_answers=0, limit=limit)
+        if len(found) < limit:
+            have = {q["id"] for q in found}
+            found += [q for q in self.bridge.questions(max_answers=1, limit=limit) if q["id"] not in have]
+        self.asked.update((q["id"], q["content"]) for q in found)
+        return found[:limit]
+
+    def publish(self, question_id, text):
+        answer_id = self.bridge.publish(question_id, text)
+        if answer_id:
+            self.record("answer", self.asked.get(question_id, ""), text, answer_id)
+        return answer_id
+
+    def ask(self, text):
+        question_id = self.bridge.ask(text)
+        if question_id:
+            self.record("ask", text, "", question_id)
+        return question_id
 
 
 def _history_line(event):
@@ -1045,6 +1166,8 @@ ROUTES = [
     ("POST", r"/api/platforms/(\w+)/logout", lambda app, m, q, b: app.logout(m[1])),
     ("GET", r"/api/platforms/(\w+)/courses", lambda app, m, q, b: app.courses(m[1])),
     ("GET", r"/api/platforms/(\w+)/units", lambda app, m, q, b: app.units(m[1], (q.get("course") or [""])[0], (q.get("fresh") or [""])[0] == "1")),
+    ("GET", r"/api/platforms/(\w+)/qa", lambda app, m, q, b: app.qa_posts(m[1], (q.get("course") or [""])[0])),
+    ("POST", r"/api/platforms/(\w+)/qa/draft", lambda app, m, q, b: app.qa_draft(m[1], b)),
     ("GET", r"/api/platforms/(\w+)/score", lambda app, m, q, b: app.score(m[1], (q.get("course") or [""])[0], (q.get("fresh") or [""])[0] == "1")),
     ("GET", r"/api/platforms/(\w+)/tasks", lambda app, m, q, b: app.tasks(m[1], (q.get("course") or [""])[0], (q.get("fresh") or [""])[0] == "1")),
     ("GET", r"/api/jobs", lambda app, m, q, b: app.jobs_state()),

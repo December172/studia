@@ -81,15 +81,15 @@ async function api(path, { method = "GET", body } = {}) {
 }
 
 const state = {
-  platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {}, earned: {},
+  platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {}, earned: {}, qaDraft: {}, qaPosts: {}, qaOpen: new Set(),
   jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, lastDone: null,
   current: store.get("studia-platform", ""), meOpen: false, adminTab: "people", logFilter: "all", editPassword: false, adminEdit: null,
 };
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
 const runOf = (id) => (state.runs[id] = state.runs[id] || freshRun());
 // Mirrors the server's rules (web/server.py _check_conflicts) so buttons say why before you click.
-const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "answer" };
-const jobType = (j) => j.kind || { 自动学习: "study", 每日复习: "review", "AI 答题": "answer", 问答区答题: "qa" }[j.title];
+const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "answer", ask: "answer" };
+const jobType = (j) => j.kind || { 自动学习: "study", 每日复习: "review", "AI 答题": "answer", 问答区答题: "qa", 问答区提问: "ask" }[j.title];
 // Only learning jobs fill a course's unit grid.
 const learns = (j) => GROUP[jobType(j)] === "learn";
 function blocker(pid, cid, type) {
@@ -302,7 +302,7 @@ function setPage(html) {
   if (on && (on.offsetLeft < nav.scrollLeft || on.offsetLeft + on.offsetWidth > nav.scrollLeft + nav.clientWidth)) nav.scrollLeft = on.offsetLeft - 16;
 }
 
-const LABEL = { study: "自动学习", review: "每日复习", answer: "AI 答题", qa: "问答区答题" };
+const LABEL = { study: "自动学习", review: "每日复习", answer: "AI 答题", qa: "问答区答题", ask: "问答区提问" };
 const TYPE_OF = Object.fromEntries(Object.entries(LABEL).map(([k, v]) => [v, k]));
 const STATE_WORD = { done: "完成", error: "失败", waiting: "等你操作", stopped: "已停止", running: "进行中", queued: "排队中" };
 
@@ -736,7 +736,7 @@ function fixButtons(j, i) {
   if (j.state === "waiting") {
     if (/登录/.test(j.summary)) return `<button class="btn small primary" data-go="#/login/${j.platform}">重新登录</button>`;
     if (/时长/.test(j.summary)) return "";
-    if (type === "qa") return `<button class="btn small" data-retry="${i}">重试</button>`;
+    if (type === "qa" || type === "ask") return `<button class="btn small" data-retry="${i}">重试</button>`;
     if (type === "answer") return `<button class="btn small" data-go="#/course/${j.platform}/${j.course}/answer">验证后重新作答</button>`;
     return `<button class="btn small" data-retry="${i}">验证后重试</button>`;
   }
@@ -836,29 +836,57 @@ function studyActions(p, c) {
 // "#/course/p/c/<tab>": the Q&A tab only exists on courses whose assessment counts it.
 const courseTab = (c, tab) => tab === "answer" ? "answer" : tab === "qa" && c.features?.qa ? "qa" : "study";
 
-// Q&A tab: three numbers kept per browser, the same bounds the server checks (web/server.py _qa_options).
-const QA_OPTIONS = [["limit", "一次发几条", 1, 50, 1, 10], ["max_answers", "只挑回复不超过几条的提问", 0, 20, 1, 1],
-  ["interval", "每条间隔（秒）", 30, 600, 30, 60]];
-function qaOptions() {
-  const saved = store.get("studia-qa", {});
-  return Object.fromEntries(QA_OPTIONS.map(([k, , low, high, , fallback]) =>
-    [k, Number.isInteger(saved[k]) ? Math.max(low, Math.min(high, saved[k])) : fallback]));
-}
+// Q&A tab. Where the interaction share stands, then two actions: answer a few questions now, or have
+// AI draft new ones that the person edits before they go out. Everything posted is listed below.
+const QA_SIZES = [5, 10, 20];
+const qaSize = () => { const n = store.get("studia-qa-size", 10); return QA_SIZES.includes(n) ? n : 10; };
 function qaBody(p, c) {
-  const o = qaOptions(), block = blocker(p.id, c.id, "qa");
-  const runs = state.history.filter((j) => j.platform === p.id && j.course === c.id && j.title === LABEL.qa).slice(0, 5);
-  const row = ([k, label, low, high]) => `<div class="model plain stepper_row"><span class="m1"><b>${label}</b></span>
-    <span class="stepper"><button class="btn small" data-qa-step="${k}" data-d="-1" aria-label="减少" ${o[k] <= low ? "disabled" : ""}>−</button>
-      <output>${o[k]}</output><button class="btn small" data-qa-step="${k}" data-d="1" aria-label="增加" ${o[k] >= high ? "disabled" : ""}>＋</button></span></div>`;
-  return `<div class="section"><h3>回答提问</h3><span class="aside">AI 写好后逐条公开发布</span></div>
-    <div class="models">${QA_OPTIONS.map(row).join("")}
-      <div class="model plain qa_go"><span class="m1"><small class="sans">${esc(block || `约 ${Math.ceil((o.limit * o.interval) / 60)} 分钟发完；回答会挂在你的账号名下`)}</small></span>
-        <span class="row_btns"><button class="btn primary" data-qa-start ${block ? "disabled" : ""}>开始回答</button></span></div></div>
-    <div class="section"><h3>最近</h3></div>
-    ${runs.length ? `<div class="runs">${runs.map((j) => `<div class="run">${ICON[j.state] || ICON.stopped}
-      <span class="t1">${esc(j.summary || STATE_WORD[j.state] || "")}<small>${ago(j.ended || j.started)}</small></span>
-      <span class="fix"></span><span class="state ${j.state}">${STATE_WORD[j.state] || ""}<span class="mono">${j.ended ? duration(j.ended - j.started) : ""}</span></span>
-      <span class="when"></span></div>`).join("")}</div>` : '<div class="empty">还没在这门课发过回答</div>'}`;
+  const k = key(p.id, c.id), earned = state.earned[k], q = earned?.qa, block = blocker(p.id, c.id, "qa");
+  const draft = state.qaDraft[k], posts = state.qaPosts[k], size = qaSize();
+  const n = (v) => (q ? v : "—");
+  const stat = `<div class="qa_stat"><span class="qa_score"><b>${earned ? pts(earned.interactive) : "—"}</b><span class="of">/${c.shares?.interactive || 10}</span> 分</span>
+    <span>有效回答 <b>${n(q?.answers)}</b></span><span>有效提问 <b>${n(q?.questions)}</b></span><span>收获回答 <b>${n(q?.received)}</b></span></div>`;
+  const answer = `<div class="model plain qa_row"><span class="m1"><b>回答提问</b><small class="sans">${esc(block || `先挑没人回答的，约 ${size} 分钟发完`)}</small></span>
+    <span class="row_btns"><span class="sizes">${QA_SIZES.map((s) => `<button class="chip" data-qa-size="${s}" aria-pressed="${s === size}">${s} 条</button>`).join("")}</span>
+      <button class="btn primary" data-qa-start ${block ? "disabled" : ""}>开始</button></span></div>`;
+  const texts = draft?.texts || [];
+  const ask = `<div class="model plain qa_row"><span class="m1"><b>发起提问</b><small class="sans">${esc(
+      draft?.loading ? "正在读问答区、出题，约半分钟…" : draft?.error || "AI 从回答少的话题里出题，你改好再发")}</small></span>
+    <span class="row_btns"><button class="btn" data-qa-draft ${draft?.loading ? "disabled" : ""}>${texts.length ? "换一批" : "出 3 条"}</button></span></div>
+    ${texts.map((t, i) => `<div class="model plain qa_draft"><textarea rows="2" data-qa-edit="${i}" maxlength="200">${esc(t)}</textarea>
+      <button class="btn small" data-qa-drop="${i}" aria-label="删掉这条">删掉</button></div>`).join("")}
+    ${texts.length ? `<div class="model plain qa_row"><span class="m1"><small class="sans">${esc(block || "发出后挂在你的账号名下")}</small></span>
+      <span class="row_btns"><button class="btn primary" data-qa-ask ${block ? "disabled" : ""}>发布 ${texts.length} 条</button></span></div>` : ""}`;
+  const list = !posts ? '<div class="empty">正在读取…</div>' : !posts.length ? '<div class="empty">还没在这门课发过</div>'
+    : `<div class="runs">${posts.map((x) => {
+      // Keyed by the post itself, so a new post on top does not move which one is open.
+      const open = state.qaOpen.has(`${k}:${x.kind}:${x.at}`);
+      return `<div class="run qa_post ${open ? "open" : ""}" data-qa-post="${esc(`${x.kind}:${x.at}`)}"><span class="stamp ${x.kind === "ask" ? "k" : ""}">${x.kind === "ask" ? "问" : "答"}</span>
+        <span class="t1">${esc(x.question)}<small>${ago(x.at)}</small></span><span></span><span></span>
+        <span class="when"></span></div>
+        ${x.kind === "answer" && open ? `<div class="qa_text">${esc(x.text)}</div>` : ""}`;
+    }).join("")}</div>`;
+  return `<div class="section"><h3>问答互动</h3></div><div class="models">${stat}${answer}${ask}</div>
+    <div class="section"><h3>已发布</h3></div>${list}`;
+}
+const loadingPosts = new Set();
+async function loadQaPosts(p, c) {
+  const k = key(p.id, c.id);
+  if (loadingPosts.has(k) || state.qaPosts[k]) return;
+  loadingPosts.add(k);
+  try { state.qaPosts[k] = (await api(`/api/platforms/${p.id}/qa?course=${encodeURIComponent(c.id)}`)).posts; }
+  catch { state.qaPosts[k] = []; }
+  finally { loadingPosts.delete(k); }
+  repaint();
+}
+async function draftQuestions(p, c) {
+  const k = key(p.id, c.id);
+  state.qaDraft[k] = { loading: true, texts: state.qaDraft[k]?.texts || [] };
+  repaint();
+  try { state.qaDraft[k] = { texts: (await api(`/api/platforms/${p.id}/qa/draft`, { method: "POST", body: { course: c.id, count: 3 } })).questions }; }
+  catch (error) { state.qaDraft[k] = { texts: state.qaDraft[k].texts, error: error.message }; }
+  if (!state.qaDraft[k].texts.length && !state.qaDraft[k].error) state.qaDraft[k].error = "AI 这次没出成，换一批试试";
+  repaint();
 }
 
 // The course's fingerprint: where its points come from, one box per share sized by its weight.
@@ -980,14 +1008,24 @@ function renderCourse(p, c, tab, full = false) {
   if (full) setPage(head + body); else { quiet = true; setPage(head + body); quiet = false; }
 
   page.querySelectorAll("[data-start]").forEach((el) => (el.onclick = () => startJob({ platform: p.id, course: c.id, type: el.dataset.start })));
-  page.querySelectorAll("[data-qa-step]").forEach((el) => (el.onclick = () => {
-    const o = qaOptions(), [, , low, high, step] = QA_OPTIONS.find(([k]) => k === el.dataset.qaStep);
-    o[el.dataset.qaStep] = Math.max(low, Math.min(high, o[el.dataset.qaStep] + step * Number(el.dataset.d)));
-    store.set("studia-qa", o);
+  page.querySelectorAll("[data-qa-size]").forEach((el) => (el.onclick = () => { store.set("studia-qa-size", Number(el.dataset.qaSize)); renderCourse(p, c, tab); }));
+  const qaStart = $("[data-qa-start]", page);
+  if (qaStart) qaStart.onclick = () => startJob({ platform: p.id, course: c.id, type: "qa", limit: qaSize() });
+  const qaDraft = $("[data-qa-draft]", page);
+  if (qaDraft) qaDraft.onclick = () => draftQuestions(p, c);
+  // Edits go straight into the draft, so a background repaint writes back what was typed.
+  page.querySelectorAll("[data-qa-edit]").forEach((el) => (el.oninput = () => { state.qaDraft[k].texts[el.dataset.qaEdit] = el.value; }));
+  page.querySelectorAll("[data-qa-drop]").forEach((el) => (el.onclick = () => { state.qaDraft[k].texts.splice(Number(el.dataset.qaDrop), 1); renderCourse(p, c, tab); }));
+  const qaAsk = $("[data-qa-ask]", page);
+  if (qaAsk) qaAsk.onclick = async () => {
+    if (await startJob({ platform: p.id, course: c.id, type: "ask", texts: state.qaDraft[k].texts })) { delete state.qaDraft[k]; renderCourse(p, c, tab); }
+  };
+  page.querySelectorAll("[data-qa-post]").forEach((el) => (el.onclick = () => {
+    const id = `${k}:${el.dataset.qaPost}`;  // "kind:at" of that post
+    state.qaOpen.has(id) ? state.qaOpen.delete(id) : state.qaOpen.add(id);
     renderCourse(p, c, tab);
   }));
-  const qaStart = $("[data-qa-start]", page);
-  if (qaStart) qaStart.onclick = () => startJob({ platform: p.id, course: c.id, type: "qa", ...qaOptions() });
+  if (tab === "qa") loadQaPosts(p, c);
   page.querySelectorAll("[data-paper]").forEach((el) => (el.onclick = () => {
     const x = papers.find((y) => String(y.id) === el.dataset.paper);
     if (!x.available) { toast(x.reason || "这份试卷暂不可选"); return; }
@@ -1068,7 +1106,7 @@ function recentCells(k) {
 }
 
 const player = $(".player"), sheet = $(".sheet");
-const LIVE_WORD = { 自动学习: "正在学习", 每日复习: "正在复习", "AI 答题": "正在答题", 问答区答题: "正在回答" };
+const LIVE_WORD = { 自动学习: "正在学习", 每日复习: "正在复习", "AI 答题": "正在答题", 问答区答题: "正在回答", 问答区提问: "正在提问" };
 const recentlyDone = () => (!state.jobs.length && state.lastDone && Date.now() - state.lastDone.shownAt < 60000 ? state.lastDone : null);
 
 function renderPlayer() {
@@ -1082,7 +1120,7 @@ function renderPlayer() {
     player.style.setProperty("--c", inkOf({ id: job.course }));
     player.classList.remove("ended");
     patch(player, `
-      <div class="np"><span class="art">${{ "AI 答题": ICON.pen, 每日复习: ICON.repeat, 问答区答题: ICON.chat }[job.title] || ICON.play}</span>
+      <div class="np"><span class="art">${{ "AI 答题": ICON.pen, 每日复习: ICON.repeat, 问答区答题: ICON.chat, 问答区提问: ICON.chat }[job.title] || ICON.play}</span>
         <span class="what"><small><span class="live">${queued ? "排队中" : LIVE_WORD[job.title] || "进行中"}</span>${esc(job.course_name)}</small>
         <b>${esc(queued ? "排队中" : run.unit?.name || run.detail || "准备中…")}</b></span></div>
       <div class="scrub"><span class="track ${pct == null ? "unknown" : ""}"><i style="width:${pct ?? 0}%"></i></span><span class="t">${esc(label || clock(elapsed(job)))}</span></div>
@@ -1167,7 +1205,8 @@ async function startJob(body) {
     const started = await api("/api/jobs", { method: "POST", body });
     if (started.id) state.focus = started.id;
     if (body.type === "answer") { delete state.papers[key(body.platform, body.course)]; state.selected[key(body.platform, body.course)] = new Set(); }
-  } catch (error) { toast(error.message); }
+    return true;
+  } catch (error) { toast(error.message); return false; }
 }
 async function stopJob(id) {
   if (!id) return;
@@ -1209,6 +1248,7 @@ function handleEvent(event) {
       finishUnits(event);
       delete state.papers[key(event.platform, event.course)];
       delete state.earned[key(event.platform, event.course)];
+      delete state.qaPosts[key(event.platform, event.course)];
       loadCourses(event.platform);
       setTimeout(repaint, 61000);
     }
