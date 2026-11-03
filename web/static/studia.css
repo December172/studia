@@ -228,7 +228,7 @@ code { font: 12px var(--mono); padding: 1px 5px; border-radius: 3px; background:
 .tab .n { font: 11.5px var(--mono); color: var(--text-4); }
 .section { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 34px 0 12px; }
 .section h3 { margin: 0; font-size: 15px; font-weight: 700; }
-.section .aside { font-size: 12px; color: var(--text-3); }
+.section .aside { margin-left: auto; font-size: 12px; color: var(--text-3); }
 .link { color: var(--indigo); font-weight: 500; }
 @media (hover: hover) { .link:hover { text-decoration: underline; text-underline-offset: 3px; } }
 

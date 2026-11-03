@@ -862,6 +862,7 @@ function renderCourse(p, c, tab, full = false) {
     body = failed ? `<div class="empty">${esc(failed)} · <button class="link" data-papers-retry="${esc(k)}">重试</button></div>` : `<div class="empty">正在读取试卷…</div>`;
   } else {
     const selected = selectedOf(k);
+    for (const id of selected) if (!papers.some((x) => x.id === id && x.available)) selected.delete(id);
     const row = (x) => {
       const on = selected.has(x.id);
       const pill = !x.available ? ""
@@ -879,8 +880,10 @@ function renderCourse(p, c, tab, full = false) {
     const categories = [...new Set(papers.map((x) => x.category))].sort((a, b) => rank(a) - rank(b));
     const n = selected.size;
     body = categories.map((label) => {
-      const list = papers.filter((x) => x.category === label);
-      return `<div class="section"><h3>${esc(label)}</h3><span class="aside">${list.filter((x) => x.available).length} / ${list.length} 份可选</span></div>
+      const list = papers.filter((x) => x.category === label), open = list.filter((x) => x.available);
+      const all = open.length && open.every((x) => selected.has(x.id));
+      return `<div class="section"><h3>${esc(label)}</h3><span class="aside">${open.length} / ${list.length} 份可选</span>
+          ${open.length > 1 ? `<button class="link" data-pick-all="${esc(label)}">${all ? "取消全选" : "全选"}</button>` : ""}</div>
         <div class="papers">${list.map(row).join("")}</div>`;
     }).join("") || `<div class="empty">这门课没有作业、测验或考试</div>`;
     if (categories.length) body += `<div class="dock"><span class="info">${answerBlock ? esc(answerBlock) : n ? `已选 <b>${n}</b> 份 · 交卷前会再确认一次` : "勾选要作答的试卷"}</span>
@@ -896,6 +899,12 @@ function renderCourse(p, c, tab, full = false) {
     if (!x.available) { toast(x.reason || "这份试卷暂不可选"); return; }
     const selected = selectedOf(k);
     selected.has(x.id) ? selected.delete(x.id) : selected.add(x.id);
+    renderCourse(p, c, tab);
+  }));
+  page.querySelectorAll("[data-pick-all]").forEach((el) => (el.onclick = () => {
+    const open = papers.filter((x) => x.category === el.dataset.pickAll && x.available), selected = selectedOf(k);
+    const all = open.every((x) => selected.has(x.id));
+    open.forEach((x) => (all ? selected.delete(x.id) : selected.add(x.id)));
     renderCourse(p, c, tab);
   }));
   const tasks = () => [...selectedOf(k)];
@@ -1143,6 +1152,7 @@ function repaint() {
     try {
       if (name === "jobs") VIEWS.jobs(a);
       else if (name === "home") VIEWS.home();
+      else if (name === "me") VIEWS.me();
       else if (name === "course") {
         const p = platformOf(a), course = courseOf(a, decodeURIComponent(b || ""));
         if (p && course) renderCourse(p, course, c === "answer" ? "answer" : "study");
