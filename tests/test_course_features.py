@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock, patch
 
 from settings import SettingsStore
 from web.server import HttpError, Studia, course_features
@@ -60,6 +60,40 @@ class CourseFeaturesTest(unittest.TestCase):
         platform.client.score_shares.side_effect = RuntimeError("timeout")
         (course,) = app.courses("zhs")["courses"]
         self.assertEqual((course["shares"], course["features"]["review"]), (None, True))
+
+
+class TerminalMenuTest(unittest.TestCase):
+    def menu(self, courses, offers):
+        from tests.test_zhs_tasks import make_view
+        view, _ = make_view(["q"])
+        captured = []
+        with patch.object(view, "choice", side_effect=lambda title, choices, **kw: captured.extend(choices) or 1):
+            view.course_menu(courses, 2, offers)
+        return {name: note for _, name, note in captured}
+
+    def test_items_follow_the_courses_they_apply_to(self):
+        both = [SHARED, MOOC_LIKE]
+        menu = self.menu(both, {"review": [SHARED], "qa": [SHARED]})
+        self.assertIn("只做新一代信息技术导论", menu["每日复习"])
+        self.assertIn("只做新一代信息技术导论", menu["问答区答题"])
+        menu = self.menu([MOOC_LIKE], {"review": [], "qa": []})
+        self.assertEqual(set(menu), {"自动学习", "AI 答题"})
+        menu = self.menu([SHARED], {"review": [SHARED], "qa": [SHARED]})
+        self.assertNotIn("只做", menu["每日复习"])
+
+    def test_review_runs_only_on_courses_with_a_habit_share(self):
+        from course_flow import CourseWorkspace
+        from ui import Back
+        view = MagicMock()
+        view.course_menu.side_effect = [3, Back()]
+        app = MagicMock()
+        workspace = CourseWorkspace(app)
+        workspace.view, workspace.store, workspace.platform = view, app.store, 2
+        workspace.client = Mock()
+        workspace.client.score_shares.side_effect = lambda cid, rid: EARNS if cid == 1000091138 else NEITHER
+        workspace.course_loop([SHARED, MOOC_LIKE])
+        self.assertEqual(view.course_menu.call_args.args[2], {"review": [SHARED], "qa": [SHARED]})
+        self.assertEqual(app.study.call_args.args[2], [SHARED])
 
 
 if __name__ == "__main__":
