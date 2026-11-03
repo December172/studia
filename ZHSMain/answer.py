@@ -980,11 +980,9 @@ def catalog_ai(client, course):
                 logger.warning("跳过缺少试卷标识的知识点：%s", knowledge_name)
                 continue
             score = info.get("highMasteryScore")
-            try:
-                done = float(score) > 0
-            except (TypeError, ValueError):
-                done = False
-            entries.append({
+            best = nonnegative_number(score) or 0
+            done = best > 0
+            entry = {
                 "id": "hw-%s-%s-%s" % (knowledge_id, test_id, paper_id),
                 "name": "%s · 作业" % knowledge_name,
                 "score": score,
@@ -997,7 +995,14 @@ def catalog_ai(client, course):
                     "examTestId": test_id,
                     "paperId": paper_id,
                 },
-            })
+            }
+            # 掌握度只记最高分，作业可以一直重做、不限次数：满分的没必要再做，没满分的可以重做提分。
+            if best >= 100:
+                entry["_unavailable"] = ("已满分", "已满分，无需重做。")
+            elif done:
+                entry["_redo"] = True
+                entry["_hint"] = "重做只保留最高分（当前 %s 分）。" % score
+            entries.append(entry)
     except (CaptchaRequired, AuthenticationExpired):
         raise
     except Exception as exc:

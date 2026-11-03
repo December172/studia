@@ -12,6 +12,7 @@ from Crypto.Util.Padding import pad, unpad
 
 from MoocMain.log import Logger
 from base.auth import AuthenticationExpired, PlatformUnavailable
+from task_metrics import nonnegative_number
 
 logger = Logger(__name__).get_log()
 
@@ -25,6 +26,7 @@ KEYS = {
 EV_KEY = "zzpttjd"
 BASE = "https://onlineservice-api.zhihuishu.com"
 PASSPORT = "https://passport.zhihuishu.com"
+STUONLINE = "https://stuonline.zhihuishu.com"
 STUDY = "https://studyservice-api.zhihuishu.com"
 AI = "https://kg-ai-run.zhihuishu.com"
 AI_TASK = "https://kg-run-student.zhihuishu.com"
@@ -170,6 +172,20 @@ def _percent(value):
         return round(float(str(value).strip().rstrip("%")))
     except (TypeError, ValueError):
         return None
+
+
+# 考核项 → scoreAssessRuleDto 的字段，按成绩分析页的顺序。
+SCORE_SHARES = (("progress", "progressScoreShare"), ("habit", "learnedHabitScoreShare"),
+                ("interactive", "learnedInteractiveScoreShare"), ("knowledge", "learnedKnowledgeScoreShare"),
+                ("test", "examScoreShare"), ("meet", "meetCourseScoreShare"), ("final", "finalExamScoreShare"))
+
+
+def course_offers(row, shares=None):
+    """这门课用不用得上每日复习、问答区：每日复习只攒学习习惯分，问答区只攒问答互动分，
+    所以只给共享课，并且考核规则里这一项大于 0 才开。shares 读不到（None）时不收窄。"""
+    shared = (row.get("zhs") or {}).get("kind") == "shared"
+    earns = lambda name: shares is None or shares.get(name, 0) > 0
+    return {"review": shared and earns("habit"), "qa": shared and earns("interactive")}
 
 
 class WatchPoints:
@@ -420,6 +436,44 @@ class ZHSApi:
             courses.extend(data["courseOpenDtos"])
             page += 1
         return courses
+
+    def score_shares(self, course_id, recruit_id):
+        """共享课考核规则（成绩分析页的 scoreAssessRuleDto）里各项占的分，满分 100。
+
+        habit 是学习习惯分（每日复习攒的），interactive 是问答互动分（问答区攒的）。
+        """
+        result = self._request(
+            "POST", STUONLINE + "/stuonline/json/stuLearnReportNew/loadStuLearingTab/",
+            data={"courseId": course_id, "recruitId": recruit_id, "type": "l", "courseTypeEs": 1},
+            origin=STUONLINE,
+        )
+        rule = result.get("scoreAssessRuleDto")
+        if not isinstance(rule, dict):
+            raise PlatformUnavailable("智慧树考核规则返回格式异常")
+        return {name: _percent(rule.get(field)) or 0 for name, field in SCORE_SHARES}
+
+    def score_earned(self, course_id, recruit_id):
+        """共享课每项已经拿到的分（成绩分析页「我的得分」），和 score_shares 的各项对应；
+        另有 usual 平时分、total 当前总分。习惯分和互动分各在自己的标签接口里。"""
+        def read(path, **extra):
+            return self._request("POST", STUONLINE + "/stuonline/json/stuLearnReportNew/" + path,
+                                 data=dict(courseId=course_id, recruitId=recruit_id, **extra), origin=STUONLINE)
+        ssd = read("loadStuLearnReport/", stuRankType="classRank").get("ssd")
+        if not isinstance(ssd, dict):
+            raise PlatformUnavailable("智慧树成绩返回格式异常")
+        habit = read("loadStuHabit/", type="l", courseTypeEs=1)
+        forum = read("loadCourseForum/", type="l", courseTypeEs=1)
+        number = lambda value: float(nonnegative_number(value) or 0)
+        mine = ((forum.get("qaStatisticsMap") or {}).get("myInteractionDto")) or {}
+        count = lambda *names: int(next((number(mine[n]) for n in names if mine.get(n) is not None), 0))
+        return {"progress": number(ssd.get("courseScore")), "habit": number(habit.get("learnedHabitScore")),
+                "interactive": number(forum.get("learnedInteractiveScore")), "test": number(ssd.get("examScore")),
+                "meet": number(ssd.get("meetScore")), "final": number(ssd.get("finalScore")),
+                "usual": number(ssd.get("usualScore")), "total": number(ssd.get("totalScore")),
+                # 「我的互动」：有效回答、有效提问、自己的提问收到的回答
+                "qa": {"answers": count("validAnswerAmount", "effectiveAnswer"),
+                       "questions": count("validQuestionAmount", "effectiveQuestion"),
+                       "received": count("getAnswer")}}
 
     def ai_courses(self):
         result = self.secure(
