@@ -408,6 +408,7 @@ class Studia:
                 "done": done and not item.get("_redo"),
                 "reason": availability.reason,
                 "hint": item.get("_hint", ""),
+                "redo": bool(item.get("_redo")),
                 "redo_left": item.get("answerCount") if item.get("_redo") else None,
             })
         return listed, result
