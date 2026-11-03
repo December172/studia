@@ -56,6 +56,24 @@ class WebServerTest(unittest.TestCase):
         self.assertEqual(self.request("GET", "/%2e%2e/settings.py")[0], 404)
         self.assertEqual(self.request("GET", "/mock.js")[0], 404)
 
+    def test_one_connection_serves_many_requests_and_static_files_revalidate(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        self.addCleanup(conn.close)
+        conn.request("GET", "/studia.js")
+        response = conn.getresponse()
+        response.read()
+        etag, sock = response.getheader("ETag"), conn.sock
+        self.assertEqual(response.getheader("Cache-Control"), "no-cache")
+        conn.request("GET", "/studia.js", headers={"If-None-Match": etag})
+        response = conn.getresponse()
+        response.read()
+        self.assertEqual(response.status, 304)
+        conn.request("GET", "/api/state", headers={"X-Studia-Token": self.app.token})
+        response = conn.getresponse()
+        self.assertEqual((response.status, response.getheader("Cache-Control")), (200, "no-store"))
+        response.read()
+        self.assertIs(conn.sock, sock)
+
     def test_courses_need_login_and_jobs_validate_input(self):
         self.assertEqual(self.request("GET", "/api/platforms/zhs/courses")[0], 401)
         self.assertEqual(self.request("GET", "/api/platforms/nope/courses")[0], 404)
