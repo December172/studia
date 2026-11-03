@@ -168,6 +168,14 @@ class WriteQuestionsTest(unittest.TestCase):
         repeated = write_questions(FakeAi(LONG), "主题", 3)
         self.assertEqual(len(repeated), 1)
 
+    def test_lead_ins_are_dropped(self):
+        ai = FakeAi("老师好，请问合同效力的认定标准是什么？")
+        self.assertEqual(write_questions(ai, "主题", 1), ["合同效力的认定标准是什么？"])
+
+    def test_address_kept_when_it_is_part_of_the_question(self):
+        text = "老师布置的作业要求和课程大纲不一致，以哪个为准？"
+        self.assertEqual(write_questions(FakeAi(text), "主题", 1), [text])
+
     def test_prompt_names_the_course_and_topic(self):
         ai = FakeAi(LONG)
         write_questions(ai, "合同效力", 1, course_name="国家安全教育")

@@ -261,19 +261,47 @@ def answer_questions(qa, ai, *, max_answers=1, limit=10, interval=60, state_path
 
 # 让模型的「问答题」能力产出提问正文：它只需把问题写成答案，答卷格式不变。
 QUESTION_PROMPT = (
-    "这门课是「%s」。请以学生口吻，围绕「%s」提出第 %d 个用于课程问答区的问题。\n"
-    "要求：一到两句话、具体到可以讨论、不要序号和 Markdown、不要自己作答。"
+    "这门课是「%s」。请围绕「%s」写第 %d 个用于课程问答区的问题。\n"
+    "只输出问题本身：一到两句话，具体到可以讨论；不要称呼老师或同学，"
+    "不要「请问」「想请教」「想问一下」「大家」这类客套和铺垫，"
+    "不要自我介绍或背景陈述，不要序号和 Markdown，不要自己作答。"
 )
 MIN_QUESTION, MAX_QUESTION = 8, 200
 
+# 模型仍可能开头带称呼或客套，发布前再剥一层。长前缀先匹配；True 直接去掉，
+# False 要求后面紧跟标点——否则「老师布置的作业」会被削成「布置的作业」。
+LEAD_INS = (
+    ("各位老师好", True), ("老师们好", True), ("老师您好", True), ("老师好", True),
+    ("各位同学好", True), ("同学们好", True), ("同学好", True),
+    ("请问一下", True), ("请问大家", True), ("请问各位", True), ("请问老师", True), ("请问", True),
+    ("想请教一下", False), ("请教一下", False), ("想问一下", False), ("想请教", False), ("想问", False),
+    ("各位老师", False), ("各位同学", False), ("同学们", False), ("老师", False), ("同学", False),
+)
+MARKS = "，,、：:！!。. "
+MAX_LEAD_INS = 4
+
+
+def _strip_lead_ins(text):
+    for _ in range(MAX_LEAD_INS):
+        text = text.lstrip(MARKS)
+        for lead, plain in LEAD_INS:
+            if not text.startswith(lead):
+                continue
+            rest = text[len(lead):]
+            if plain or not rest or rest[0] in MARKS:
+                text = rest.lstrip(MARKS)
+                break
+        else:
+            break
+    return text
+
 
 def _clean_question(text):
-    """去掉模型爱加的引号、序号和多余空白，剩下的才拿去发布。"""
-    text = " ".join(str(text or "").split())
-    text = text.strip("\"'“”‘’` ")
+    """只留问题本身：去掉称呼、客套、引号、序号和多余空白。"""
+    text = " ".join(str(text or "").split()).strip("\"'“”‘’` ")
     if len(text) > 2 and text[0].isdigit() and text[1] in ".、)）":
-        text = text[2:].strip()
-    return text
+        text = text[2:].lstrip()
+    return _strip_lead_ins(text)
 
 
 def write_questions(ai, topic, count, *, course_name=""):
