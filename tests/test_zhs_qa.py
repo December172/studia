@@ -239,71 +239,43 @@ class PublishQuestionsTest(unittest.TestCase):
         self.assertEqual((stats["published"], stats["failed"]), (0, 2))
 
 
-class QaAskSettingsTest(unittest.TestCase):
+class QaDraftsTest(unittest.TestCase):
     def view(self, answers):
         output = io.StringIO()
         inputs = iter(answers)
         return TerminalUI(console=Console(file=output, theme=theme.THEME, width=120),
                           input_fn=lambda: next(inputs)), output
 
-    def test_manual_text_is_kept(self):
-        view, _ = self.view(["1", "第一章的两个概念有什么区别？", "", "y"])
-        options = view.qa_ask_settings({})
-        self.assertEqual(options["source"], "manual")
-        self.assertEqual(options["text"], "第一章的两个概念有什么区别？")
-        self.assertEqual(options["interval"], 60)
+    def test_enter_publishes_them_all(self):
+        view, _ = self.view([""])
+        self.assertEqual(view.qa_drafts(QUESTIONS), QUESTIONS)
 
-    def test_short_text_is_asked_again(self):
-        view, output = self.view(["1", "太短", "第一章的两个概念有什么区别？", "", "y"])
-        self.assertEqual(view.qa_ask_settings({})["text"], "第一章的两个概念有什么区别？")
-        self.assertIn("请输入 10–120 个字。", output.getvalue())
+    def test_a_number_drops_that_one(self):
+        view, _ = self.view(["1", ""])
+        self.assertEqual(view.qa_drafts(QUESTIONS), QUESTIONS[1:])
 
-    def test_ai_mode_asks_only_count(self):
-        view, _ = self.view(["2", "2", "", "y"])
-        options = view.qa_ask_settings({})
-        self.assertEqual((options["source"], options["count"]), ("ai", 2))
-        self.assertNotIn("topic", options)
+    def test_e_and_a_number_edits_it(self):
+        view, output = self.view(["e2", "太短", "e2", "数据和信息到底有什么区别？", ""])
+        self.assertEqual(view.qa_drafts(QUESTIONS), [QUESTIONS[0], "数据和信息到底有什么区别？"])
+        self.assertIn("这条没改", output.getvalue())
 
-    def test_saved_values_become_defaults(self):
-        view, _ = self.view(["2", "", "", "y"])
-        saved = {"source": "ai", "count": 3, "interval": 30}
-        options = view.qa_ask_settings(saved)
-        self.assertEqual({key: options[key] for key in saved}, saved)
+    def test_r_asks_for_another_batch(self):
+        view, _ = self.view(["r"])
+        self.assertIsNone(view.qa_drafts(QUESTIONS))
 
-    def test_review_requires_confirmation(self):
-        view, _ = self.view(["y"])
-        self.assertEqual(view.qa_questions_review(QUESTIONS), QUESTIONS)
-        view, _ = self.view(["n"])
-        self.assertEqual(view.qa_questions_review(QUESTIONS), [])
+    def test_escape_or_dropping_all_posts_nothing(self):
+        view, _ = self.view(["\x1b"])
+        self.assertEqual(view.qa_drafts(QUESTIONS), [])
+        view, _ = self.view(["1", "1"])
+        self.assertEqual(view.qa_drafts(QUESTIONS), [])
 
-    def test_review_defaults_to_publish(self):
-        view, output = self.view([""])
-        self.assertEqual(view.qa_questions_review(QUESTIONS), QUESTIONS)
-        self.assertIn("[默认 y]", output.getvalue())
-
-
-class QaSettingsTest(unittest.TestCase):
-    def view(self, answers):
-        output = io.StringIO()
-        inputs = iter(answers)
-        return TerminalUI(console=Console(file=output, theme=theme.THEME, width=120),
-                          input_fn=lambda: next(inputs)), output
-
-    def test_enter_keeps_defaults(self):
-        view, _ = self.view(["", "", "", "y"])
-        self.assertEqual(view.qa_settings({}),
-                         {"limit": 10, "max_answers": 1, "interval": 60})
-
-    def test_invalid_number_is_asked_again(self):
-        view, output = self.view(["99", "3", "0", "45", "y"])
-        self.assertEqual(view.qa_settings({}),
-                         {"limit": 3, "max_answers": 0, "interval": 45})
-        self.assertIn("请输入 1–20 的整数。", output.getvalue())
-
-    def test_saved_values_become_defaults(self):
-        view, _ = self.view(["", "", "", "y"])
-        saved = {"limit": 5, "max_answers": 2, "interval": 30}
-        self.assertEqual(view.qa_settings(saved), saved)
+    def test_size_defaults_to_the_last_choice(self):
+        view, _ = self.view([""])
+        self.assertEqual(view.qa_size("条数", (5, 10, 20), 20), 20)
+        view, _ = self.view([""])
+        self.assertEqual(view.qa_size("条数", (5, 10, 20), 7), 10)
+        view, _ = self.view(["3"])  # 编号是第几项，不是条数
+        self.assertEqual(view.qa_size("条数", (5, 10, 20), None), 20)
 
 
 class TuiExecuteTest(unittest.TestCase):
@@ -315,6 +287,9 @@ class TuiExecuteTest(unittest.TestCase):
                                input_fn=lambda: "")
         self.app = Application(self.view, self.store)
         self.app.verify_ai = Mock(return_value=FakeAi())
+        pace = patch("ZHSMain.qa.QA_PACE", (0, 0))
+        pace.start()
+        self.addCleanup(pace.stop)
 
     def run_qa(self, courses, qa):
         bridge = Mock()
@@ -322,7 +297,7 @@ class TuiExecuteTest(unittest.TestCase):
         bridge.return_value.__exit__ = Mock(return_value=False)
         with patch("ZHSMain.qa.QaBridge", bridge):
             stats = self.app.execute_zhs_qa(Mock(access_token="[]"), courses, Mock(),
-                                            {"limit": 3, "max_answers": 1, "interval": 0})
+                                            {"limit": 3})
         return stats, bridge
 
     def test_answers_selected_questions(self):
@@ -365,14 +340,16 @@ class TuiAskTest(unittest.TestCase):
         self.view = TerminalUI(console=Console(file=io.StringIO(), theme=theme.THEME, width=120),
                                input_fn=lambda: "")
         self.app = Application(self.view, SettingsStore(Path(self.temp.name)))
+        pace = patch("ZHSMain.qa.QA_PACE", (0, 0))
+        pace.start()
+        self.addCleanup(pace.stop)
 
     def publish(self, courses, qa):
         bridge = Mock()
         bridge.return_value.__enter__ = Mock(return_value=qa)
         bridge.return_value.__exit__ = Mock(return_value=False)
         with patch("ZHSMain.qa.QaBridge", bridge):
-            stats = self.app.execute_zhs_ask(Mock(access_token="[]"), courses, QUESTIONS,
-                                             {"interval": 0})
+            stats = self.app.execute_zhs_ask(Mock(access_token="[]"), courses, QUESTIONS)
         return stats, bridge
 
     def test_publishes_questions(self):
@@ -428,96 +405,78 @@ class TuiAskTest(unittest.TestCase):
 
 
 class WorkspaceTest(unittest.TestCase):
-    def test_course_menu_enters_qa_area(self):
+    def workspace(self, view):
         from course_flow import CourseWorkspace
+
+        app = MagicMock()
+        app.store.get.return_value = {}
+        app.remember.side_effect = lambda operation: operation()
+        workspace = CourseWorkspace(app)
+        workspace.view, workspace.store, workspace.platform = view, app.store, 2
+        workspace.client = Mock()
+        workspace.client.score_shares.return_value = {"interactive": 10}
+        workspace.client.score_earned.return_value = {
+            "interactive": 2.0, "qa": {"answers": 3, "questions": 1, "received": 2}}
+        return workspace, app
+
+    def test_answering_asks_only_how_many(self):
         from ui import Back
 
         view = MagicMock()
         view.course_menu.side_effect = [4, Back()]
-        view.qa_settings.return_value = {"limit": 2, "max_answers": 0, "interval": 30}
-        app = MagicMock()
-        app.store.get.return_value = {}
-        app.remember.side_effect = lambda operation: operation()
+        view.qa_menu.side_effect = [1, Back()]
+        view.qa_size.return_value = 10
+        workspace, app = self.workspace(view)
         # 统计字典不是文件路径：汇总页不能把它当成 answered/failed/skipped 三个文件。
         app.execute_zhs_qa.return_value = {"answered": 9, "failed": 0, "skipped": 0}
-        workspace = CourseWorkspace(app)
-        workspace.view, workspace.store, workspace.platform = view, app.store, 2
-        workspace.client = Mock()
         workspace.course_loop([COURSE])
-        app.execute_zhs_qa.assert_called_once()
-        self.assertEqual(view.qa_settings.call_args.args[0], {})
-        self.assertEqual(app.execute_zhs_qa.call_args.args[1], [COURSE])
+        self.assertEqual(app.execute_zhs_qa.call_args.args[1:], ([COURSE], app.ai_configuration(), {"limit": 10}))
         self.assertEqual(view.operation_result.call_args.args[0], [])
-        self.assertEqual(app.store.set.call_args.args,
-                         ("qa", {"limit": 2, "max_answers": 0, "interval": 30}))
+        self.assertEqual(app.store.set.call_args.args, ("qa", {"limit": 10}))
+        self.assertEqual(view.qa_menu.call_args.args[0],
+                         ["国家安全教育：互动分 2/10 · 有效回答 3 · 有效提问 1 · 收获回答 2"])
 
-    def test_course_menu_publishes_questions(self):
-        from course_flow import CourseWorkspace
+    def test_asking_publishes_what_was_kept(self):
         from ui import Back
 
         view = MagicMock()
-        view.course_menu.side_effect = [5, Back()]
-        view.qa_ask_settings.return_value = {"source": "manual", "text": QUESTIONS[0],
-                                             "count": 1, "interval": 30}
-        view.qa_questions_review.return_value = [QUESTIONS[0]]
-        app = MagicMock()
-        app.store.get.return_value = {}
-        app.remember.side_effect = lambda operation: operation()
-        workspace = CourseWorkspace(app)
-        workspace.view, workspace.store, workspace.platform = view, app.store, 2
-        workspace.client = Mock()
+        view.course_menu.side_effect = [4, Back()]
+        view.qa_menu.side_effect = [2, Back()]
+        view.qa_size.return_value = 3
+        view.qa_drafts.side_effect = [None, [QUESTIONS[0]]]  # 先换一批，再留一条发
+        workspace, app = self.workspace(view)
+        app.generate_zhs_questions.return_value = QUESTIONS
         workspace.course_loop([COURSE])
-        app.execute_zhs_ask.assert_called_once()
-        self.assertEqual(app.execute_zhs_ask.call_args.args[2], [QUESTIONS[0]])
-        self.assertEqual(view.operation_result.call_args.args[0], [])
-
-    def test_prepare_questions_manual_mode_skips_ai(self):
-        from course_flow import CourseWorkspace
-
-        view, app = MagicMock(), MagicMock()
-        view.qa_questions_review.return_value = [QUESTIONS[0]]
-        workspace = CourseWorkspace(app)
-        workspace.view = view
-        texts = workspace.prepare_questions([COURSE], {"source": "manual", "text": QUESTIONS[0]})
-        self.assertEqual(texts, [QUESTIONS[0]])
-        app.ai_configuration.assert_not_called()
+        self.assertEqual(app.generate_zhs_questions.call_count, 2)
+        self.assertEqual(app.generate_zhs_questions.call_args.args[3], {"count": 3})
+        app.execute_zhs_ask.assert_called_once_with(workspace.client, [COURSE], [QUESTIONS[0]])
+        self.assertEqual(app.store.set.call_args.args, ("qa_ask", {"count": 3}))
 
     def test_generation_error_is_shown_and_retryable(self):
-        from course_flow import CourseWorkspace
-
-        view, app = MagicMock(), MagicMock()
+        view = MagicMock()
+        workspace, app = self.workspace(view)
         app.ai_configuration.side_effect = [RuntimeError("AI 服务 HTTP 503"), MagicMock()]
         app.generate_zhs_questions.return_value = [QUESTIONS[0]]
         view.confirm.return_value = True
-        view.qa_questions_review.return_value = [QUESTIONS[0]]
-        workspace = CourseWorkspace(app)
-        workspace.view = view
-        texts = workspace.prepare_questions([COURSE], {"source": "ai", "count": 1})
-        self.assertEqual(texts, [QUESTIONS[0]])
+        view.qa_drafts.return_value = [QUESTIONS[0]]
+        self.assertEqual(workspace.prepare_questions([COURSE], {"count": 1}), [QUESTIONS[0]])
         self.assertEqual(view.confirm.call_count, 1)
         self.assertTrue(any("503" in str(call.args[0]) for call in view.note.call_args_list))
 
     def test_generation_error_can_be_abandoned(self):
-        from course_flow import CourseWorkspace
-
-        view, app = MagicMock(), MagicMock()
+        view = MagicMock()
+        workspace, app = self.workspace(view)
         app.ai_configuration.side_effect = RuntimeError("AI 服务 HTTP 503")
         view.confirm.return_value = False
-        workspace = CourseWorkspace(app)
-        workspace.view = view
-        self.assertEqual(workspace.prepare_questions([COURSE], {"source": "ai", "count": 1}), [])
-        view.qa_questions_review.assert_not_called()
+        self.assertEqual(workspace.prepare_questions([COURSE], {"count": 1}), [])
+        view.qa_drafts.assert_not_called()
 
     def test_cancelled_generation_stays_in_menu(self):
-        from course_flow import CourseWorkspace
-
-        view, app = MagicMock(), MagicMock()
+        view = MagicMock()
+        workspace, app = self.workspace(view)
         app.ai_configuration.side_effect = KeyboardInterrupt
-        workspace = CourseWorkspace(app)
-        workspace.view = view
-        texts = workspace.prepare_questions([COURSE], {"source": "ai", "topic": "主题", "count": 1})
-        self.assertEqual(texts, [])
-        view.qa_questions_review.assert_not_called()
+        self.assertEqual(workspace.prepare_questions([COURSE], {"count": 1}), [])
+        view.qa_drafts.assert_not_called()
 
 
 if __name__ == "__main__":
