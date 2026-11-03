@@ -6,8 +6,9 @@ import time
 import unittest
 import unittest.mock
 from http.server import ThreadingHTTPServer
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
+from base.auth import PlatformUnavailable
 from reporting import ProgressEvent
 from settings import SettingsStore
 from web.server import LocalAccess, Studia, _course, make_handler
@@ -216,12 +217,42 @@ class WebServerTest(unittest.TestCase):
     def test_qr_login_completion_saves_session(self):
         client = Mock()
         client.login_qr_status.return_value = {"status": 1, "oncePassword": "once"}
-        self.app.platforms["zhs"].login = {"client": client, "qr": "q", "refreshes": 0}
+        self.app.platforms["zhs"].qr = {"a": {"client": client, "qr": "q", "refreshes": 0}}
         self.app.store.save_session = Mock()
-        self.assertEqual(self.app.login_status("zhs")["status"], "done")
+        self.assertEqual(self.app.login_status("zhs", "a")["status"], "done")
         client.finish_qr_login.assert_called_once_with("once")
         self.app.store.save_session.assert_called_once_with("zhs", client)
         self.assertIs(self.app.platforms["zhs"].client, client)
+
+    def test_each_page_keeps_its_own_qr_code(self):
+        codes = iter(range(10))
+        with patch("web.server.ZHSApi") as api:
+            api.side_effect = lambda: Mock(login_qr=Mock(return_value=("q%d" % next(codes), b"png")),
+                                           login_qr_status=Mock(return_value={"status": -1}))
+            first = self.app.login_start("zhs")["id"]
+            second = self.app.login_start("zhs")["id"]  # a second tab opens the login page
+        platform = self.app.platforms["zhs"]
+        platform.qr[first]["client"].login_qr_status.return_value = {"status": 1, "oncePassword": "o"}
+        self.app.store.save_session = Mock()
+        # Scanning the code the first tab shows still signs in, though the second tab asked later.
+        self.assertEqual(self.app.login_status("zhs", first)["status"], "done")
+        self.assertEqual(self.app.login_status("zhs", second)["status"], "failed")
+        self.assertEqual(platform.qr, {})
+
+    def test_a_failed_qr_handover_is_reported_not_left_spinning(self):
+        client = Mock()
+        client.login_qr_status.return_value = {"status": 1, "oncePassword": "once"}
+        client.finish_qr_login.side_effect = PlatformUnavailable("暂时无法连接智慧树")
+        self.app.platforms["zhs"].qr = {"a": {"client": client, "qr": "q", "refreshes": 0}}
+        result = self.app.login_status("zhs", "a")
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("暂时无法连接智慧树", result["message"])
+        self.assertIsNone(self.app.platforms["zhs"].client)
+
+    def test_sign_in_events_reach_the_log_file(self):
+        import logging
+        from web import server
+        self.assertTrue(any(isinstance(h, logging.FileHandler) for h in server.logger.handlers))
 
     def test_browser_login_runs_in_background_and_reports_failure(self):
         self.assertEqual(self.app.login_start("mooc")["status"], "waiting")
