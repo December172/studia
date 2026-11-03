@@ -27,6 +27,7 @@ class CourseWorkspace:
         self.client = None
         self.rows = []
         self.library_state = {}
+        self.shares = {}  # 智慧树课程 id -> 考核规则各项满分
 
     def run(self):
         # Import here so the legacy entry points and dependency injection share
@@ -101,33 +102,7 @@ class CourseWorkspace:
                     result = self.execute(lambda: self.app.study(
                         self.platform, self.client, targets, review_minutes=REVIEW_MINUTES))
                 elif mode == 4 and self.platform == 2:
-                    targets = offers["qa"]  # 只去考核里有问答互动分的课
-                    options = self.view.qa_settings(self.store.get("qa", {}))
-                    self.app.remember(lambda: self.store.set("qa", options))
-                    self.view.qa_plan(targets, options)
-                    config = self.app.ai_configuration()
-
-                    def answer():
-                        # 统计只进汇总页；execute() 的返回值是文件路径，不能直接回传字典。
-                        self.app.execute_zhs_qa(self.client, targets, config, options)
-                        return []
-
-                    result = self.execute(answer, "问答区答题")
-                elif mode == 5 and self.platform == 2:
-                    targets = offers["qa"]
-                    options = self.view.qa_ask_settings(self.store.get("qa_ask", {}))
-                    self.app.remember(lambda: self.store.set("qa_ask", options))
-                    self.view.qa_ask_plan(options)
-                    texts = self.prepare_questions(targets, options)
-                    if not texts:
-                        result = 1
-                    else:
-                        def ask():
-                            # 正文已经确认过，这里只负责发布；提问不产生文件。
-                            self.app.execute_zhs_ask(self.client, targets, texts, options)
-                            return []
-
-                        result = self.execute(ask, "问答区提问")
+                    result = self.qa_area(offers["qa"])  # 只去考核里有问答互动分的课
                 else:
                     result = self.tasks(courses, mode, task_state.setdefault(mode, {}))
                 if result == 2:
@@ -158,26 +133,85 @@ class CourseWorkspace:
                         shares = None
                     if not isinstance(shares, dict):
                         shares = None
+                    self.shares[z.get("courseId")] = shares or {}
                 offer = course_offers(row, shares)
                 for name in found:
                     if offer[name]:
                         found[name].append(row)
         return found
 
-    def prepare_questions(self, courses, options):
-        """按设置准备提问正文并请用户确认。
+    def qa_area(self, courses):
+        """问答区，和网页一样两件事：回答别人的提问；让 AI 出提问，你改好再发。只选条数。"""
+        while True:
+            action = self.view.qa_menu(self.qa_scores(courses))  # Esc 回课程菜单
+            try:
+                if action == 1:
+                    saved = self.store.get("qa", {})
+                    limit = self.view.qa_size("回答提问 / 每门课几条", (5, 10, 20),
+                                              saved.get("limit") if isinstance(saved, dict) else None)
+                    self.app.remember(lambda: self.store.set("qa", {"limit": limit}))
+                    config = self.app.ai_configuration()
 
-        失败要说清原因并允许重试：写日志的那一行回到课程菜单就看不见了。
+                    def answer():
+                        # 统计只进汇总页；execute() 的返回值是文件路径，不能直接回传字典。
+                        self.app.execute_zhs_qa(self.client, courses, config, {"limit": limit})
+                        return []
+
+                    result = self.execute(answer, "问答区答题")
+                else:
+                    result = self.ask_questions(courses)
+            except Back:
+                continue
+            if result == 2:
+                return 2
+
+    def qa_scores(self, courses):
+        """每门课一行：互动分和「我的互动」三个数，和网页问答区顶上那行一样。读不到的课不写。"""
+        lines = []
+        with self.view.activity("读取问答得分"):
+            for row in courses:
+                z = row.get("zhs") or {}
+                try:
+                    got = self.client.score_earned(z["courseId"], z["recruitId"])
+                except Exception:  # 只是展示，读不到不挡操作
+                    continue
+                full = (self.shares.get(z["courseId"]) or {}).get("interactive")
+                q = got["qa"]
+                lines.append(f"{row.get('courseName', '')}：互动分 {got['interactive']:g}{f'/{full:g}' if full else ''}"
+                             f" · 有效回答 {q['answers']} · 有效提问 {q['questions']} · 收获回答 {q['received']}")
+        return lines
+
+    def ask_questions(self, courses):
+        """发起提问：一门课一批，AI 照这门课问答区里回答少的提问出题。"""
+        course = courses[0]
+        if len(courses) > 1:
+            course = courses[self.view.choice("发起提问 / 哪门课", [
+                (i, row.get("courseName", ""), "") for i, row in enumerate(courses, 1)]) - 1]
+        saved = self.store.get("qa_ask", {})
+        count = self.view.qa_size("发起提问 / 出几条", (1, 3, 5),
+                                  saved.get("count") if isinstance(saved, dict) else None)
+        self.app.remember(lambda: self.store.set("qa_ask", {"count": count}))
+        texts = self.prepare_questions([course], {"count": count})
+        if not texts:
+            return 1
+
+        def ask():
+            # 正文已经确认过，这里只负责发布；提问不产生文件。
+            self.app.execute_zhs_ask(self.client, [course], texts)
+            return []
+
+        return self.execute(ask, "问答区提问")
+
+    def prepare_questions(self, courses, options):
+        """AI 出题，再让用户删改；r 换一批就重出。返回要发的提问，不发返回空列表。
+
+        失败要说清原因并允许重试：写日志的那一行回到菜单就看不见了。
         """
         while True:
             try:
-                if options["source"] == "ai":
-                    config = self.app.ai_configuration()
-                    with self.view.activity("生成提问"):
-                        texts = self.app.generate_zhs_questions(self.client, courses, config, options)
-                else:
-                    texts = [options["text"]]
-                break
+                config = self.app.ai_configuration()
+                with self.view.activity("生成提问"):
+                    texts = self.app.generate_zhs_questions(self.client, courses, config, options)
             except (Cancelled, EOFError, Back):
                 raise
             except KeyboardInterrupt:  # 生成阶段还能中断，不必退出整个工具
@@ -187,13 +221,18 @@ class CourseWorkspace:
                 self.view.note(f"生成提问失败：{exc}", "error")
                 if not self.view.confirm("重试生成", default=True):
                     return []
-        if not texts:
-            self.view.note("没有生成可发布的提问，稍后再试或自己写一条。", "warning")
-            return []
-        reviewed = self.view.qa_questions_review(texts)
-        if not reviewed:  # 回车即发布；这里只处理「n」或 Esc
-            self.view.note("已取消：没有发布任何提问。", "warning")
-        return reviewed
+                continue
+            if not texts:
+                self.view.note("这次没出成可用的提问。", "warning")
+                if self.view.confirm("换一批", default=True):
+                    continue
+                return []
+            reviewed = self.view.qa_drafts(texts)
+            if reviewed is None:  # 换一批
+                continue
+            if not reviewed:
+                self.view.note("没有发布任何提问。", "warning")
+            return reviewed
 
     def catalog_for(self, courses):
         if self.platform == 2:

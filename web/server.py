@@ -38,7 +38,7 @@ from ZHSMain.answer import ZHSAnswerRunner, catalog
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi, ZHSError, course_offers
 from ZHSMain.main import ZHSHandler, course_units as zhs_units
 from ZHSMain.memory import AnswerMemory
-from ZHSMain.qa import REFERENCE_ANSWERS, MAX_QUESTION, MIN_QUESTION, QaBridge, _clean_question, answer_questions, \
+from ZHSMain.qa import QA_PACE, REFERENCE_ANSWERS, MAX_QUESTION, MIN_QUESTION, QaBridge, _clean_question, answer_questions, \
     publish_questions, write_questions
 from ai.memory import MoocAnswerMemory
 from ZYKMoocMain.api import ZYKMoocApi
@@ -57,8 +57,6 @@ CACHE_TTL = 600
 LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题", "qa": "问答区答题", "ask": "问答区提问"}
 # Jobs that play course content conflict with each other; answering is separate.
 GROUP = {"study": "learn", "review": "learn", "answer": "answer", "qa": "answer", "ask": "answer"}
-# Seconds between two Q&A posts, drawn afresh each time: an even beat reads like a script.
-QA_PACE = (45, 90)
 QA_POSTS = 300  # posts kept per account for the web list
 DRAFT_TIMEOUT = 300  # reasoning models take one to two minutes to write a single question
 # Running job id -> its Studia app. A job thread is named "studia-job-<id>" and passes that
