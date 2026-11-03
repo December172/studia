@@ -1,0 +1,190 @@
+"""智慧树问答区（qah5）：用 Playwright 复用已登录 Cookie 取题、答题。
+
+为什么不直接用 requests：问答区每个请求都要 `secretStr`，它由页面里的全局函数
+`yxyz(params, dynStr)` 生成，`dynStr` 每次登录都会变；仓库现有的 `ZHSApi.secure()`
+只覆盖 onlineservice 的 AES 方案，拿不到 creditqa 的签名材料。让页面自己算签名，
+就不用逆向，也不用维护密钥。Playwright 已是本项目依赖（见 `ZHSMain/slider.py`）。
+
+用法：
+
+    api = ZHSApi(access_token=saved_token)          # 复用扫码登录的 Cookie
+    with QaBridge(api.access_token) as qa:
+        items = qa.questions(1000119877, 426135, max_answers=1, limit=10)
+        qa.publish(1000119877, 426135, items[0]["id"], "……")
+
+失败语义与仓库其余部分一致：登录过期抛 `AuthenticationExpired`，平台要验证抛
+`CaptchaRequired`，其余接口错误抛 `ZHSApiError`。
+"""
+from __future__ import annotations
+
+import json
+import time
+
+from MoocMain.log import Logger
+from ZHSMain.api import AuthenticationExpired, CaptchaRequired, ZHSApiError
+
+logger = Logger(__name__).get_log()
+
+QA_URL = "https://qah5.zhihuishu.com/qa.html#/web/home/%s?role=2&recruitId=%s"
+GATEWAY = "https://creditqa-api.zhihuishu.com/creditqa/gateway/t/v1/web/qa/"
+
+# 页面里注入一次：把签名和 fetch 都交给站点自己算，Python 侧只管传参。
+BRIDGE_JS = """
+window.__studiaQa = async (path, params) => {
+  const store = document.querySelector('#app').__vue__.$store.state.baseData;
+  const body = 'dateFormate=' + Date.now() +
+    '&secretStr=' + encodeURIComponent(window.yxyz(params, store.dynStr));
+  const r = await fetch('%s' + path, {
+    method: 'POST', credentials: 'include',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body,
+  });
+  return await r.json();
+};
+""" % GATEWAY
+
+LIST_JS = """
+async ({courseId, recruitId, maxAnswers, limit, pageSize}) => {
+  const out = [];
+  let pageIndex = 0, guard = 0;
+  while (out.length < limit && guard++ < 40) {
+    const j = await window.__studiaQa('getRecommendList',
+      {courseId, recruitId, pageIndex, pageSize});
+    const list = (j.rt && j.rt.questionInfoList) || [];
+    if (!list.length) break;
+    for (const q of list) {
+      if (q.answerNum <= maxAnswers) {
+        out.push({id: q.questionId, content: q.content, answers: q.answerNum,
+                  user: (q.userDto || {}).username || '', time: q.timeStr || '',
+                  chapter: q.chapterName || ''});
+      }
+    }
+    pageIndex = (j.rt && j.rt.pageIndex) || pageIndex + list.length;
+  }
+  return out.slice(0, limit);
+}
+"""
+
+PUBLISH_JS = """
+async ({qid, content, courseId, recruitId}) => {
+  const store = document.querySelector('#app').__vue__.$store.state.baseData;
+  return await window.__studiaQa('saveAnswer', {
+    annexs: [], qid, source: store.roleId, aContent: content,
+    courseId, recruitId, validate: '', saveSource: 1,
+  });
+}
+"""
+
+
+def _playwright_cookies(raw):
+    """ZHSApi.access_token 的 JSON 直接喂给 Playwright，只保留智慧树域。"""
+    cookies = json.loads(raw or "[]")
+    return [{"name": c["name"], "value": c["value"],
+             "domain": c.get("domain") or ".zhihuishu.com", "path": c.get("path") or "/",
+             "secure": bool(c.get("secure", True)),
+             **({"expires": c["expires"]} if c.get("expires") else {})}
+            for c in cookies if "zhihuishu.com" in (c.get("domain") or "")]
+
+
+class QaBridge:
+    """一次任务共用一个无头浏览器；页面加载失败或跳登录页按登录过期处理。"""
+
+    def __init__(self, access_token, *, course_id, recruit_id, headless=True, timeout=30000):
+        self.cookies = _playwright_cookies(access_token)
+        self.course_id, self.recruit_id = int(course_id), int(recruit_id)
+        self.headless, self.timeout = headless, timeout
+        self._pw = self._browser = self._page = None
+
+    def __enter__(self):
+        from playwright.sync_api import sync_playwright  # 只有这个功能需要，延迟导入
+
+        self._pw = sync_playwright().start()
+        self._browser = self._pw.chromium.launch(headless=self.headless)
+        context = self._browser.new_context()
+        context.add_cookies(self.cookies)
+        self._page = context.new_page()
+        self._page.goto(QA_URL % (self.course_id, self.recruit_id), wait_until="domcontentloaded",
+                        timeout=self.timeout)
+        if "/login" in self._page.url:
+            raise AuthenticationExpired("智慧树登录已过期，请重新扫码")
+        self._page.wait_for_function("() => window.yxyz && document.querySelector('#app').__vue__",
+                                     timeout=self.timeout)
+        self._page.evaluate(BRIDGE_JS)
+        return self
+
+    def close(self):
+        for close in (getattr(self._browser, "close", None), getattr(self._pw, "stop", None)):
+            if close:
+                try:
+                    close()
+                except Exception:  # 浏览器已经退出时忽略
+                    pass
+
+    def __exit__(self, *exc):
+        self.close()
+
+    # ---------------------------------------------------------------- 取题
+
+    def questions(self, max_answers=1, limit=10, page_size=50):
+        items = self._page.evaluate(LIST_JS, {"courseId": self.course_id, "recruitId": self.recruit_id,
+                                              "maxAnswers": int(max_answers), "limit": int(limit),
+                                              "pageSize": int(page_size)})
+        logger.info("问答区取到 %d 条（回答数≤%d）", len(items), max_answers)
+        return items
+
+    # ---------------------------------------------------------------- 发布
+
+    def publish(self, question_id, text):
+        result = self._page.evaluate(PUBLISH_JS, {"qid": int(question_id), "content": text,
+                                                  "courseId": self.course_id, "recruitId": self.recruit_id})
+        if str(result.get("code")) == "1010":
+            raise CaptchaRequired("问答区要求完成验证，请在页面上验证后重试")
+        if str(result.get("status")) != "200":
+            raise ZHSApiError("发布回答失败：%s" % (result.get("msg") or "未知原因"))
+        return (result.get("rt") or {}).get("answerId")
+
+
+def answer_questions(qa, ai, *, max_answers=1, limit=10, interval=60, state_path=None,
+                     should_stop=lambda: False, on_event=lambda kind, name, status="": None,
+                     sleep=time.sleep):
+    """取题 → AI 生成 → 发布，返回统计。ctx 只需 questions/publish 两个方法，便于测试替身。"""
+    seen = set()
+    if state_path:
+        try:
+            with open(state_path, encoding="utf-8") as handle:
+                seen = set(json.load(handle))
+        except (OSError, ValueError):
+            seen = set()
+    items = [q for q in qa.questions(max_answers=max_answers, limit=limit * 3) if q["id"] not in seen][:limit]
+    stats = {"answered": 0, "skipped": 0, "failed": 0, "ids": []}
+    on_event("begin", "问答区答题", "running")
+    for index, item in enumerate(items, 1):
+        if should_stop():
+            break
+        title = item["content"]
+        try:
+            answer = ai.answer({"type": "问答题", "title": title}).get("answer")
+            if not isinstance(answer, str) or len(answer.strip()) < 30:
+                raise ValueError("AI 回答为空或过短")
+            answer_id = qa.publish(item["id"], answer.strip()[:1000])
+        except CaptchaRequired:
+            raise
+        except Exception as exc:  # 单题失败不影响队列，与 ai/runner.py 的做法一致
+            stats["failed"] += 1
+            logger.warning("问答区第 %d 题失败：%s", index, exc)
+            on_event("result", title[:20], "error")
+            continue
+        if not answer_id:
+            stats["skipped"] += 1
+            on_event("result", title[:20], "skipped")
+            continue
+        stats["answered"] += 1
+        stats["ids"].append(item["id"])
+        seen.add(item["id"])
+        on_event("result", title[:20], "success")
+        if state_path:
+            with open(state_path, "w", encoding="utf-8") as handle:
+                json.dump(sorted(seen), handle)
+        if index < len(items) and interval:
+            sleep(interval)
+    on_event("done", "问答区答题", "done")
+    return stats
