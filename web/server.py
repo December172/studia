@@ -61,6 +61,7 @@ JOBS = {}
 # next start if it comes within the hour; each job is resumed at most a few times in a row.
 RESUME_WINDOW = 3600
 RESUME_LIMIT = 3
+STEADY = 600  # seconds a resumed job must run before its resume count starts over
 INTERRUPTED = "更新时中断"
 JOB_THREAD = re.compile(r"studia-job-([0-9a-f]+)")
 
@@ -544,7 +545,9 @@ class Studia:
             return
         now = stopped_at or time.time()
         active = [{"platform": j["platform"], "type": j["kind"], "course": j["course"], "course_name": j["course_name"],
-                   "resumes": j.get("resumes", 0),
+                   # Only back-to-back restarts count toward RESUME_LIMIT (a job that brings the service down);
+                   # one that has studied for a while since its last start is not a crash loop.
+                   "resumes": 0 if now - (j.get("running_since") or now) > STEADY else j.get("resumes", 0),
                    # Review time still owed: its length minus what it has already played.
                    "minutes": max(0, j.get("minutes", 0) - (now - j["running_since"]) / 60 if j.get("running_since") else j.get("minutes", 0))}
                   for j in sorted(self.jobs.values(), key=lambda j: j["started"])]
