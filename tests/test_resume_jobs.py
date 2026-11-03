@@ -92,10 +92,10 @@ class ResumeJobsTest(unittest.TestCase):
 
     def test_qa_options_are_checked_and_stop_does_not_wait_out_the_interval(self):
         with self.assertRaises(HttpError):
-            _qa_options({"interval": 0})
+            _qa_options({"limit": 0})
         with self.assertRaises(HttpError):
             _qa_options({"limit": "ten"})
-        self.assertEqual(_qa_options({}), {"limit": 10, "max_answers": 1, "interval": 60})
+        self.assertEqual(_qa_options({}), {"limit": 10})
 
         app = self.app()
         app.platforms["zhs"].rows = [{"courseName": "网络课", "zhs": {"kind": "shared", "courseId": "c1", "recruitId": "r1"}}]
