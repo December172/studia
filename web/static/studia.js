@@ -885,9 +885,10 @@ function fingerprint(shares, earned) {
 }
 // Under the progress digits: the course's current score where the platform gives one.
 function scoreNote(c, papers, earned) {
-  if (earned) return `当前 <b>${pts(earned.total)}</b> 分`;
+  const full = (n) => `<span class="of">/${n}</span>`;
+  if (earned) return `当前 <b>${pts(earned.total)}</b>${full(Object.values(c.shares || {}).reduce((a, b) => a + b, 0) || 100)} 分`;
   const scores = c.kind === "ai" ? (papers || []).map((x) => Number(x.score)).filter((n) => Number.isFinite(n) && n > 0) : [];
-  return scores.length ? `作业均分 <b>${(scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1)}</b>` : "";
+  return scores.length ? `作业均分 <b>${(scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1)}</b>${full(100)}` : "";
 }
 const loadingEarned = new Set();
 async function loadEarned(p, c) {
