@@ -22,6 +22,7 @@ from urllib.parse import urlencode, urlsplit
 
 from Crypto.Cipher import AES
 
+from MoocMain.log import Logger
 from NewMoocMain.oauth_login import SSO_AUTH_URL, SSO_SOURCE
 from ZHSMain.memory import DatabaseAnswerMemory
 from ai.memory import MoocDatabaseAnswerMemory
@@ -32,7 +33,7 @@ from web.server import MAX_JOBS, MAX_PENDING, NOT_HANDLED, HttpError, Reply, Stu
 COOKIE = "studia_session"
 OAUTH_TTL = 600
 KEY_ENV = "STUDIA_SECRET_KEY"
-logger = logging.getLogger(__name__)
+logger = Logger(__name__).get_log()  # into the daily log file the admin exports
 
 
 def load_key(value):

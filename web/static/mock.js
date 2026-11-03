@@ -151,11 +151,11 @@ export async function request(path, method, body) {
   await new Promise((resolve) => setTimeout(resolve, 200));
   let m;
   if (path === "/api/state") return { platforms, jobs: Object.values(jobs), history };
-  if ((m = path.match(/^\/api\/platforms\/(\w+)\/login$/))) {
+  if ((m = path.match(/^\/api\/platforms\/(\w+)\/login(?:\?.*)?$/))) {
     const p = platforms.find((x) => x.id === m[1]);
     if (method === "POST") {
       polls = 0;
-      return p.login === "qr" ? { qr: "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 29 29" shape-rendering="crispEdges"><rect width="29" height="29" fill="#fff"/><path d="M1 1h7v7H1zM21 1h7v7h-7zM1 21h7v7H1z" fill="none" stroke="#111"/><path d="M3 3h3v3H3zM23 3h3v3h-3zM3 23h3v3H3zM10 2h2v2h-2zM13 5h3v2h-3zM10 10h4v3h-4zM17 11h3v2h-3zM12 16h5v2h-5zM20 18h4v3h-4zM10 22h2v4h-2zM15 24h4v2h-4z" fill="#111"/></svg>') }
+      return p.login === "qr" ? { id: "mock", qr: "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 29 29" shape-rendering="crispEdges"><rect width="29" height="29" fill="#fff"/><path d="M1 1h7v7H1zM21 1h7v7h-7zM1 21h7v7H1z" fill="none" stroke="#111"/><path d="M3 3h3v3H3zM23 3h3v3h-3zM3 23h3v3H3zM10 2h2v2h-2zM13 5h3v2h-3zM10 10h4v3h-4zM17 11h3v2h-3zM12 16h5v2h-5zM20 18h4v3h-4zM10 22h2v4h-2zM15 24h4v2h-4z" fill="#111"/></svg>') }
         : { status: "waiting", message: "已在浏览器打开职教云登录页" };
     }
     polls += 1;
