@@ -31,6 +31,16 @@ class CourseFeaturesTest(unittest.TestCase):
         self.assertEqual(api.score_shares(1000091138, 444872), EARNS)
         self.assertEqual(api._request.call_args.kwargs["data"]["recruitId"], 444872)
 
+    def test_score_earned_gathers_each_share(self):
+        api = ZHSApi()
+        replies = {"loadStuLearnReport/": {"ssd": {"courseScore": "20", "examScore": "9", "bbsScore": "0", "meetScore": "0",
+                                                    "finalScore": "0", "usualScore": "29", "totalScore": "38"}},
+                   "loadStuHabit/": {"learnedHabitScore": 9, "learnedHabitTotalScore": 20},
+                   "loadCourseForum/": {"learnedInteractiveScore": None, "learnedInteractiveTotalScore": 10}}
+        api._request = Mock(side_effect=lambda method, url, **kw: replies[url.rsplit("/stuLearnReportNew/", 1)[1]])
+        self.assertEqual(api.score_earned(1000091138, 444872), {"progress": 20, "habit": 9, "interactive": 0, "test": 9,
+                                                                "meet": 0, "final": 0, "usual": 29, "total": 38})
+
     def test_course_list_carries_features_and_jobs_outside_them_are_refused(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)

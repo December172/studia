@@ -157,6 +157,9 @@ export async function request(path, method, body) {
   if ((m = path.match(/^\/api\/platforms\/(\w+)\/courses$/))) return { courses: courses[m[1]] };
   if (path.match(/^\/api\/platforms\/(\w+)\/tasks/)) return { tasks };
   if ((m = path.match(/^\/api\/platforms\/\w+\/units\?course=(.+)$/))) return { chapters: units[decodeURIComponent(m[1])] || [] };
+  if ((m = path.match(/^\/api\/platforms\/\w+\/score\?course=(.+)$/))) return { earned: {
+    "shared-1": { progress: 20, habit: 9, interactive: 0, test: 9, meet: 0, final: 0, usual: 29, total: 38 },
+    "shared-2": { progress: 28, habit: 0, interactive: 0, test: 20, meet: 0, final: 0, usual: 28, total: 48 } }[decodeURIComponent(m[1])] };
   if (path === "/api/jobs" && method === "POST") return { ok: true, id: fakeJob(body) };
   if (path === "/api/jobs/stop") {
     const job = jobs[body?.id];
