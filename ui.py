@@ -623,7 +623,9 @@ class TerminalUI:
             choices += [(2, "AI 答题", "AI 作答并自动交卷"), (3, "导出题目", "保存题目和已有答案")]
         elif platform == 2:
             choices += [(2, "AI 答题", "AI 作答，可选自动交卷"),
-                        (3, "每日复习", "共享课重看已学视频 30 分钟，攒学习习惯")]
+                        (3, "每日复习", "共享课重看已学视频 30 分钟，攒学习习惯"),
+                        (4, "问答区答题", "取回答数少的提问，AI 作答并发布"),
+                        (5, "问答区提问", "自己写或让 AI 按主题出提问")]
         return self.choice(title, choices, help_text="Esc 返回课程列表 · q 退出")
 
     def choose_platform(self, current):
@@ -1264,6 +1266,107 @@ class TerminalUI:
         mode = self.choice("AI / 执行方式", [(1, "仅生成答案", "不交卷，无平台成绩"),
                                                   (2, "答题并自动交卷", "全部题目通过校验后提交")], default=2)
         return mode == 2
+
+    def qa_settings(self, defaults=None):
+        """问答区参数：题数、题目回答数门槛、发布间隔。Esc 返回。"""
+        saved = defaults if isinstance(defaults, dict) else {}
+        fields = (("limit", "单次题数", 10, 1, 20, "一次最多处理几题"),
+                  ("max_answers", "只答回答数不超过", 1, 0, 5, "0 表示还没人回答的题"),
+                  ("interval", "发布间隔（秒）", 60, 20, 300, "太快容易被判定为刷量"))
+        current = {}
+        for key, _, fallback, low, high, _ in fields:
+            value = saved.get(key)
+            current[key] = int(value) if isinstance(value, int) and low <= value <= high else fallback
+        while True:
+            self.table("问答区答题", ["项目", "当前值"],
+                       [(label, current[key]) for key, label, _, _, _, _ in fields])
+            self.note("从课程问答区的推荐列表取题，AI 作答后逐条发布；已发布过的题会跳过。")
+            self.note("回车保留当前值 · Esc 返回 · q 退出")
+            edited = dict(current)
+            for key, label, _, low, high, hint in fields:
+                while True:
+                    text = self.ask(f"{label}（{low}–{high}，{hint}）", edited[key])
+                    if text.isdigit() and low <= int(text) <= high:
+                        edited[key] = int(text)
+                        break
+                    self.note(f"请输入 {low}–{high} 的整数。", "warning")
+            if self.confirm("按这组设置开始", default=True):
+                return edited
+            current = edited
+
+    def qa_plan(self, courses, options):
+        self.note(f"准备开始：{len(courses)} 门课程 · 本次最多 {options['limit']} 条", "accent")
+        self.note(f"只答回答数 ≤ {options['max_answers']} 的提问 · 每条间隔 {options['interval']} 秒 · "
+                  "发布后记录在本机，重复运行不会重答。")
+        self.note("题干会发送给所选 AI 服务；回答发布后公开在你的账号名下，请自行确认内容。")
+
+    def _qa_number(self, label, value, low, high, hint=""):
+        while True:
+            text = self.ask(f"{label}（{low}–{high}{'，' + hint if hint else ''}）", value)
+            if text.isdigit() and low <= int(text) <= high:
+                return int(text)
+            self.note(f"请输入 {low}–{high} 的整数。", "warning")
+
+    def _qa_text(self, label, value, low, high):
+        while True:
+            text = " ".join(self.ask(f"{label}（{low}–{high} 字）", value or None).split())
+            if low <= len(text) <= high:
+                return text
+            self.note(f"请输入 {low}–{high} 个字。", "warning")
+
+    def qa_ask_settings(self, defaults=None):
+        """问答区提问：自己写，或让 AI 从回答少的提问里挑方向。Esc 返回。"""
+        saved = defaults if isinstance(defaults, dict) else {}
+        source = self.choice("问答区提问 / 内容来源", [
+            (1, "自己输入", "直接写下要发布的提问"),
+            (2, "AI 参考回答少的提问", "从回答数 0–1 的题目里挑方向，发布前再确认"),
+        ], default=2 if saved.get("source") == "ai" else 1)
+        options = {"source": "ai" if source == 2 else "manual",
+                   "text": saved.get("text") if isinstance(saved.get("text"), str) else "",
+                   "count": saved.get("count") if isinstance(saved.get("count"), int) else 1,
+                   "interval": saved.get("interval") if isinstance(saved.get("interval"), int) else 60}
+        while True:
+            rows = [("内容来源", "AI 参考回答少的提问" if options["source"] == "ai" else "自己输入")]
+            if options["source"] == "ai":
+                rows += [("主题来源", "回答数 ≤ 1 的提问，AI 自己挑"), ("条数", options["count"])]
+            else:
+                rows += [("提问内容", options["text"] or "（还没填）"), ("条数", 1)]
+            rows.append(("发布间隔（秒）", options["interval"]))
+            self.table("问答区提问", ["项目", "当前值"], rows)
+            if options["source"] == "ai":
+                self.note("会先读一遍问答区里回答数为 0–1 的提问，再挑方向出题。")
+            self.note("发布前会把最终提问列出来，确认后才发到课程问答区。")
+            self.note("回车保留当前值 · Esc 返回 · q 退出")
+            edited = dict(options)
+            if edited["source"] == "manual":
+                edited["text"] = self._qa_text("提问内容", edited["text"], 10, 120)
+                edited["count"] = 1
+            else:
+                edited["count"] = self._qa_number("条数", edited["count"], 1, 5, "一次生成几条")
+            edited["interval"] = self._qa_number("发布间隔（秒）", edited["interval"], 20, 300,
+                                                 "太快容易被判定为刷量")
+            if self.confirm("按这组设置继续", default=True):
+                return edited
+            options = edited
+
+    def qa_ask_plan(self, options):
+        if options["source"] == "ai":
+            self.note(f"准备开始：先读问答区里回答较少的提问，再让 AI 出 {options['count']} 条新提问，"
+                      "生成后先给你确认。", "accent")
+        else:
+            self.note("准备开始：发布自己输入的提问，发布前会再确认一次。", "accent")
+        self.note("提问发布后公开在你的账号名下，不能编辑；AI 模式会把参考题目发给所选服务。")
+
+    def qa_questions_review(self, texts):
+        """发布前把最终提问摆出来；用户确认后才返回，Esc 视为放弃。"""
+        self.table("待发布的提问", ["编号", "内容"],
+                   [(index, text) for index, text in enumerate(texts, 1)])
+        self.note(f"共 {len(texts)} 条 · 发布后公开在你的账号名下，不能编辑。")
+        try:
+            confirmed = self.confirm("确认发布这些提问", default=False)
+        except Back:
+            return []
+        return texts if confirmed else []
 
     def concurrency_editor(self, current, *, message=''):
         from concurrency_ui import edit_concurrency
