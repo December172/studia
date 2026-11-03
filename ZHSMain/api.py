@@ -860,6 +860,24 @@ class ZHSApi:
             raise ZHSApiError(result.get("status"), message)
         return result
 
+    def signed_in(self):
+        """单点登录还认不认这份 cookie：认的话 passport 直接带 ticket 跳回去。
+
+        业务接口回 401/403 不一定是登录掉了（限流、某门课没权限也会），删登录前先问这里。
+        连不上时抛 PlatformUnavailable，由调用方当作「说不准」。
+        """
+        try:
+            response = self._request(
+                "GET",
+                PASSPORT + "/cas/login",
+                params={"service": HOMEWORK + "/studentExam/gateway/t/v1/student/getStudentHomework"},
+                allow_redirects=False,
+                expect_json=False,
+            )
+        except AuthenticationExpired:
+            return False
+        return response.status_code == 302 and "ticket=" in (response.headers.get("Location") or "")
+
     def shared_exam_sso(self):
         if self._shared_sso_done:
             return
