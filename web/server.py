@@ -206,8 +206,9 @@ class Studia:
 
     def expire(self, platform):
         logger.warning("%s 登录已失效，已删除保存的登录状态", platform.spec["name"])
-        self.store.clear_session(platform.id)
-        self.drop(platform)
+        with self.lock:
+            self.drop(platform)
+            self.store.clear_session(platform.id)
         return HttpError(401, "%s 登录已过期，请重新登录" % platform.spec["name"])
 
     # ------------------------------------------------------------ login
@@ -301,8 +302,9 @@ class Studia:
 
     def logout(self, pid):
         platform = self.platform(pid)
-        self.store.clear_session(pid)
-        self.drop(platform)
+        with self.lock:  # under the lock so save_sessions() cannot write the old cookies back in between
+            self.drop(platform)
+            self.store.clear_session(pid)
         return {}
 
     # ------------------------------------------------------------ courses
@@ -511,6 +513,7 @@ class Studia:
                 # The job changed this course's progress and papers; read them afresh next time.
                 platform.cache.pop(("units", job["course"]), None)
                 platform.cache.pop(("tasks", job["course"]), None)
+                self.save_sessions(platform)
             with self.lock:
                 if self.closing and state == "stopped":
                     summary = INTERRUPTED
@@ -558,8 +561,23 @@ class Studia:
         except OSError:
             logger.warning("任务记录保存失败", exc_info=True)
 
+    def save_sessions(self, *platforms):
+        """Write each live client's current cookies back to the store. The platform renews them while
+        they are in use, and the copy saved at sign-in may no longer work after a restart."""
+        for platform in platforms or self.platforms.values():
+            with self.lock:
+                client = platform.client
+                if client is None:
+                    continue
+                try:
+                    if client.access_token:
+                        self.store.save_session(platform.id, client)
+                except Exception:  # a cookie jar changing under us, a full disk: keep the older copy
+                    logger.warning("保存%s登录状态失败", platform.spec["name"], exc_info=True)
+
     def shutdown(self):
         """The service is stopping (usually an update): keep the running jobs on disk for resume(), then stop them."""
+        self.save_sessions()
         with self.lock:
             self._save(stopped_at=time.time())
             self.closing = True
