@@ -316,21 +316,24 @@ def _clean_question(text):
     return _strip_lead_ins(text)
 
 
-def write_questions(ai, reference, count, *, course_name=""):
+def write_questions(ai, reference, count, *, course_name="", on_progress=None):
     """参考回答较少的提问，让模型写 count 条新提问。
 
     reference 是问答区里回答数较少的提问正文；为空时退回到课程主题。
-    与参考题目重复（或模型自己重复）的跳过。
+    与参考题目重复（或模型自己重复）的跳过。on_progress(序号, 总数) 在每次请求前调用。
     """
     reference = [str(text).strip()[:MAX_REFERENCE_CHARS]
                  for text in (reference or []) if str(text).strip()][:MAX_REFERENCES]
     bullets = "\n".join("- " + text for text in reference)
+    total = max(1, int(count))
     texts = []
-    for index in range(1, max(1, int(count)) + 1):
+    for index in range(1, total + 1):
         if reference:
             prompt = QUESTION_FROM_REFERENCE % (course_name or "这门课", bullets, index)
         else:
             prompt = QUESTION_PROMPT % (course_name or "这门课", "课程的核心概念", index)
+        if on_progress is not None:
+            on_progress(index, total)
         answer = ai.answer({"type": "问答题", "title": prompt}).get("answer")
         text = _clean_question(answer)
         if not MIN_QUESTION <= len(text) <= MAX_QUESTION:

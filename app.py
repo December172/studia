@@ -475,6 +475,7 @@ class Application:
             name = row.get("courseName") or "当前课程"
             if not course_id or not recruit_id:
                 self.view.log(f"{name}：没有可作答的问答区，已跳过。", "warning")
+                logger.warning("%s：没有可作答的问答区，已跳过", name)
                 continue
             before = dict(totals)
 
@@ -491,10 +492,14 @@ class Application:
                     run(qa, event)
             except (CaptchaRequired, AuthenticationExpired, PlatformUnavailable,
                     ZHSApiError) as exc:
+                # 界面日志随动态区域消失，落一份到文件，事后才查得到原因。
                 self.view.log(f"{name}：{exc}；其余课程未执行。", "warning")
+                logger.warning("%s：%s；其余课程未执行", name, exc)
                 break
             self.view.log(f"{name}：{label} {totals['ok'] - before['ok']} 条，"
                           f"失败 {totals['failed'] - before['failed']} 条。")
+            logger.info("%s：%s %d 条，失败 %d 条", name, label,
+                        totals["ok"] - before["ok"], totals["failed"] - before["failed"])
         return totals
 
     def execute_zhs_qa(self, client, courses, config, options):
@@ -522,6 +527,9 @@ class Application:
 
     def generate_zhs_questions(self, client, courses, config, options):
         """从回答较少的提问里挑方向，让 AI 写新提问；要读一次问答区列表。"""
+        from dataclasses import replace
+
+        from ai.client import AIClient
         from ZHSMain.qa import REFERENCE_ANSWERS, QaBridge, write_questions
 
         count = int(options.get("count") or 1)
@@ -530,8 +538,12 @@ class Application:
         course_id = course.get("courseId")
         recruit_id = course.get("recruitId") or course.get("classId")
         name = row.get("courseName") or "这门课"
-        ai = self.verify_ai(config)
+        # 推理型模型出题常要一两分钟；默认 120 秒会把正常的一次生成判成超时。
+        # 接口形态已知时不再额外做连接测试——那是又一次慢请求。
+        ai = AIClient(replace(config, timeout=max(int(config.timeout or 0), 300)))
         try:
+            if config.api_format == "auto":
+                self.verify_ai(config, client=ai)
             reference = []
             if course_id and recruit_id:
                 with QaBridge(client.access_token, course_id=course_id,
@@ -542,7 +554,9 @@ class Application:
                               else "问答区还没有回答较少的提问，按课程主题出题。")
             else:
                 self.view.log(f"{name}：没有可读取的问答区，按课程主题出题。", "warning")
-            return write_questions(ai, reference, count, course_name=name)
+            return write_questions(
+                ai, reference, count, course_name=name,
+                on_progress=lambda index, total: self.view.log(f"正在生成第 {index}/{total} 条提问…"))
         finally:
             ai.session.close()
 
