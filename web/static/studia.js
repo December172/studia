@@ -47,6 +47,7 @@ const ICON = {
   play: '<svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><path d="M3 1.6v8.8L10.4 6z"/></svg>',
   repeat: svg('<path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5v3h-3"/>', 14),
   pen: svg('<path d="M10.5 2.5 13.5 5.5 6 13H3v-3z"/>', 14),
+  chat: svg('<path d="M2.5 3.5h11v7.5H7l-3 2.5V11H2.5z"/>', 14),
   tick: '<svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2.5 6.3 2.4 2.4L9.6 3.8"/></svg>',
   done: '<svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="var(--celadon)"/><path d="m4.8 8.2 2 2 4.2-4.4" fill="none" stroke="var(--card)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   error: '<svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="var(--seal)"/><path d="m5.5 5.5 5 5m0-5-5 5" stroke="var(--card)" stroke-width="1.8" stroke-linecap="round"/></svg>',
@@ -87,8 +88,10 @@ const state = {
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
 const runOf = (id) => (state.runs[id] = state.runs[id] || freshRun());
 // Mirrors the server's rules (web/server.py _check_conflicts) so buttons say why before you click.
-const GROUP = { study: "learn", review: "learn", answer: "answer" };
-const jobType = (j) => j.kind || { 自动学习: "study", 每日复习: "review", "AI 答题": "answer" }[j.title];
+const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "answer" };
+const jobType = (j) => j.kind || { 自动学习: "study", 每日复习: "review", "AI 答题": "answer", 问答区答题: "qa" }[j.title];
+// Only learning jobs fill a course's unit grid.
+const learns = (j) => GROUP[jobType(j)] === "learn";
 function blocker(pid, cid, type) {
   for (const o of state.jobs) {
     if (GROUP[jobType(o)] !== GROUP[type] || o.platform !== pid) continue;
@@ -299,7 +302,7 @@ function setPage(html) {
   if (on && (on.offsetLeft < nav.scrollLeft || on.offsetLeft + on.offsetWidth > nav.scrollLeft + nav.clientWidth)) nav.scrollLeft = on.offsetLeft - 16;
 }
 
-const LABEL = { study: "自动学习", review: "每日复习", answer: "AI 答题" };
+const LABEL = { study: "自动学习", review: "每日复习", answer: "AI 答题", qa: "问答区答题" };
 const TYPE_OF = Object.fromEntries(Object.entries(LABEL).map(([k, v]) => [v, k]));
 const STATE_WORD = { done: "完成", error: "失败", waiting: "等你操作", stopped: "已停止", running: "进行中", queued: "排队中" };
 
@@ -821,11 +824,13 @@ function coverHtml(p, c) {
 }
 
 function studyActions(p, c) {
+  const qa = p.features.qa ? [["qa", ICON.chat, "问答区", "AI 回答回复少的提问，一次 10 条，每条隔 1 分钟"]] : [];
   if (p.id === "zhs" && c.kind === "shared") return [
     ["study", ICON.play, "自动学习", "1.5 倍速看完剩下的视频，弹题自动答"],
     ["review", ICON.repeat, "每日复习", "重看 30 分钟攒习惯分，每天一次"],
+    ...qa,
   ];
-  if (p.id === "zhs") return [["study", ICON.play, "自动学习", "完成文档、课件和视频"]];
+  if (p.id === "zhs") return [["study", ICON.play, "自动学习", "完成文档、课件和视频"], ...qa];
   if (p.id === "mooc") return [["study", ICON.play, "自动学习", "学完课件和视频，自动讨论和评价"]];
   return [["study", ICON.play, "自动学习", "学完资源库里的资源"]];
 }
@@ -985,7 +990,7 @@ function recentCells(k) {
 }
 
 const player = $(".player"), sheet = $(".sheet");
-const LIVE_WORD = { 自动学习: "正在学习", 每日复习: "正在复习", "AI 答题": "正在答题" };
+const LIVE_WORD = { 自动学习: "正在学习", 每日复习: "正在复习", "AI 答题": "正在答题", 问答区答题: "正在回答" };
 const recentlyDone = () => (!state.jobs.length && state.lastDone && Date.now() - state.lastDone.shownAt < 60000 ? state.lastDone : null);
 
 function renderPlayer() {
@@ -999,7 +1004,7 @@ function renderPlayer() {
     player.style.setProperty("--c", inkOf({ id: job.course }));
     player.classList.remove("ended");
     patch(player, `
-      <div class="np"><span class="art">${job.title === "AI 答题" ? ICON.pen : job.title === "每日复习" ? ICON.repeat : ICON.play}</span>
+      <div class="np"><span class="art">${{ "AI 答题": ICON.pen, 每日复习: ICON.repeat, 问答区答题: ICON.chat }[job.title] || ICON.play}</span>
         <span class="what"><small><span class="live">${queued ? "排队中" : LIVE_WORD[job.title] || "进行中"}</span>${esc(job.course_name)}</small>
         <b>${esc(queued ? "排队中" : run.unit?.name || run.detail || "准备中…")}</b></span></div>
       <div class="scrub"><span class="track ${pct == null ? "unknown" : ""}"><i style="width:${pct ?? 0}%"></i></span><span class="t">${esc(label || clock(elapsed(job)))}</span></div>
@@ -1029,7 +1034,7 @@ function renderFocus() {
   const { pct, label } = progressOf(run);
   const k = key(job.platform, job.course);
   body.style.setProperty("--c", inkOf({ id: job.course }));
-  const units = job.title !== "AI 答题" && unitsOf(k), t = units && tally(units);
+  const units = learns(job) && unitsOf(k), t = units && tally(units);
   const grid = units
     ? `<div class="section"><h3>整门课</h3><span class="aside mono">${t.done}/${t.all} · ${Math.round((t.done / (t.all || 1)) * 100)}%</span></div>${gridHtml(k)}` : "";
   const spot = live && spotOf(job, run);
@@ -1098,10 +1103,11 @@ function pushLine(run, text, level = "", done = false) {
 }
 
 function finishUnits(job) {
+  if (!learns(job)) return;  // an answering job ending must not unmark the unit a study job is on
   const k = key(job.platform, job.course);
   for (const ch of unitsOf(k) || []) for (const u of ch.units) if (u.state === "running") u.state = job.state === "waiting" ? "waiting" : "queued";
   // The platform is the source of truth once the job is over; a waiting job keeps its marks until the user acts.
-  if (job.state !== "waiting" && jobType(job) !== "answer") loadUnits(job.platform, job.course, true);
+  if (job.state !== "waiting" && learns(job)) loadUnits(job.platform, job.course, true);
 }
 
 function handleEvent(event) {
@@ -1113,7 +1119,7 @@ function handleEvent(event) {
         state.jobs.push(event);
         runOf(event.id);
         state.lastDone = null;
-        if (jobType(event) !== "answer") loadUnits(event.platform, event.course);
+        if (learns(event)) loadUnits(event.platform, event.course);
       }
     } else {
       if (at >= 0) state.jobs.splice(at, 1);
@@ -1290,7 +1296,7 @@ async function refreshState(catchUp = false) {
     for (const job of live) {
       // The server's tally is the truth for a page opened mid-run or one that missed events while away.
       state.runs[job.id] = Object.assign(freshRun(), job.progress || {}, { lines: job.lines || [] });
-      if (jobType(job) !== "answer" && (catchUp || !state.jobs.some((j) => j.id === job.id))) loadUnits(job.platform, job.course, catchUp);
+      if (learns(job) && (catchUp || !state.jobs.some((j) => j.id === job.id))) loadUnits(job.platform, job.course, catchUp);
     }
     // Jobs that ended while we were away: drop them and refresh what they changed.
     for (const gone of state.jobs.filter((j) => !live.some((x) => x.id === j.id))) {
