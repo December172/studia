@@ -198,8 +198,8 @@ function switchPlatform(pid, navigate = true) {
 
 function jobPill() {
   if (state.jobs.length) return state.jobs.every((j) => j.state === "queued") ? '<span class="live">排队中</span>' : `<span class="live">${state.jobs.length} 个进行中</span>`;
-  if (state.history[0]?.state === "waiting") return '<span class="live waiting">等你操作</span>';
-  return state.history.length ? `<span class="count">${state.history.length}</span>` : "";
+  // Only what is running gets a count; past runs are not a number to watch.
+  return state.history[0]?.state === "waiting" ? '<span class="live waiting">等你操作</span>' : "";
 }
 
 function renderSidebar() {
