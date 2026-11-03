@@ -736,6 +736,7 @@ function fixButtons(j, i) {
   if (j.state === "waiting") {
     if (/登录/.test(j.summary)) return `<button class="btn small primary" data-go="#/login/${j.platform}">重新登录</button>`;
     if (/时长/.test(j.summary)) return "";
+    if (type === "qa") return `<button class="btn small" data-retry="${i}">重试</button>`;
     if (type === "answer") return `<button class="btn small" data-go="#/course/${j.platform}/${j.course}/answer">验证后重新作答</button>`;
     return `<button class="btn small" data-retry="${i}">验证后重试</button>`;
   }
