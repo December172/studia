@@ -852,6 +852,7 @@ def _track(progress, event):
         overall["total"] += event.get("total") or 0
     elif kind == "result" and overall:
         overall["done"] += 1
+        progress.pop("sub", None)
     elif kind in ("resources", "questions"):
         unit = event.get("unit")
         progress["sub"] = {"name": name, "done": event.get("completed") or 0, "total": event.get("total") or 0,
@@ -960,6 +961,8 @@ class LocalAccess:
 def make_handler(access):
     class Handler(BaseHTTPRequestHandler):
         server_version = "Studia"
+        # Keep-alive: behind a proxy every request otherwise pays a fresh TCP + TLS handshake.
+        protocol_version = "HTTP/1.1"
         timeout = 30  # a stalled client cannot pin a worker thread forever
 
         def log_message(self, *args):
@@ -969,11 +972,12 @@ def make_handler(access):
             data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", content_type)
+            headers = dict(access.headers(), **(extra or {}))
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", headers.pop("Cache-Control", "no-store"))
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
-            for key, value in dict(access.headers(), **(extra or {})).items():
+            for key, value in headers.items():
                 self.send_header(key, value)
             self.end_headers()
             self.wfile.write(data)
@@ -987,6 +991,7 @@ def make_handler(access):
         def _body(self):
             length = int(self.headers.get("Content-Length") or 0)
             if length > 64 * 1024:
+                self.close_connection = True  # the unread body would be parsed as the next request
                 raise HttpError(413, "请求过大")
             if not length:
                 return {}
@@ -1002,6 +1007,15 @@ def make_handler(access):
             target = (STATIC / (path.lstrip("/") or "index.html")).resolve()
             if STATIC not in target.parents or not target.is_file() or target.name == "mock.js":
                 raise HttpError(404, "not found")
+            # Revalidate instead of downloading the script and styles again on every visit.
+            stat = target.stat()
+            etag = '"%x-%x"' % (stat.st_mtime_ns, stat.st_size)
+            if self.headers.get("If-None-Match") == etag:
+                self.send_response(304)
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                return
             content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
             if content_type.startswith("text/") or target.suffix == ".js":
                 content_type = ("text/javascript" if target.suffix == ".js" else content_type) + "; charset=utf-8"
@@ -1009,6 +1023,7 @@ def make_handler(access):
                 "Content-Security-Policy": "default-src 'self'; script-src 'self'; "
                                            "img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; "
                                            "connect-src 'self'; frame-ancestors 'none'",
+                "ETag": etag, "Cache-Control": "no-cache",
             })
 
         def _events(self, app):
@@ -1018,6 +1033,7 @@ def make_handler(access):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "close")  # no length: the stream ends when the socket does
                 self.end_headers()
                 while True:
                     try:
