@@ -76,15 +76,29 @@ class WebQaTest(unittest.TestCase):
                 _ask_texts(bad)
         self.assertEqual(_ask_texts({"texts": ["同一个提问写了两遍", "同一个提问写了两遍"]}), ["同一个提问写了两遍"])
 
-    def test_draft_writes_questions_from_the_quiet_threads(self):
+    def test_draft_writes_one_question_at_a_time_from_the_quiet_threads(self):
         ai = Mock(answer=Mock(return_value={"answer": "边缘计算会不会取代云计算？"}))
         self.app._ai = Mock(return_value=ai)
-        with patch("web.server.QaBridge", return_value=FakeBridge()):
-            drafted = self.app.qa_draft("zhs", {"course": "shared-1000091138", "count": 2})
-        self.assertEqual(drafted["questions"], ["边缘计算会不会取代云计算？"])  # the repeat is dropped
-        self.assertIn("没人回答的提问", ai.answer.call_args.args[0]["title"])
-        self.assertNotIn("回答很多的提问", ai.answer.call_args.args[0]["title"])
+        with patch("web.server.QaBridge", return_value=FakeBridge()) as bridge:
+            first = self.app.qa_draft("zhs", {"course": "shared-1000091138"})
+            again = self.app.qa_draft("zhs", {"course": "shared-1000091138", "have": first["questions"]})
+        self.assertEqual(first["questions"], ["边缘计算会不会取代云计算？"])
+        self.assertEqual(again["questions"], [])  # the one the page already has is not repeated
+        prompt = ai.answer.call_args.args[0]["title"]
+        self.assertIn("没人回答的提问", prompt)
+        self.assertIn("边缘计算会不会取代云计算？", prompt)  # shown to the model so it writes something else
+        self.assertNotIn("回答很多的提问", prompt)
+        self.assertEqual(bridge.call_count, 1)  # the board is read once, not per question
         self.assertFalse(JOBS)
+
+    def test_drafting_waits_for_slow_models_without_testing_first(self):
+        config = Mock(timeout=120, api_format="chat_completions")
+        self.app.store.ai_config = Mock(return_value=config)
+        with patch("web.server.replace", side_effect=lambda c, **kw: kw) as copied, \
+                patch("web.server.AIClient") as client:
+            Studia._ai(self.app, "", timeout=300)
+        self.assertEqual(copied.call_args.kwargs["timeout"], 300)
+        client.return_value.check_connection.assert_not_called()
 
 
 if __name__ == "__main__":
