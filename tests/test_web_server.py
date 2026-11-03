@@ -124,6 +124,16 @@ class WebServerTest(unittest.TestCase):
         self.assertEqual((history[0]["platform"], history[0]["course_name"]), ("zhs", "网络课"))
         self.assertEqual(history[0]["lines"][0]["text"], "第一节 · 完成")
 
+    def test_live_cookies_are_saved_back_and_logout_stays_out(self):
+        platform = self.app.platforms["zhs"]
+        self.app.store.save_session("zhs", Mock(access_token="from-sign-in"))
+        platform.client = Mock(access_token="renewed-while-running")
+        self.app.shutdown()
+        self.assertEqual(self.app.store.session("zhs")["access_token"], "renewed-while-running")
+        self.app.logout("zhs")
+        self.app.save_sessions()
+        self.assertIsNone(self.app.store.session("zhs"))
+
     def test_job_progress_survives_a_page_opened_mid_run(self):
         job = {"id": "j1", "lines": [], "progress": {}}
         self.app.jobs["j1"] = job
