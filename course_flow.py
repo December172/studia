@@ -144,9 +144,7 @@ class CourseWorkspace:
             if options["source"] == "ai":
                 config = self.app.ai_configuration()
                 with self.view.activity("生成提问"):
-                    texts = self.app.generate_zhs_questions(
-                        config, options["topic"], options["count"],
-                        courses[0].get("courseName", "") if courses else "")
+                    texts = self.app.generate_zhs_questions(self.client, courses, config, options)
             else:
                 texts = [options["text"]]
         except (Cancelled, EOFError, Back):
@@ -158,7 +156,7 @@ class CourseWorkspace:
             self.view.log(f"生成提问失败：{exc}", "error")
             return []
         if not texts:
-            self.view.log("没有生成可发布的提问，换个主题再试。", "warning")
+            self.view.log("没有生成可发布的提问，稍后再试或自己写一条。", "warning")
             return []
         return self.view.qa_questions_review(texts)
 

@@ -260,13 +260,24 @@ def answer_questions(qa, ai, *, max_answers=1, limit=10, interval=60, state_path
 
 
 # 让模型的「问答题」能力产出提问正文：它只需把问题写成答案，答卷格式不变。
-QUESTION_PROMPT = (
-    "这门课是「%s」。请围绕「%s」写第 %d 个用于课程问答区的问题。\n"
+QUESTION_RULES = (
     "只输出问题本身：一到两句话，具体到可以讨论；不要称呼老师或同学，"
     "不要「请问」「想请教」「想问一下」「大家」这类客套和铺垫，"
     "不要自我介绍或背景陈述，不要序号和 Markdown，不要自己作答。"
 )
+QUESTION_PROMPT = (
+    "这门课是「%s」。请围绕「%s」写第 %d 个用于课程问答区的问题。\n" + QUESTION_RULES
+)
+# 出题的选题池：问答区里回答数最少的那些提问，让模型挑一个还没问透的方向。
+QUESTION_FROM_REFERENCE = (
+    "这门课是「%s」。课程问答区里回答较少的提问有：\n%s\n"
+    "请从中挑一个还没问透的方向，写第 %d 个新的提问；"
+    "不要重复上面任何一条，也不要换个说法问同一件事。\n" + QUESTION_RULES
+)
 MIN_QUESTION, MAX_QUESTION = 8, 200
+REFERENCE_ANSWERS = 1      # 参考题目只取回答数为 0–1 的
+MAX_REFERENCES = 8         # 塞进提示词的参考题目数量上限
+MAX_REFERENCE_CHARS = 70   # 每条参考题目截到这个长度
 
 # 模型仍可能开头带称呼或客套，发布前再剥一层。长前缀先匹配；True 直接去掉，
 # False 要求后面紧跟标点——否则「老师布置的作业」会被削成「布置的作业」。
@@ -304,18 +315,28 @@ def _clean_question(text):
     return _strip_lead_ins(text)
 
 
-def write_questions(ai, topic, count, *, course_name=""):
-    """让模型写 count 条互不重复的提问；不合格的跳过，其余照常返回。"""
+def write_questions(ai, reference, count, *, course_name=""):
+    """参考回答较少的提问，让模型写 count 条新提问。
+
+    reference 是问答区里回答数较少的提问正文；为空时退回到课程主题。
+    与参考题目重复（或模型自己重复）的跳过。
+    """
+    reference = [str(text).strip()[:MAX_REFERENCE_CHARS]
+                 for text in (reference or []) if str(text).strip()][:MAX_REFERENCES]
+    bullets = "\n".join("- " + text for text in reference)
     texts = []
     for index in range(1, max(1, int(count)) + 1):
-        prompt = QUESTION_PROMPT % (course_name or "这门课", topic, index)
+        if reference:
+            prompt = QUESTION_FROM_REFERENCE % (course_name or "这门课", bullets, index)
+        else:
+            prompt = QUESTION_PROMPT % (course_name or "这门课", "课程的核心概念", index)
         answer = ai.answer({"type": "问答题", "title": prompt}).get("answer")
         text = _clean_question(answer)
         if not MIN_QUESTION <= len(text) <= MAX_QUESTION:
             logger.warning("AI 给出的第 %d 条提问不可用：%s", index, text[:40])
             continue
-        if text in texts:
-            logger.warning("AI 重复了同一条提问，已跳过：%s", text[:40])
+        if text in texts or text in reference:
+            logger.warning("AI 重复了已有的提问，已跳过：%s", text[:40])
             continue
         texts.append(text)
     return texts

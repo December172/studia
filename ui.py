@@ -1315,25 +1315,26 @@ class TerminalUI:
             self.note(f"请输入 {low}–{high} 个字。", "warning")
 
     def qa_ask_settings(self, defaults=None):
-        """问答区提问：内容来源、正文或主题、条数与间隔。Esc 返回。"""
+        """问答区提问：自己写，或让 AI 从回答少的提问里挑方向。Esc 返回。"""
         saved = defaults if isinstance(defaults, dict) else {}
         source = self.choice("问答区提问 / 内容来源", [
             (1, "自己输入", "直接写下要发布的提问"),
-            (2, "AI 按主题生成", "给出主题，模型写提问，发布前再确认"),
+            (2, "AI 参考回答少的提问", "从回答数 0–1 的题目里挑方向，发布前再确认"),
         ], default=2 if saved.get("source") == "ai" else 1)
         options = {"source": "ai" if source == 2 else "manual",
                    "text": saved.get("text") if isinstance(saved.get("text"), str) else "",
-                   "topic": saved.get("topic") if isinstance(saved.get("topic"), str) else "",
                    "count": saved.get("count") if isinstance(saved.get("count"), int) else 1,
                    "interval": saved.get("interval") if isinstance(saved.get("interval"), int) else 60}
         while True:
-            self.table("问答区提问", ["项目", "当前值"], [
-                ("内容来源", "AI 按主题生成" if options["source"] == "ai" else "自己输入"),
-                ("主题" if options["source"] == "ai" else "提问内容",
-                 options["topic"] or options["text"] or "（还没填）"),
-                ("条数", options["count"] if options["source"] == "ai" else 1),
-                ("发布间隔（秒）", options["interval"]),
-            ])
+            rows = [("内容来源", "AI 参考回答少的提问" if options["source"] == "ai" else "自己输入")]
+            if options["source"] == "ai":
+                rows += [("主题来源", "回答数 ≤ 1 的提问，AI 自己挑"), ("条数", options["count"])]
+            else:
+                rows += [("提问内容", options["text"] or "（还没填）"), ("条数", 1)]
+            rows.append(("发布间隔（秒）", options["interval"]))
+            self.table("问答区提问", ["项目", "当前值"], rows)
+            if options["source"] == "ai":
+                self.note("会先读一遍问答区里回答数为 0–1 的提问，再挑方向出题。")
             self.note("发布前会把最终提问列出来，确认后才发到课程问答区。")
             self.note("回车保留当前值 · Esc 返回 · q 退出")
             edited = dict(options)
@@ -1341,7 +1342,6 @@ class TerminalUI:
                 edited["text"] = self._qa_text("提问内容", edited["text"], 10, 120)
                 edited["count"] = 1
             else:
-                edited["topic"] = self._qa_text("主题 / 关键词", edited["topic"], 2, 40)
                 edited["count"] = self._qa_number("条数", edited["count"], 1, 5, "一次生成几条")
             edited["interval"] = self._qa_number("发布间隔（秒）", edited["interval"], 20, 300,
                                                  "太快容易被判定为刷量")
@@ -1351,11 +1351,11 @@ class TerminalUI:
 
     def qa_ask_plan(self, options):
         if options["source"] == "ai":
-            self.note(f"准备开始：AI 按主题「{options['topic']}」生成 {options['count']} 条提问，"
+            self.note(f"准备开始：先读问答区里回答较少的提问，再让 AI 出 {options['count']} 条新提问，"
                       "生成后先给你确认。", "accent")
         else:
             self.note("准备开始：发布自己输入的提问，发布前会再确认一次。", "accent")
-        self.note("提问发布后公开在你的账号名下，不能编辑；AI 模式会把主题发给所选服务。")
+        self.note("提问发布后公开在你的账号名下，不能编辑；AI 模式会把参考题目发给所选服务。")
 
     def qa_questions_review(self, texts):
         """发布前把最终提问摆出来；用户确认后才返回，Esc 视为放弃。"""

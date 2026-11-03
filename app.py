@@ -520,13 +520,29 @@ class Application:
         return {"answered": totals["ok"], "failed": totals["failed"],
                 "skipped": totals["skipped"]}
 
-    def generate_zhs_questions(self, config, topic, count, course_name=""):
-        """AI 按主题写提问正文；只调用模型，不打开浏览器。"""
-        from ZHSMain.qa import write_questions
+    def generate_zhs_questions(self, client, courses, config, options):
+        """从回答较少的提问里挑方向，让 AI 写新提问；要读一次问答区列表。"""
+        from ZHSMain.qa import REFERENCE_ANSWERS, QaBridge, write_questions
 
+        count = int(options.get("count") or 1)
+        row = (courses or [{}])[0] or {}
+        course = row.get("zhs") or {}
+        course_id = course.get("courseId")
+        recruit_id = course.get("recruitId") or course.get("classId")
+        name = row.get("courseName") or "这门课"
         ai = self.verify_ai(config)
         try:
-            return write_questions(ai, topic, count, course_name=course_name)
+            reference = []
+            if course_id and recruit_id:
+                with QaBridge(client.access_token, course_id=course_id,
+                              recruit_id=recruit_id) as qa:
+                    reference = [item["content"] for item in
+                                 qa.questions(max_answers=REFERENCE_ANSWERS, limit=30)]
+                self.view.log(f"参考 {len(reference)} 条回答较少的提问出题。" if reference
+                              else "问答区还没有回答较少的提问，按课程主题出题。")
+            else:
+                self.view.log(f"{name}：没有可读取的问答区，按课程主题出题。", "warning")
+            return write_questions(ai, reference, count, course_name=name)
         finally:
             ai.session.close()
 
