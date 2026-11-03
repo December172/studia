@@ -103,9 +103,13 @@ class CourseWorkspace:
                     self.app.remember(lambda: self.store.set("qa", options))
                     self.view.qa_plan(courses, options)
                     config = self.app.ai_configuration()
-                    result = self.execute(
-                        lambda: self.app.execute_zhs_qa(self.client, courses, config, options),
-                        "问答区答题")
+
+                    def answer():
+                        # 统计只进汇总页；execute() 的返回值是文件路径，不能直接回传字典。
+                        self.app.execute_zhs_qa(self.client, courses, config, options)
+                        return []
+
+                    result = self.execute(answer, "问答区答题")
                 else:
                     result = self.tasks(courses, mode, task_state.setdefault(mode, {}))
                 if result == 2:
