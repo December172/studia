@@ -1282,10 +1282,11 @@ class TerminalUI:
                            message="\n".join(scores), help_text="Esc 返回 · q 退出")
 
     def qa_size(self, title, sizes, saved):
-        """只选条数；上次选的当默认。"""
-        default = saved if saved in sizes else sizes[1]
-        return self.choice(title, [(n, f"{n} 条", "") for n in sizes], default=default,
-                           help_text="Esc 返回 · q 退出")
+        """只选条数；上次选的当默认。编号按 1、2、3 排，不拿条数当编号，免得一行出现两个同样的数。"""
+        default = sizes.index(saved) + 1 if saved in sizes else 2
+        picked = self.choice(title, [(i, f"{n} 条", "") for i, n in enumerate(sizes, 1)], default=default,
+                             help_text="Esc 返回 · q 退出")
+        return sizes[picked - 1]
 
     def qa_drafts(self, texts):
         """AI 出好的提问，发之前删改。返回要发的列表；r 换一批返回 None；Esc 或删光返回 []。"""
