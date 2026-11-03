@@ -165,26 +165,35 @@ class CourseWorkspace:
         return found
 
     def prepare_questions(self, courses, options):
-        """按设置准备提问正文并请用户确认；取消或失败都返回空列表，停在课程菜单。"""
-        try:
-            if options["source"] == "ai":
-                config = self.app.ai_configuration()
-                with self.view.activity("生成提问"):
-                    texts = self.app.generate_zhs_questions(self.client, courses, config, options)
-            else:
-                texts = [options["text"]]
-        except (Cancelled, EOFError, Back):
-            raise
-        except KeyboardInterrupt:  # 生成阶段还能中断，不必退出整个工具
-            self.view.log("已取消生成提问。", "warning")
-            return []
-        except Exception as exc:  # AI 或格式问题：说清楚，别把用户留在坏状态
-            self.view.log(f"生成提问失败：{exc}", "error")
-            return []
+        """按设置准备提问正文并请用户确认。
+
+        失败要说清原因并允许重试：写日志的那一行回到课程菜单就看不见了。
+        """
+        while True:
+            try:
+                if options["source"] == "ai":
+                    config = self.app.ai_configuration()
+                    with self.view.activity("生成提问"):
+                        texts = self.app.generate_zhs_questions(self.client, courses, config, options)
+                else:
+                    texts = [options["text"]]
+                break
+            except (Cancelled, EOFError, Back):
+                raise
+            except KeyboardInterrupt:  # 生成阶段还能中断，不必退出整个工具
+                self.view.note("已取消生成提问。", "warning")
+                return []
+            except Exception as exc:  # AI 或格式问题：说清楚，别把用户留在坏状态
+                self.view.note(f"生成提问失败：{exc}", "error")
+                if not self.view.confirm("重试生成", default=True):
+                    return []
         if not texts:
-            self.view.log("没有生成可发布的提问，稍后再试或自己写一条。", "warning")
+            self.view.note("没有生成可发布的提问，稍后再试或自己写一条。", "warning")
             return []
-        return self.view.qa_questions_review(texts)
+        reviewed = self.view.qa_questions_review(texts)
+        if not reviewed:  # 回车即发布；这里只处理「n」或 Esc
+            self.view.note("已取消：没有发布任何提问。", "warning")
+        return reviewed
 
     def catalog_for(self, courses):
         if self.platform == 2:
