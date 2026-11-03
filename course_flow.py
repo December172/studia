@@ -78,9 +78,10 @@ class CourseWorkspace:
 
     def course_loop(self, courses):
         task_state = {}
+        offers = self.zhs_offers(courses) if self.platform == 2 else None
         while True:
             try:
-                mode = self.view.course_menu(courses, self.platform)
+                mode = self.view.course_menu(courses, self.platform, offers)
             except Back:
                 return
             try:
@@ -92,35 +93,38 @@ class CourseWorkspace:
                                 "平台限制同一账号同时只能看一个视频。") if self.platform == 2 else "")
                     result = self.execute(lambda: self.app.study(self.platform, self.client, courses))
                 elif mode == 3 and self.platform == 2:
+                    targets = offers["review"]  # 只复习考核里有学习习惯分的课
                     self.view.review_study(
-                        courses, title="每日复习",
+                        targets, title="每日复习",
                         notice=("共享课从已看完的视频里按日期轮换，1 倍速实时重看 %d 分钟；"
                                 "智慧课程会跳过。每天运行一次。" % REVIEW_MINUTES))
                     result = self.execute(lambda: self.app.study(
-                        self.platform, self.client, courses, review_minutes=REVIEW_MINUTES))
+                        self.platform, self.client, targets, review_minutes=REVIEW_MINUTES))
                 elif mode == 4 and self.platform == 2:
+                    targets = offers["qa"]  # 只去考核里有问答互动分的课
                     options = self.view.qa_settings(self.store.get("qa", {}))
                     self.app.remember(lambda: self.store.set("qa", options))
-                    self.view.qa_plan(courses, options)
+                    self.view.qa_plan(targets, options)
                     config = self.app.ai_configuration()
 
                     def answer():
                         # 统计只进汇总页；execute() 的返回值是文件路径，不能直接回传字典。
-                        self.app.execute_zhs_qa(self.client, courses, config, options)
+                        self.app.execute_zhs_qa(self.client, targets, config, options)
                         return []
 
                     result = self.execute(answer, "问答区答题")
                 elif mode == 5 and self.platform == 2:
+                    targets = offers["qa"]
                     options = self.view.qa_ask_settings(self.store.get("qa_ask", {}))
                     self.app.remember(lambda: self.store.set("qa_ask", options))
                     self.view.qa_ask_plan(options)
-                    texts = self.prepare_questions(courses, options)
+                    texts = self.prepare_questions(targets, options)
                     if not texts:
                         result = 1
                     else:
                         def ask():
                             # 正文已经确认过，这里只负责发布；提问不产生文件。
-                            self.app.execute_zhs_ask(self.client, courses, texts, options)
+                            self.app.execute_zhs_ask(self.client, targets, texts, options)
                             return []
 
                         result = self.execute(ask, "问答区提问")
@@ -137,6 +141,28 @@ class CourseWorkspace:
                 self.view.pending_error = str(exc)
                 if self.view.operation_result() == 2:
                     return
+
+    def zhs_offers(self, courses):
+        """所选课程里哪些用得上每日复习、问答区（看各门课的考核规则），{"review": [...], "qa": [...]}。
+        某门课的规则读不到就不收窄，照旧可选。"""
+        from ZHSMain.api import course_offers
+        found = {"review": [], "qa": []}
+        with self.view.activity("读取考核规则"):
+            for row in courses:
+                z = row.get("zhs") or {}
+                shares = None
+                if z.get("kind") == "shared":
+                    try:
+                        shares = self.client.score_shares(z["courseId"], z["recruitId"])
+                    except Exception:  # 规则只是用来收窄菜单，读不到不该挡住学习
+                        shares = None
+                    if not isinstance(shares, dict):
+                        shares = None
+                offer = course_offers(row, shares)
+                for name in found:
+                    if offer[name]:
+                        found[name].append(row)
+        return found
 
     def prepare_questions(self, courses, options):
         """按设置准备提问正文并请用户确认；取消或失败都返回空列表，停在课程菜单。"""

@@ -179,6 +179,14 @@ SCORE_SHARES = (("progress", "progressScoreShare"), ("habit", "learnedHabitScore
                 ("test", "examScoreShare"), ("meet", "meetCourseScoreShare"), ("final", "finalExamScoreShare"))
 
 
+def course_offers(row, shares=None):
+    """这门课用不用得上每日复习、问答区：每日复习只攒学习习惯分，问答区只攒问答互动分，
+    所以只给共享课，并且考核规则里这一项大于 0 才开。shares 读不到（None）时不收窄。"""
+    shared = (row.get("zhs") or {}).get("kind") == "shared"
+    earns = lambda name: shares is None or shares.get(name, 0) > 0
+    return {"review": shared and earns("habit"), "qa": shared and earns("interactive")}
+
+
 class WatchPoints:
     def __init__(self, start=0):
         self.points = [0, 1]

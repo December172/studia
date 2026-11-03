@@ -17,7 +17,7 @@ from ZHSMain.qa import (CaptchaRequired, QaBridge, answer_questions, publish_que
                         write_questions)
 
 LONG = "这是一段超过三十个字的回答，用来通过最小长度校验，确保回答不会为空。"
-COURSE = {"courseName": "国家安全教育", "zhs": {"courseId": 1000119877, "recruitId": 426135}}
+COURSE = {"courseName": "国家安全教育", "zhs": {"kind": "shared", "courseId": 1000119877, "recruitId": 426135}}
 
 
 class FakeQa:

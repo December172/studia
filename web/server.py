@@ -34,7 +34,7 @@ from settings import DEFAULT_PROFILE_ID, SettingsError, SettingsStore
 from task_capabilities import task_availability, task_type_label
 from task_metrics import completion_with_score, score_text
 from ZHSMain.answer import ZHSAnswerRunner, catalog
-from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi, ZHSError
+from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi, ZHSError, course_offers
 from ZHSMain.main import ZHSHandler, course_units as zhs_units
 from ZHSMain.memory import AnswerMemory
 from ZHSMain.qa import QaBridge, answer_questions
@@ -1000,17 +1000,13 @@ def _course_id(pid, row):
 
 
 def course_features(pid, row, shares=None):
-    """What one course can run: the platform's features, narrowed by the course's assessment rule.
-
-    Daily review only earns the learning-habit share and the Q&A board only the interactive share,
-    so each is offered where that share is above 0. Without a rule (unreadable, or not a shared
-    course on 智慧树) nothing is narrowed beyond the course kind."""
+    """What one course can run: the platform's features, narrowed by the course's assessment rule
+    (ZHSMain.api.course_offers, shared with the terminal menu)."""
     spec = PLATFORMS[pid]
-    shared = pid == "zhs" and (row.get("zhs") or {}).get("kind") == "shared"
-    earns = lambda name: shares is None or shares.get(name, 0) > 0
+    offers = course_offers(row, shares) if pid == "zhs" else {"review": False, "qa": False}
     return {"answer": bool(spec["answer"]),
-            "review": bool(spec["review"]) and shared and earns("habit"),
-            "qa": bool(spec.get("qa")) and shared and earns("interactive")}
+            "review": bool(spec["review"]) and offers["review"],
+            "qa": bool(spec.get("qa")) and offers["qa"]}
 
 
 def _course(pid, row, shares=None):
