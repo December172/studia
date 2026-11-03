@@ -9,8 +9,12 @@ const courses = {
   mooc: [{ id: "m1", platform: "mooc", name: "大学英语（二）", type: "第 7 期开课", kind: "mooc", progress: 62 }, { id: "m2", platform: "mooc", name: "中外音乐与民族技艺实践", type: "第 3 期开课", kind: "mooc", progress: 100 }],
   zyk: [{ id: "z1", platform: "zyk", name: "Python 程序设计", type: "资源库", kind: "zyk", progress: 35 }],
   zhs: [
-    { id: "shared-1", platform: "zhs", name: "新一代信息技术导论", type: "共享课", kind: "shared", progress: 100 },
-    { id: "ai-1", platform: "zhs", name: "通信基础与计算机网络", type: "智慧课程", kind: "ai", progress: 84 },
+    { id: "shared-1", platform: "zhs", name: "新一代信息技术导论", type: "共享课", kind: "shared", progress: 100,
+      features: { answer: true, review: true, qa: true }, shares: { progress: 20, habit: 20, interactive: 10, knowledge: 0, test: 10, meet: 0, final: 40 } },
+    { id: "shared-2", platform: "zhs", name: "通信基础与计算机网络", type: "共享课", kind: "shared", progress: 64,
+      features: { answer: true, review: false, qa: false }, shares: { progress: 40, habit: 0, interactive: 0, knowledge: 0, test: 20, meet: 0, final: 40 } },
+    { id: "ai-1", platform: "zhs", name: "通信基础与计算机网络2026年秋冬学期", type: "智慧课程", kind: "ai", progress: 84,
+      features: { answer: true, review: false, qa: false }, shares: null },
   ],
 };
 const tasks = [
@@ -51,6 +55,7 @@ function chapters(spec, done) {
 const units = {
   m1: chapters([["第 1 章 自我介绍", 7], ["第 2 章 校园生活", 8], ["第 3 章 职场沟通", 9], ["第 4 章 产品说明", 8], ["第 5 章 安全规范", 7]], 22),
   "shared-1": chapters([["第一章 信息技术概述", 6], ["第二章 云计算", 6], ["第三章 人工智能", 7]], 99),
+  "shared-2": chapters([["第一章 通信概述", 8], ["第二章 数据通信", 10]], 7),
   "ai-1": chapters([["广义的通信概念", 2], ["通信的发展", 5], ["现代通信的概念", 2], ["贝尔和贝尔实验室", 6], ["通信基本模型", 5], ["信息、消息与信号", 5],
     ["信息的度量", 4], ["信号基本概念和分类", 4], ["信号的变换", 4], ["信号的时域和频域特性", 4], ["通信系统一般模型", 4], ["调制与解调", 6],
     ["复用技术", 5], ["计算机网络的发展历程", 6], ["网络体系结构", 7], ["物理层", 6], ["数据链路层", 8], ["网络层", 9], ["传输层", 7], ["应用层", 6]], 66),

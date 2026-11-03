@@ -824,16 +824,26 @@ function coverHtml(p, c) {
   return `<span class="cover" aria-hidden="true">${cells.slice(0, 72).map((x) => `<i class="cell ${x}"></i>`).join("")}</span>`;
 }
 
+// The server decides per course what can run (web/server.py course_features): review and Q&A only
+// where the course's assessment rule gives them points.
 function studyActions(p, c) {
-  const qa = p.features.qa ? [["qa", ICON.chat, "问答区", "AI 回答回复少的提问，一次 10 条，每条隔 1 分钟"]] : [];
-  if (p.id === "zhs" && c.kind === "shared") return [
-    ["study", ICON.play, "自动学习", "1.5 倍速看完剩下的视频，弹题自动答"],
-    ["review", ICON.repeat, "每日复习", "重看 30 分钟攒习惯分，每天一次"],
-    ...qa,
-  ];
-  if (p.id === "zhs") return [["study", ICON.play, "自动学习", "完成文档、课件和视频"], ...qa];
-  if (p.id === "mooc") return [["study", ICON.play, "自动学习", "学完课件和视频，自动讨论和评价"]];
-  return [["study", ICON.play, "自动学习", "学完资源库里的资源"]];
+  const f = c.features || {};
+  const study = p.id === "zhs" ? (c.kind === "shared" ? "1.5 倍速看完剩下的视频，弹题自动答" : "完成文档、课件和视频")
+    : p.id === "mooc" ? "学完课件和视频，自动讨论和评价" : "学完资源库里的资源";
+  return [["study", ICON.play, "自动学习", study],
+    ...(f.review ? [["review", ICON.repeat, "每日复习", "重看 30 分钟攒习惯分，每天一次"]] : []),
+    ...(f.qa ? [["qa", ICON.chat, "问答区", "AI 回答回复少的提问，一次 10 条，每条隔 1 分钟"]] : [])];
+}
+
+// The course's fingerprint: where its points come from, one box per share sized by its weight.
+// Boxes Studia can fill are inked; the rest (exams, meet sessions) stay outlined.
+const SHARES = [["progress", "进度", 1], ["habit", "习惯", 1], ["interactive", "互动", 1], ["knowledge", "掌握度", 0],
+  ["test", "测试", 1], ["meet", "见面课", 0], ["final", "期末", 0]];
+function fingerprint(shares) {
+  const parts = shares ? SHARES.filter(([k]) => shares[k] > 0) : [];
+  if (!parts.length) return "";
+  return `<div class="shares" title="这门课的考核构成，满分 100">${parts.map(([k, word, auto]) =>
+    `<span class="share ${auto ? "auto" : ""}" style="flex:${shares[k]}"><b>${shares[k]}</b>${word}</span>`).join("")}</div>`;
 }
 const STAMP = { 考试: "k", 测验: "c" };
 
@@ -849,6 +859,7 @@ function renderCourse(p, c, tab, full = false) {
       <div class="hero_main">
         <div class="crumb"><span class="dot ${p.id}"></span>${esc(p.short)}<span>/</span>${esc(c.type || p.name)}</div>
         <h1 class="title">${esc(c.name)}</h1>
+        ${fingerprint(c.shares)}
       </div>
       <div class="hero_side">
         <div class="hero_stat"><span class="hero_label">学习进度</span>

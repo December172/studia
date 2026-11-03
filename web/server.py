@@ -321,9 +321,32 @@ class Studia:
         rows = result.get("rows") if isinstance(result, dict) else None
         if not isinstance(rows, list):
             raise PlatformUnavailable("课程列表读取失败，请稍后重试")
+        shares = self._score_shares(platform, client, rows)
         with self.lock:
             platform.rows = rows
-        return {"courses": [_course(pid, row) for row in rows]}
+        return {"courses": [_course(pid, row, shares.get(_course_id(pid, row))) for row in rows]}
+
+    def _score_shares(self, platform, client, rows):
+        """Each shared course's assessment rule (course id -> shares), read side by side and kept a while.
+        A course whose rule cannot be read is left out, so it keeps the platform's features."""
+        shared = [row for row in rows if (row.get("zhs") or {}).get("kind") == "shared"]
+
+        def read(row):
+            z = row["zhs"]
+            try:
+                return self._cached(platform, ("shares", z["courseId"]), False,
+                                    lambda: client.score_shares(z["courseId"], z["recruitId"]))
+            except AuthenticationExpired:
+                raise
+            except Exception as exc:
+                logger.info("读不到「%s」的考核规则：%s", row.get("courseName"), exc)
+                return None
+
+        if not shared:
+            return {}
+        with ThreadPoolExecutor(min(len(shared), INTERACTIVE_WORKERS)) as pool:
+            found = list(pool.map(read, shared))
+        return {_course_id(platform.id, row): value for row, value in zip(shared, found) if value is not None}
 
     def find_row(self, platform, course_id):
         if not platform.rows:
@@ -413,6 +436,11 @@ class Studia:
         if kind not in allowed:
             raise HttpError(400, "这个平台暂不支持该操作")
         row = self.find_row(platform, course_id)
+        if kind in ("review", "qa"):
+            shares = (platform.cache.get(("shares", (row.get("zhs") or {}).get("courseId"))) or (0, None))[1]
+            if not course_features(platform.id, row, shares)[kind]:
+                raise HttpError(400, "这门课的考核里没有%s，不用%s" % (
+                    ("学习习惯分", "每日复习") if kind == "review" else ("问答互动分", "刷问答区")))
         with self.lock:
             self._check_conflicts(platform.id, course_id, kind)
             job = {"id": secrets.token_hex(4), "kind": kind, "title": LABEL[kind], "course": course_id,
@@ -971,7 +999,21 @@ def _course_id(pid, row):
     return re.sub(r"[^\w-]", "_", str(row.get("courseName") or "course"))
 
 
-def _course(pid, row):
+def course_features(pid, row, shares=None):
+    """What one course can run: the platform's features, narrowed by the course's assessment rule.
+
+    Daily review only earns the learning-habit share and the Q&A board only the interactive share,
+    so each is offered where that share is above 0. Without a rule (unreadable, or not a shared
+    course on 智慧树) nothing is narrowed beyond the course kind."""
+    spec = PLATFORMS[pid]
+    shared = pid == "zhs" and (row.get("zhs") or {}).get("kind") == "shared"
+    earns = lambda name: shares is None or shares.get(name, 0) > 0
+    return {"answer": bool(spec["answer"]),
+            "review": bool(spec["review"]) and shared and earns("habit"),
+            "qa": bool(spec.get("qa")) and shared and earns("interactive")}
+
+
+def _course(pid, row, shares=None):
     z = row.get("zhs") or {}
     progress = row.get("studySpeed", z.get("progress"))
     try:
@@ -979,7 +1021,8 @@ def _course(pid, row):
     except (TypeError, ValueError):
         progress = None
     return {"id": _course_id(pid, row), "platform": pid, "name": row.get("courseName") or "未命名课程",
-            "type": row.get("courseInfoName") or "", "kind": z.get("kind") or pid, "progress": progress}
+            "type": row.get("courseInfoName") or "", "kind": z.get("kind") or pid, "progress": progress,
+            "features": course_features(pid, row, shares), "shares": shares}
 
 
 ROUTES = [
