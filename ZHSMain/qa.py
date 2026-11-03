@@ -111,22 +111,31 @@ class QaBridge:
         from playwright.sync_api import sync_playwright  # 只有这个功能需要，延迟导入
 
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(headless=self.headless)
-        context = self._browser.new_context()
-        context.add_cookies(self.cookies)
-        self._page = context.new_page()
-        self._prepare()
+        try:
+            self._browser = self._pw.chromium.launch(headless=self.headless)
+            context = self._browser.new_context()
+            context.add_cookies(self.cookies)
+            self._page = context.new_page()
+            self._prepare()
+        except BaseException:
+            # with 只在 __enter__ 成功后才会调用 __exit__，失败时浏览器和 Playwright
+            # 的事件循环会留在当前线程：Playwright 把该循环标成 running，之后
+            # prompt_toolkit 的 asyncio.run() 会直接抛错，整个终端界面随即退出。
+            self.close()
+            raise
         return self
 
     def _prepare(self):
         """打开问答区并注入签名桥。登录后第一次进站会被 SSO 弹一次，重试即可。"""
         from playwright.sync_api import Error as PlaywrightError
 
+        reason = ""
         for _ in range(3):
             try:
                 self._page.goto(self.url, wait_until="domcontentloaded", timeout=self.timeout)
                 self._page.wait_for_load_state("networkidle", timeout=15000)
-            except PlaywrightError:
+            except PlaywrightError as exc:
+                reason = str(exc)
                 time.sleep(1.5)
                 continue
             if any(part in self._page.url for part in ("/login", "passport.")):
@@ -141,8 +150,10 @@ class QaBridge:
                     timeout=25000)
                 self._page.evaluate(BRIDGE_JS)
                 return
-            except PlaywrightError:
+            except PlaywrightError as exc:
+                reason = str(exc)
                 time.sleep(1.5)  # 页面在跳转时执行上下文会被销毁，再开一次
+        logger.warning("问答区页面没有加载完成：%s", reason.splitlines()[0] if reason else "未知原因")
         raise PlatformUnavailable("问答区页面没有加载完成，请稍后重试")
 
     def _eval(self, script, arg):
@@ -160,7 +171,7 @@ class QaBridge:
                 try:
                     close()
                 except Exception:  # 浏览器已经退出时忽略
-                    pass
+                    logger.debug("关闭问答区浏览器失败", exc_info=True)
 
     def __exit__(self, *exc):
         self.close()
