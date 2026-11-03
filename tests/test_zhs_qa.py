@@ -218,6 +218,8 @@ class WorkspaceTest(unittest.TestCase):
         app = MagicMock()
         app.store.get.return_value = {}
         app.remember.side_effect = lambda operation: operation()
+        # 统计字典不是文件路径：汇总页不能把它当成 answered/failed/skipped 三个文件。
+        app.execute_zhs_qa.return_value = {"answered": 9, "failed": 0, "skipped": 0}
         workspace = CourseWorkspace(app)
         workspace.view, workspace.store, workspace.platform = view, app.store, 2
         workspace.client = Mock()
@@ -225,6 +227,7 @@ class WorkspaceTest(unittest.TestCase):
         app.execute_zhs_qa.assert_called_once()
         self.assertEqual(view.qa_settings.call_args.args[0], {})
         self.assertEqual(app.execute_zhs_qa.call_args.args[1], [COURSE])
+        self.assertEqual(view.operation_result.call_args.args[0], [])
         self.assertEqual(app.store.set.call_args.args,
                          ("qa", {"limit": 2, "max_answers": 0, "interval": 30}))
 
