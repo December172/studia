@@ -261,9 +261,10 @@ def answer_questions(qa, ai, *, max_answers=1, limit=10, interval=60, state_path
 
 # 让模型的「问答题」能力产出提问正文：它只需把问题写成答案，答卷格式不变。
 QUESTION_RULES = (
-    "只输出问题本身：一到两句话，具体到可以讨论；不要称呼老师或同学，"
-    "不要「请问」「想请教」「想问一下」「大家」这类客套和铺垫，"
-    "不要自我介绍或背景陈述，不要序号和 Markdown，不要自己作答。"
+    "只输出问题本身：一到两句话，具体到可以讨论；不要称呼老师、同学或「大家」，"
+    "不要「请问」「想请教」「想问一下」这类客套，"
+    "不要「作为大学生」「我们」这种身份和立场铺垫，不要自我介绍，"
+    "不要序号和 Markdown，不要自己作答。"
 )
 QUESTION_PROMPT = (
     "这门课是「%s」。请围绕「%s」写第 %d 个用于课程问答区的问题。\n" + QUESTION_RULES
@@ -315,21 +316,24 @@ def _clean_question(text):
     return _strip_lead_ins(text)
 
 
-def write_questions(ai, reference, count, *, course_name=""):
+def write_questions(ai, reference, count, *, course_name="", on_progress=None):
     """参考回答较少的提问，让模型写 count 条新提问。
 
     reference 是问答区里回答数较少的提问正文；为空时退回到课程主题。
-    与参考题目重复（或模型自己重复）的跳过。
+    与参考题目重复（或模型自己重复）的跳过。on_progress(序号, 总数) 在每次请求前调用。
     """
     reference = [str(text).strip()[:MAX_REFERENCE_CHARS]
                  for text in (reference or []) if str(text).strip()][:MAX_REFERENCES]
     bullets = "\n".join("- " + text for text in reference)
+    total = max(1, int(count))
     texts = []
-    for index in range(1, max(1, int(count)) + 1):
+    for index in range(1, total + 1):
         if reference:
             prompt = QUESTION_FROM_REFERENCE % (course_name or "这门课", bullets, index)
         else:
             prompt = QUESTION_PROMPT % (course_name or "这门课", "课程的核心概念", index)
+        if on_progress is not None:
+            on_progress(index, total)
         answer = ai.answer({"type": "问答题", "title": prompt}).get("answer")
         text = _clean_question(answer)
         if not MIN_QUESTION <= len(text) <= MAX_QUESTION:

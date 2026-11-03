@@ -192,6 +192,18 @@ class WriteQuestionsTest(unittest.TestCase):
         self.assertIn("问题 7 号？", title)
         self.assertNotIn("问题 8 号？", title)
 
+    def test_progress_callback_reports_each_question(self):
+        seen = []
+        write_questions(FakeAi(LONG), [], 2, on_progress=lambda index, total: seen.append((index, total)))
+        self.assertEqual(seen, [(1, 2), (2, 2)])
+
+    def test_prompt_forbids_address_and_identity_framing(self):
+        ai = FakeAi(LONG)
+        write_questions(ai, [], 1, course_name="国家安全教育")
+        title = ai.questions[0]["title"]
+        for banned in ("作为大学生", "请问", "老师", "序号", "Markdown"):
+            self.assertIn(banned, title)
+
     def test_prompt_falls_back_to_course_topic(self):
         ai = FakeAi(LONG)
         write_questions(ai, [], 1, course_name="国家安全教育")
@@ -263,6 +275,11 @@ class QaAskSettingsTest(unittest.TestCase):
         self.assertEqual(view.qa_questions_review(QUESTIONS), QUESTIONS)
         view, _ = self.view(["n"])
         self.assertEqual(view.qa_questions_review(QUESTIONS), [])
+
+    def test_review_defaults_to_publish(self):
+        view, output = self.view([""])
+        self.assertEqual(view.qa_questions_review(QUESTIONS), QUESTIONS)
+        self.assertIn("[默认 y]", output.getvalue())
 
 
 class QaSettingsTest(unittest.TestCase):
@@ -337,6 +354,11 @@ class TuiExecuteTest(unittest.TestCase):
 
 
 class TuiAskTest(unittest.TestCase):
+    @staticmethod
+    def config(format="chat_completions"):
+        from ai.client import AIConfig
+        return AIConfig("https://example.org/v1", "model", "key", api_format=format)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -368,25 +390,39 @@ class TuiAskTest(unittest.TestCase):
 
     def test_generate_reads_reference_questions(self):
         ai = FakeAi(LONG)
-        self.app.verify_ai = Mock(return_value=ai)
         qa = FakeQa([{"id": 1, "content": QUESTIONS[0]}, {"id": 2, "content": QUESTIONS[1]}])
         bridge = Mock()
         bridge.return_value.__enter__ = Mock(return_value=qa)
         bridge.return_value.__exit__ = Mock(return_value=False)
-        with patch("ZHSMain.qa.QaBridge", bridge):
-            texts = self.app.generate_zhs_questions(Mock(access_token="[]"), [COURSE], Mock(),
+        with patch("ai.client.AIClient", return_value=ai) as client_class, \
+                patch("ZHSMain.qa.QaBridge", bridge):
+            texts = self.app.generate_zhs_questions(Mock(access_token="[]"), [COURSE], self.config(),
                                                     {"count": 1})
         self.assertEqual(texts, [LONG])
         self.assertIn(QUESTIONS[0], ai.questions[0]["title"])
         self.assertEqual(bridge.call_args.kwargs["recruit_id"], 426135)
         self.assertTrue(ai.session.close.called)
+        # 推理型模型出题常超过 120 秒：生成阶段单独放宽超时。
+        self.assertGreaterEqual(client_class.call_args.args[0].timeout, 300)
+
+    def test_generate_probes_unknown_api_format(self):
+        ai = FakeAi(LONG)
+        bridge = Mock()
+        bridge.return_value.__enter__ = Mock(return_value=FakeQa([]))
+        bridge.return_value.__exit__ = Mock(return_value=False)
+        self.app.verify_ai = Mock(return_value=ai)
+        with patch("ai.client.AIClient", return_value=ai), \
+                patch("ZHSMain.qa.QaBridge", bridge):
+            self.app.generate_zhs_questions(Mock(access_token="[]"), [COURSE],
+                                            self.config("auto"), {"count": 1})
+        self.app.verify_ai.assert_called_once()
 
     def test_generate_without_qa_area_falls_back(self):
         ai = FakeAi(LONG)
-        self.app.verify_ai = Mock(return_value=ai)
-        with patch("ZHSMain.qa.QaBridge") as bridge:
+        with patch("ai.client.AIClient", return_value=ai), \
+                patch("ZHSMain.qa.QaBridge") as bridge:
             self.app.generate_zhs_questions(Mock(access_token="[]"), [{"courseName": "无问答区"}],
-                                            Mock(), {"count": 1})
+                                            self.config(), {"count": 1})
         bridge.assert_not_called()
         self.assertIn("课程的核心概念", ai.questions[0]["title"])
 
@@ -445,6 +481,32 @@ class WorkspaceTest(unittest.TestCase):
         texts = workspace.prepare_questions([COURSE], {"source": "manual", "text": QUESTIONS[0]})
         self.assertEqual(texts, [QUESTIONS[0]])
         app.ai_configuration.assert_not_called()
+
+    def test_generation_error_is_shown_and_retryable(self):
+        from course_flow import CourseWorkspace
+
+        view, app = MagicMock(), MagicMock()
+        app.ai_configuration.side_effect = [RuntimeError("AI 服务 HTTP 503"), MagicMock()]
+        app.generate_zhs_questions.return_value = [QUESTIONS[0]]
+        view.confirm.return_value = True
+        view.qa_questions_review.return_value = [QUESTIONS[0]]
+        workspace = CourseWorkspace(app)
+        workspace.view = view
+        texts = workspace.prepare_questions([COURSE], {"source": "ai", "count": 1})
+        self.assertEqual(texts, [QUESTIONS[0]])
+        self.assertEqual(view.confirm.call_count, 1)
+        self.assertTrue(any("503" in str(call.args[0]) for call in view.note.call_args_list))
+
+    def test_generation_error_can_be_abandoned(self):
+        from course_flow import CourseWorkspace
+
+        view, app = MagicMock(), MagicMock()
+        app.ai_configuration.side_effect = RuntimeError("AI 服务 HTTP 503")
+        view.confirm.return_value = False
+        workspace = CourseWorkspace(app)
+        workspace.view = view
+        self.assertEqual(workspace.prepare_questions([COURSE], {"source": "ai", "count": 1}), [])
+        view.qa_questions_review.assert_not_called()
 
     def test_cancelled_generation_stays_in_menu(self):
         from course_flow import CourseWorkspace
