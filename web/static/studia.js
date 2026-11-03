@@ -373,7 +373,10 @@ function pageHead(title, sub, base, tabs, active) {
   return `<h1 class="title">${title}</h1><p class="sub">${sub}</p>
     <div class="tabs" role="tablist">${tabs.map(([k, label]) => `<button class="tab" role="tab" aria-selected="${k === active}" data-go="${base}/${k}">${label}</button>`).join("")}</div>`;
 }
-const settingsHead = (tab, sub) => pageHead("设置", sub, "#/settings", SETTINGS_TABS, tab);
+// Phones arrive from the list on 我的, which already names each tab: show just that one, titled by it.
+const settingsHead = (tab, sub) => PHONE.matches
+  ? `<h1 class="title">${SETTINGS_TABS.find(([k]) => k === tab)[1]}</h1><p class="sub">${sub}</p>`
+  : pageHead("设置", sub, "#/settings", SETTINGS_TABS, tab);
 // Everyone's running and queued jobs, with the owner's name; shown under 任务 › 全站.
 const siteJobRows = (list) => !list.length ? `<div class="empty">现在没有任务在运行</div>` : `<div class="runs">${list.map((j) => `<div class="run">${j.state === "queued" ? ICON.waiting : ICON.running}
     <span class="t1">${esc(j.title)} · ${esc(j.course_name)}<small>${esc(j.username)} · ${esc(platformOf(j.platform)?.short || j.platform)} · 开始于 ${ago(j.started)}</small></span>
@@ -527,7 +530,7 @@ const VIEWS = {
         <span class="fix">${past ? "" : fixButtons(j, i)}</span>
         <span class="state ${past ? "stopped" : j.state}">${past ? "已重试" : STATE_WORD[j.state] || ""}<span class="mono">${j.ended ? duration(j.ended - j.started) : ""}</span></span>
         <span class="when">${ago(j.ended || j.started)}</span><span class="chev_r" aria-hidden="true"></span></div>
-      <div class="run_lines" data-lines="${i}" ${open.has(String(i)) ? "" : "hidden"}>${logHtml(j.lines || [], "all", j.course_name)}</div>`; }).join("");
+      <div class="run_lines" data-lines="${i}" ${open.has(String(i)) ? "" : "hidden"}>${open.has(String(i)) ? logHtml(j.lines || [], "all", j.course_name) : ""}</div>`; }).join("");
     setPage(`${head}
       ${live}
       <div class="section"><h3>历史</h3></div>
@@ -535,7 +538,9 @@ const VIEWS = {
     page.querySelectorAll("[data-history]").forEach((el) => (el.onclick = (event) => {
       if (event.target.closest("button, a")) return;
       const lines = page.querySelector(`[data-lines="${el.dataset.history}"]`);
+      const j = state.history[el.dataset.history];
       lines.hidden = !lines.hidden;
+      lines.innerHTML = lines.hidden ? "" : logHtml(j.lines || [], "all", j.course_name);
       el.classList.toggle("open", !lines.hidden);
     }));
     page.querySelectorAll("[data-retry]").forEach((el) => (el.onclick = () => {
@@ -613,7 +618,7 @@ const VIEWS = {
   async settings(tab = "models") {
     tab = SETTINGS_TABS.some(([k]) => k === tab) ? tab : "models";
     const where = session.mode === "hosted" ? "只对你的账号生效" : "只保存在这台电脑上";
-    const head = settingsHead(`#/settings/${tab}`, where);
+    const head = settingsHead(tab, where);
     if (tab === "account") {
       const me = session.user;
       const studia = me ? `<div class="section"><h3>Studia 账号</h3></div>
@@ -662,27 +667,34 @@ const VIEWS = {
       };
       return;
     }
-    setPage(`${head}<div class="empty">正在读取…</div>`);
-    let data;
-    try { data = await api("/api/settings"); } catch (error) { toast(error.message); return; }
-    if (!location.hash.startsWith("#/settings")) return;
-    if (tab === "study") {
-      quiet = true;
-      setPage(`${head}<div class="section"><h3>并发数量</h3></div>
-        <div class="models"><div class="form_card" style="margin:0;box-shadow:none">
-          <div class="field"><label>AI 答题</label><input type="number" min="1" max="8" name="ai" value="${data.concurrency.ai}"></div>
-          <div class="field"><label>自动学习</label><input type="number" min="1" max="8" name="study" value="${data.concurrency.study}"></div>
-          <div class="form_btns"><button class="btn primary" data-concurrency>保存</button></div></div></div>`);
-      quiet = false;
-      $("[data-concurrency]", page).onclick = async () => {
-        const body = { ai: Number($('input[name="ai"]', page).value), study: Number($('input[name="study"]', page).value) };
-        try { await api("/api/settings/concurrency", { method: "POST", body }); toast("已保存"); } catch (e) { toast(e.message); }
-      };
-      return;
+    // Draw from the last copy at once; repaint only if the server's copy differs.
+    const cached = state.settings;
+    if (cached) paintSettings(tab, head, cached, false);
+    else setPage(`${head}<div class="empty">正在读取…</div>`);
+    try { state.settings = await api("/api/settings"); } catch (error) { if (!cached) toast(error.message); return; }
+    if (location.hash.startsWith(`#/settings/${tab}`) || (tab === "models" && location.hash === "#/settings")) {
+      if (!cached || JSON.stringify(cached) !== JSON.stringify(state.settings)) paintSettings(tab, head, state.settings, true);
     }
-    renderModels(head, data.models);
   },
 };
+
+function paintSettings(tab, head, data, again) {
+  if (tab === "study") {
+    quiet = again;
+    setPage(`${head}<div class="section"><h3>并发数量</h3></div>
+      <div class="models"><div class="form_card" style="margin:0;box-shadow:none">
+        <div class="field"><label>AI 答题</label><input type="number" min="1" max="8" name="ai" value="${data.concurrency.ai}"></div>
+        <div class="field"><label>自动学习</label><input type="number" min="1" max="8" name="study" value="${data.concurrency.study}"></div>
+        <div class="form_btns"><button class="btn primary" data-concurrency>保存</button></div></div></div>`);
+    quiet = false;
+    $("[data-concurrency]", page).onclick = async () => {
+      const body = { ai: Number($('input[name="ai"]', page).value), study: Number($('input[name="study"]', page).value) };
+      try { await api("/api/settings/concurrency", { method: "POST", body }); state.settings.concurrency = body; toast("已保存"); } catch (e) { toast(e.message); }
+    };
+    return;
+  }
+  renderModels(head, data.models, null, again);
+}
 
 // A waiting or failed run the user has since started again (or that is running now) needs no button.
 const retried = (j, i) => (j.state === "waiting" || j.state === "error")
@@ -712,7 +724,7 @@ function fixButtons(j, i) {
 /* ---------------------------------------------------------------- settings: models */
 
 const HEALTH = { ok: ["ok", "可用"], error: ["error", "出错"] };
-function renderModels(head, models, editing = null) {
+function renderModels(head, models, editing = null, again = true) {
   const host = (url) => { try { return new URL(url).host; } catch { return url; } };
   const form = (m) => `<form class="form_card" data-form="${m ? esc(m.id) : "new"}">
       <h3>${m ? "编辑模型" : "添加模型"}</h3>
@@ -732,12 +744,12 @@ function renderModels(head, models, editing = null) {
       <span class="row_btns">${m.active ? '<span class="in_use">使用中</span>' : '<button class="btn small primary" data-activate>改用</button>'}
         <button class="btn small" data-test>测试</button><button class="btn small" data-edit>编辑</button></span></div>`;
   };
-  quiet = true;
-  setPage(`${head}<div class="section"><h3>AI 模型</h3><button class="link" data-add>＋ 添加模型</button></div>
+  quiet = again;
+  setPage(`${head}<div class="section"><h3>${PHONE.matches ? "" : "AI 模型"}</h3><button class="link" data-add>＋ 添加模型</button></div>
     ${editing === "new" ? form(null) : ""}<div class="models">${models.map(row).join("")}</div>`);
   quiet = false;
   const reload = async (edit = null) => {
-    try { renderModels(head, (await api("/api/settings")).models, edit); } catch (e) { toast(e.message); }
+    try { state.settings = await api("/api/settings"); renderModels(head, state.settings.models, edit); } catch (e) { toast(e.message); }
   };
   $("[data-add]", page).onclick = () => renderModels(head, models, "new");
   page.querySelectorAll("[data-cancel]").forEach((el) => (el.onclick = () => renderModels(head, models)));
@@ -922,7 +934,13 @@ function logHtml(lines, filter = "all", course = "") {
 }
 
 function progressOf(run) {
-  const part = run.sub?.total ? run.sub : run.overall?.total ? run.overall : null;
+  const all = run.overall?.total > 1 ? run.overall : null, sub = run.sub?.total ? run.sub : null;
+  if (all) {
+    const pct = Math.min(100, Math.round(((all.done + (sub ? sub.done / sub.total : 0)) / all.total) * 100));
+    const unit = (all.unit || "").replace(/试卷|课程/, "");
+    return { pct, label: `${Math.min(all.done + 1, all.total)}/${all.total} ${unit}${sub ? ` · ${sub.done}/${sub.total} ${sub.unit || ""}` : ""}`.trim() };
+  }
+  const part = sub || (run.overall?.total ? run.overall : null);
   if (!part) return { pct: null, label: "" };
   return { pct: Math.min(100, Math.round((part.done / part.total) * 100)), label: `${part.done}/${part.total} ${part.unit || ""}`.trim() };
 }
@@ -1094,7 +1112,7 @@ function handleEvent(event) {
       if (u && event.status === "done") state.stamped = { id: u.id, at: Date.now() };
       if (event.status === "running") run.unit = { name: event.name, key: event.key };
     } else if (event.kind === "result") {
-      if (run.overall) run.overall.done += 1;
+      if (run.overall) { run.overall.done += 1; run.sub = null; }
       pushLine(run, `${event.name} · ${STATUS[event.status] || event.status || ""}`, event.status === "error" || event.status === "ai_error" ? "error" : event.status === "waiting" ? "warn" : "", true);
     } else if (event.kind === "resources" || event.kind === "questions") {
       run.sub = { name: event.name, done: event.completed || 0, total: event.total || 0, unit: event.unit === "项资源" ? "项" : event.unit };
@@ -1103,12 +1121,13 @@ function handleEvent(event) {
   repaint();
 }
 
-let paintQueued = false;
+let paintQueued = false, lastPaint = 0;
 function repaint() {
   if (paintQueued) return;
   paintQueued = true;
-  requestAnimationFrame(() => {
+  setTimeout(() => requestAnimationFrame(() => {
     paintQueued = false;
+    lastPaint = performance.now();
     renderSidebar();
     renderPlayer();
     const [, name, a, b, c] = parseHash(location.hash);
@@ -1122,7 +1141,7 @@ function repaint() {
         else if (p) VIEWS.course(a, decodeURIComponent(b || ""), c);
       }
     } finally { quiet = false; }
-  });
+  }), Math.max(0, lastPaint + 250 - performance.now()));
 }
 
 function connectEvents() {
