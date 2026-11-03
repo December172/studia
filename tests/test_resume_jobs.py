@@ -2,10 +2,11 @@ import json
 import tempfile
 import time
 import unittest
-from unittest.mock import Mock
+import threading
+from unittest.mock import Mock, patch
 
 from settings import SettingsStore
-from web.server import INTERRUPTED, JOBS, Studia, drain
+from web.server import INTERRUPTED, JOBS, HttpError, Studia, _qa_options, drain
 
 
 class ResumeJobsTest(unittest.TestCase):
@@ -79,6 +80,41 @@ class ResumeJobsTest(unittest.TestCase):
         self.assertEqual(json.loads(self.path.read_text())["active"][0]["resumes"], 0)
         app.shutdown()
         drain(5)
+
+    def test_qa_posting_is_not_rerun_after_a_restart(self):
+        self.write({"platform": "zhs", "type": "qa", "course": "ai-c1", "course_name": "网络课"})
+        app = self.app()
+        app.start_job = Mock()
+        app.resume()
+        app.start_job.assert_not_called()
+        self.assertEqual((app.history[0]["title"], app.history[0]["summary"]), ("问答区答题", INTERRUPTED))
+
+    def test_qa_options_are_checked_and_stop_does_not_wait_out_the_interval(self):
+        with self.assertRaises(HttpError):
+            _qa_options({"interval": 0})
+        with self.assertRaises(HttpError):
+            _qa_options({"limit": "ten"})
+        self.assertEqual(_qa_options({}), {"limit": 10, "max_answers": 1, "interval": 60})
+
+        app = self.app()
+        app.platforms["zhs"].rows = [{"courseName": "网络课", "zhs": {"kind": "ai", "courseId": "c1", "classId": "k1"}}]
+        posted = threading.Event()
+
+        class Board:
+            def __enter__(self): return self
+            def __exit__(self, *exc): pass
+            def questions(self, **kw): return [{"id": i, "content": "问题 %d" % i} for i in range(3)]
+            def publish(self, qid, text): posted.set(); return 100 + qid
+
+        app._ai = Mock(return_value=Mock(answer=Mock(return_value={"answer": "这是一段足够长的回答，" * 5})))
+        with patch("web.server.QaBridge", return_value=Board()):
+            app.start_job({"platform": "zhs", "type": "qa", "course": "ai-c1", "interval": 600})
+            self.assertTrue(posted.wait(5))
+            started = time.time()
+            app.stop_job()
+            drain(5)
+        self.assertLess(time.time() - started, 3)
+        self.assertEqual(app.history[0]["state"], "stopped")
 
     def test_history_survives_a_restart(self):
         app = self.app()

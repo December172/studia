@@ -117,7 +117,7 @@ class Platform:
     def public(self, logged_in):
         spec = self.spec
         return {"id": self.id, "name": spec["name"], "short": spec["short"], "login": spec["login"],
-                "logged_in": logged_in, "features": {"answer": spec["answer"], "review": spec["review"]}}
+                "logged_in": logged_in, "features": {"answer": spec["answer"], "review": spec["review"], "qa": bool(spec.get("qa"))}}
 
 
 class Studia:
@@ -425,7 +425,8 @@ class Studia:
                 selected = self._selected(platform, course_id, body.get("tasks") or [])
                 target = lambda: self._answer(platform, selected, bool(body.get("auto_submit")), job)
             elif kind == "qa":
-                target = lambda: self._qa(platform, row, body, job)
+                options = _qa_options(body)
+                target = lambda: self._qa(platform, row, options, job)
             else:
                 job["minutes"] = (REVIEW_MINUTES if minutes is None else minutes) if kind == "review" else 0
                 target = lambda: self._study(platform, row, job["minutes"], job)
@@ -591,7 +592,7 @@ class Studia:
 
     def resume(self):
         """Start again the jobs a restart interrupted. Learning continues from the progress the platform
-        recorded; answering is left to the person, since a paper may already have been handed in."""
+        recorded; answering and Q&A posting are left to the person, since a paper may already be in or an answer public."""
         data = self._saved()
         active = [entry for entry in data.get("active") or [] if isinstance(entry, dict) and entry.get("type") in LABEL]
         if not active:
@@ -601,7 +602,7 @@ class Studia:
             kind = entry["type"]
             if kind == "review" and entry.get("minutes", 0) < 1:
                 continue
-            if kind == "answer" or not fresh or entry.get("resumes", 0) >= RESUME_LIMIT:
+            if kind in ("answer", "qa") or not fresh or entry.get("resumes", 0) >= RESUME_LIMIT:
                 self._record(entry, "stopped", INTERRUPTED)
                 continue
             body = {"platform": entry.get("platform"), "type": kind, "course": entry.get("course")}
@@ -720,7 +721,7 @@ class Studia:
         finally:
             ai.session.close()
 
-    def _qa(self, platform, row, body, job):
+    def _qa(self, platform, row, options, job):
         """问答区：取题目 → AI 写回答 → 发布。只在平台返回 200 后计数。"""
         course = row.get("zhs") or {}
         # 共享课带 recruitId；智慧课程只有 classId，问答区 URL 需要两者之一。
@@ -730,7 +731,7 @@ class Studia:
             raise HttpError(400, "这门课没有可作答的问答区（缺少课程或班级 ID）")
         api = self.client(platform)
         ai = self._ai("请先在设置里添加 AI 模型")
-        limit = max(1, min(int(body.get("limit") or 10), 50))
+        limit = options["limit"]
 
         def event(kind, name, status=""):
             if kind == "begin":
@@ -742,12 +743,13 @@ class Studia:
             with QaBridge(api.access_token, course_id=course_id, recruit_id=recruit_id) as qa:
                 stats = answer_questions(
                     qa, ai,
-                    max_answers=int(body.get("max_answers") or 1),
+                    max_answers=options["max_answers"],
                     limit=limit,
-                    interval=int(body.get("interval") or 60),
+                    interval=options["interval"],
                     state_path=str(Path(self.store.path).parent / "zhs-qa-answers.json"),
                     should_stop=job["cancel"].is_set,
                     on_event=event,
+                    sleep=job["cancel"].wait,  # 停止或更新时不必等满间隔
                 )
             return "问答区发布 %(answered)d 条，失败 %(failed)d 条" % stats
         finally:
@@ -888,6 +890,23 @@ def _mooc_catalog(client, row):
         statuses = dict(zip(open_ids, pool.map(status, open_ids)))
     return [(course, dict(item, _completion_status=completion_with_score(item, statuses.get(paper_exam_id(item), "unsupported"))), category)
             for course, item, category in listed]
+
+
+def _qa_options(body):
+    """问答区参数：条数 1–50、只答回答数不超过 0–20 的题、每条间隔 30–600 秒。"""
+    def number(name, default, low, high):
+        value = body.get(name)
+        if value is None or value == "":
+            return default
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            raise HttpError(400, "问答区参数 %s 必须是整数" % name)
+        if not low <= value <= high:
+            raise HttpError(400, "问答区参数 %s 要在 %d–%d 之间" % (name, low, high))
+        return value
+    return {"limit": number("limit", 10, 1, 50), "max_answers": number("max_answers", 1, 0, 20),
+            "interval": number("interval", 60, 30, 600)}
 
 
 def _history_line(event):
