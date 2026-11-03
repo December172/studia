@@ -92,13 +92,13 @@ class ResumeJobsTest(unittest.TestCase):
 
     def test_qa_options_are_checked_and_stop_does_not_wait_out_the_interval(self):
         with self.assertRaises(HttpError):
-            _qa_options({"interval": 0})
+            _qa_options({"limit": 0})
         with self.assertRaises(HttpError):
             _qa_options({"limit": "ten"})
-        self.assertEqual(_qa_options({}), {"limit": 10, "max_answers": 1, "interval": 60})
+        self.assertEqual(_qa_options({}), {"limit": 10})
 
         app = self.app()
-        app.platforms["zhs"].rows = [{"courseName": "网络课", "zhs": {"kind": "ai", "courseId": "c1", "classId": "k1"}}]
+        app.platforms["zhs"].rows = [{"courseName": "网络课", "zhs": {"kind": "shared", "courseId": "c1", "recruitId": "r1"}}]
         posted = threading.Event()
 
         class Board:
@@ -109,7 +109,7 @@ class ResumeJobsTest(unittest.TestCase):
 
         app._ai = Mock(return_value=Mock(answer=Mock(return_value={"answer": "这是一段足够长的回答，" * 5})))
         with patch("web.server.QaBridge", return_value=Board()):
-            app.start_job({"platform": "zhs", "type": "qa", "course": "ai-c1", "interval": 600})
+            app.start_job({"platform": "zhs", "type": "qa", "course": "shared-c1", "interval": 600})
             self.assertTrue(posted.wait(5))
             started = time.time()
             app.stop_job()
@@ -120,10 +120,10 @@ class ResumeJobsTest(unittest.TestCase):
     def test_a_qa_page_bounced_to_sign_in_keeps_the_platform_login(self):
         self.store.save_session("zhs", Mock(access_token="still-good"))
         app = self.app()
-        app.platforms["zhs"].rows = [{"courseName": "网络课", "zhs": {"kind": "ai", "courseId": "c1", "classId": "k1"}}]
+        app.platforms["zhs"].rows = [{"courseName": "网络课", "zhs": {"kind": "shared", "courseId": "c1", "recruitId": "r1"}}]
         app._ai = Mock()
         with patch("web.server.QaBridge", side_effect=AuthenticationExpired("智慧树登录已过期，请重新扫码")):
-            app.start_job({"platform": "zhs", "type": "qa", "course": "ai-c1"})
+            app.start_job({"platform": "zhs", "type": "qa", "course": "shared-c1"})
             drain(5)
         self.assertEqual(app.history[0]["state"], "waiting")
         self.assertIn("问答区没进去", app.history[0]["summary"])

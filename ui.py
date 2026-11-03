@@ -616,16 +616,25 @@ class TerminalUI:
                 return raw
             warning = "请输入 r 刷新、t 切换平台或 s 设置；q 退出。"
 
-    def course_menu(self, courses, platform):
+    def course_menu(self, courses, platform, offers=None):
+        """offers：智慧树各项适用的课程（看考核规则）。一门都不适用的项不显示；部分适用的注明是哪几门。"""
         title = courses[0].get("courseName", "未知课程") if len(courses) == 1 else f"已选 {len(courses)} 门课程"
         choices = [(1, "自动学习", "完成课程学习任务")]
         if platform == 0:
             choices += [(2, "AI 答题", "AI 作答并自动交卷"), (3, "导出题目", "保存题目和已有答案")]
         elif platform == 2:
-            choices += [(2, "AI 答题", "AI 作答，可选自动交卷"),
-                        (3, "每日复习", "共享课重看已学视频 30 分钟，攒学习习惯"),
-                        (4, "问答区答题", "取回答数少的提问，AI 作答并发布"),
-                        (5, "问答区提问", "自己写或让 AI 按主题出提问")]
+            def only(rows, text):
+                if offers is None or len(rows) == len(courses):
+                    return text
+                return f"{text}（只做{'、'.join(r.get('courseName', '') for r in rows)}）"
+            review = courses if offers is None else offers["review"]
+            qa = courses if offers is None else offers["qa"]
+            choices.append((2, "AI 答题", "AI 作答，可选自动交卷"))
+            if review:
+                choices.append((3, "每日复习", only(review, "重看已学视频 30 分钟，攒学习习惯分")))
+            if qa:
+                choices += [(4, "问答区答题", only(qa, "取回答数少的提问，AI 作答并发布")),
+                            (5, "问答区提问", only(qa, "自己写或让 AI 按主题出提问"))]
         return self.choice(title, choices, help_text="Esc 返回课程列表 · q 退出")
 
     def choose_platform(self, current):

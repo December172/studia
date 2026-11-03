@@ -9,8 +9,12 @@ const courses = {
   mooc: [{ id: "m1", platform: "mooc", name: "大学英语（二）", type: "第 7 期开课", kind: "mooc", progress: 62 }, { id: "m2", platform: "mooc", name: "中外音乐与民族技艺实践", type: "第 3 期开课", kind: "mooc", progress: 100 }],
   zyk: [{ id: "z1", platform: "zyk", name: "Python 程序设计", type: "资源库", kind: "zyk", progress: 35 }],
   zhs: [
-    { id: "shared-1", platform: "zhs", name: "新一代信息技术导论", type: "共享课", kind: "shared", progress: 100 },
-    { id: "ai-1", platform: "zhs", name: "通信基础与计算机网络", type: "智慧课程", kind: "ai", progress: 84 },
+    { id: "shared-1", platform: "zhs", name: "新一代信息技术导论", type: "共享课", kind: "shared", progress: 100,
+      features: { answer: true, review: true, qa: true }, shares: { progress: 20, habit: 20, interactive: 10, knowledge: 0, test: 10, meet: 0, final: 40 } },
+    { id: "shared-2", platform: "zhs", name: "通信基础与计算机网络", type: "共享课", kind: "shared", progress: 64,
+      features: { answer: true, review: false, qa: false }, shares: { progress: 40, habit: 0, interactive: 0, knowledge: 0, test: 20, meet: 0, final: 40 } },
+    { id: "ai-1", platform: "zhs", name: "通信基础与计算机网络2026年秋冬学期", type: "智慧课程", kind: "ai", progress: 84,
+      features: { answer: true, review: false, qa: false }, shares: null },
   ],
 };
 const tasks = [
@@ -51,12 +55,14 @@ function chapters(spec, done) {
 const units = {
   m1: chapters([["第 1 章 自我介绍", 7], ["第 2 章 校园生活", 8], ["第 3 章 职场沟通", 9], ["第 4 章 产品说明", 8], ["第 5 章 安全规范", 7]], 22),
   "shared-1": chapters([["第一章 信息技术概述", 6], ["第二章 云计算", 6], ["第三章 人工智能", 7]], 99),
+  "shared-2": chapters([["第一章 通信概述", 8], ["第二章 数据通信", 10]], 7),
   "ai-1": chapters([["广义的通信概念", 2], ["通信的发展", 5], ["现代通信的概念", 2], ["贝尔和贝尔实验室", 6], ["通信基本模型", 5], ["信息、消息与信号", 5],
     ["信息的度量", 4], ["信号基本概念和分类", 4], ["信号的变换", 4], ["信号的时域和频域特性", 4], ["通信系统一般模型", 4], ["调制与解调", 6],
     ["复用技术", 5], ["计算机网络的发展历程", 6], ["网络体系结构", 7], ["物理层", 6], ["数据链路层", 8], ["网络层", 9], ["传输层", 7], ["应用层", 6]], 66),
 };
 
-const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "answer" };
+const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "answer", ask: "answer" };
+const qaPosts = [{ kind: "answer", question: "云计算的三种服务模式有什么区别？", text: "IaaS 提供虚拟机等基础设施，PaaS 提供运行平台，SaaS 直接提供软件。", at: Date.now() / 1000 - 7200 }];
 function fakeJob(body) {
   const course = courses[body.platform].find((c) => c.id === body.course);
   for (const o of Object.values(jobs)) {
@@ -64,7 +70,7 @@ function fakeJob(body) {
     if (o.course === body.course) throw new Error(`这门课正在${o.title}，请等它结束或先停止`);
     if (body.platform === "zhs" && GROUP[body.type] === "learn") throw new Error(`智慧树同一账号同时只能播放一个视频，请等「${o.course_name}」的${o.title}结束`);
   }
-  const title = { study: "自动学习", review: "每日复习", answer: "AI 答题", qa: "问答区答题" }[body.type];
+  const title = { study: "自动学习", review: "每日复习", answer: "AI 答题", qa: "问答区答题", ask: "问答区提问" }[body.type];
   const job = { type: "job", kind: body.type, id: "j" + Date.now().toString(16), title, course: body.course, course_name: course.name, platform: body.platform,
     state: "running", summary: "", started: Date.now() / 1000, ended: null, lines: [] };
   jobs[job.id] = job;
@@ -78,11 +84,21 @@ function fakeJob(body) {
     history.unshift(finished);
     emit(finished);
   };
+  if (body.type === "ask") {
+    send({ type: "progress", kind: "begin", name: title, total: body.texts.length, unit: "条" });
+    body.texts.forEach((q, i) => setTimeout(() => {
+      qaPosts.push({ kind: "ask", question: q, text: "", at: Date.now() / 1000 });
+      send({ type: "progress", kind: "result", name: q.slice(0, 20), status: "success" });
+      if (i === body.texts.length - 1) setTimeout(() => finish("done", `问答区发布提问 ${body.texts.length} 条，失败 0 条`), 600);
+    }, 1200 * (i + 1)));
+    return job.id;
+  }
   if (body.type === "qa") {
     const asked = ["TCP 和 UDP 各适合什么场景？", "交换机和路由器的区别是什么？", "为什么要分层设计网络协议？"];
     send({ type: "progress", kind: "begin", name: title, total: asked.length, unit: "条" });
     asked.forEach((q, i) => setTimeout(() => {
       send({ type: "progress", kind: "detail", name: `第 ${i + 1} 条 · ${q}` });
+      qaPosts.push({ kind: "answer", question: q, text: "这是 AI 写的回答示例：先讲清概念，再举一个课程里的例子说明适用场景。", at: Date.now() / 1000 });
       send({ type: "progress", kind: "result", name: q.slice(0, 20), status: "success" });
       if (i === asked.length - 1) setTimeout(() => finish("done", `问答区发布 ${asked.length} 条，失败 0 条`), 800);
     }, 1500 * (i + 1)));
@@ -152,6 +168,14 @@ export async function request(path, method, body) {
   if ((m = path.match(/^\/api\/platforms\/(\w+)\/courses$/))) return { courses: courses[m[1]] };
   if (path.match(/^\/api\/platforms\/(\w+)\/tasks/)) return { tasks };
   if ((m = path.match(/^\/api\/platforms\/\w+\/units\?course=(.+)$/))) return { chapters: units[decodeURIComponent(m[1])] || [] };
+  if ((m = path.match(/^\/api\/platforms\/\w+\/qa\?course=(.+)$/))) return { posts: qaPosts.slice().reverse() };
+  if (path.match(/^\/api\/platforms\/\w+\/qa\/draft$/)) {
+    await new Promise((r) => setTimeout(r, 900));
+    return { questions: ["边缘计算会不会取代云计算？各自适合什么场景？", "RPA 和传统的脚本自动化有什么本质区别？", "企业上云时数据安全的责任应该怎么划分？", "物联网设备越来越多，个人隐私该靠谁来保护？", "大模型写的代码出了事故，责任算谁的？"].slice(0, body.count || 3) };
+  }
+  if ((m = path.match(/^\/api\/platforms\/\w+\/score\?course=(.+)$/))) return { earned: {
+    "shared-1": { progress: 20, habit: 9, interactive: 2, test: 9, meet: 0, final: 0, usual: 31, total: 40, qa: { answers: 3, questions: 1, received: 2 } },
+    "shared-2": { progress: 28, habit: 0, interactive: 0, test: 20, meet: 0, final: 0, usual: 28, total: 48 } }[decodeURIComponent(m[1])] };
   if (path === "/api/jobs" && method === "POST") return { ok: true, id: fakeJob(body) };
   if (path === "/api/jobs/stop") {
     const job = jobs[body?.id];
