@@ -838,8 +838,9 @@ const courseTab = (c, tab) => tab === "answer" ? "answer" : tab === "qa" && c.fe
 
 // Q&A tab. Where the interaction share stands, then two actions: answer a few questions now, or have
 // AI draft new ones that the person edits before they go out. Everything posted is listed below.
-const QA_SIZES = [5, 10, 20];
+const QA_SIZES = [5, 10, 20], ASK_SIZES = [1, 3, 5];
 const qaSize = () => { const n = store.get("studia-qa-size", 10); return QA_SIZES.includes(n) ? n : 10; };
+const askSize = () => { const n = store.get("studia-ask-size", 3); return ASK_SIZES.includes(n) ? n : 3; };
 function qaBody(p, c) {
   const k = key(p.id, c.id), earned = state.earned[k], q = earned?.qa, block = blocker(p.id, c.id, "qa");
   const draft = state.qaDraft[k], posts = state.qaPosts[k], size = qaSize();
@@ -852,7 +853,8 @@ function qaBody(p, c) {
   const texts = draft?.texts || [];
   const ask = `<div class="model plain qa_row"><span class="m1"><b>发起提问</b><small class="sans">${esc(
       draft?.loading ? "正在读问答区、出题，约半分钟…" : draft?.error || "AI 从回答少的话题里出题，你改好再发")}</small></span>
-    <span class="row_btns"><button class="btn" data-qa-draft ${draft?.loading ? "disabled" : ""}>${texts.length ? "换一批" : "出 3 条"}</button></span></div>
+    <span class="row_btns"><span class="sizes">${ASK_SIZES.map((s) => `<button class="chip" data-ask-size="${s}" aria-pressed="${s === askSize()}">${s} 条</button>`).join("")}</span>
+      <button class="btn" data-qa-draft ${draft?.loading ? "disabled" : ""}>${texts.length ? "换一批" : "出题"}</button></span></div>
     ${texts.map((t, i) => `<div class="model plain qa_draft"><textarea rows="2" data-qa-edit="${i}" maxlength="200">${esc(t)}</textarea>
       <button class="btn small" data-qa-drop="${i}" aria-label="删掉这条">删掉</button></div>`).join("")}
     ${texts.length ? `<div class="model plain qa_row"><span class="m1"><small class="sans">${esc(block || "发出后挂在你的账号名下")}</small></span>
@@ -883,7 +885,7 @@ async function draftQuestions(p, c) {
   const k = key(p.id, c.id);
   state.qaDraft[k] = { loading: true, texts: state.qaDraft[k]?.texts || [] };
   repaint();
-  try { state.qaDraft[k] = { texts: (await api(`/api/platforms/${p.id}/qa/draft`, { method: "POST", body: { course: c.id, count: 3 } })).questions }; }
+  try { state.qaDraft[k] = { texts: (await api(`/api/platforms/${p.id}/qa/draft`, { method: "POST", body: { course: c.id, count: askSize() } })).questions }; }
   catch (error) { state.qaDraft[k] = { texts: state.qaDraft[k].texts, error: error.message }; }
   if (!state.qaDraft[k].texts.length && !state.qaDraft[k].error) state.qaDraft[k].error = "AI 这次没出成，换一批试试";
   repaint();
@@ -1009,6 +1011,7 @@ function renderCourse(p, c, tab, full = false) {
 
   page.querySelectorAll("[data-start]").forEach((el) => (el.onclick = () => startJob({ platform: p.id, course: c.id, type: el.dataset.start })));
   page.querySelectorAll("[data-qa-size]").forEach((el) => (el.onclick = () => { store.set("studia-qa-size", Number(el.dataset.qaSize)); renderCourse(p, c, tab); }));
+  page.querySelectorAll("[data-ask-size]").forEach((el) => (el.onclick = () => { store.set("studia-ask-size", Number(el.dataset.askSize)); renderCourse(p, c, tab); }));
   const qaStart = $("[data-qa-start]", page);
   if (qaStart) qaStart.onclick = () => startJob({ platform: p.id, course: c.id, type: "qa", limit: qaSize() });
   const qaDraft = $("[data-qa-draft]", page);

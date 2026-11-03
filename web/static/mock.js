@@ -171,7 +171,7 @@ export async function request(path, method, body) {
   if ((m = path.match(/^\/api\/platforms\/\w+\/qa\?course=(.+)$/))) return { posts: qaPosts.slice().reverse() };
   if (path.match(/^\/api\/platforms\/\w+\/qa\/draft$/)) {
     await new Promise((r) => setTimeout(r, 900));
-    return { questions: ["边缘计算会不会取代云计算？各自适合什么场景？", "RPA 和传统的脚本自动化有什么本质区别？", "企业上云时数据安全的责任应该怎么划分？"].slice(0, body.count || 3) };
+    return { questions: ["边缘计算会不会取代云计算？各自适合什么场景？", "RPA 和传统的脚本自动化有什么本质区别？", "企业上云时数据安全的责任应该怎么划分？", "物联网设备越来越多，个人隐私该靠谁来保护？", "大模型写的代码出了事故，责任算谁的？"].slice(0, body.count || 3) };
   }
   if ((m = path.match(/^\/api\/platforms\/\w+\/score\?course=(.+)$/))) return { earned: {
     "shared-1": { progress: 20, habit: 9, interactive: 2, test: 9, meet: 0, final: 0, usual: 31, total: 40, qa: { answers: 3, questions: 1, received: 2 } },
