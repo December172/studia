@@ -25,6 +25,7 @@ KEYS = {
 EV_KEY = "zzpttjd"
 BASE = "https://onlineservice-api.zhihuishu.com"
 PASSPORT = "https://passport.zhihuishu.com"
+STUONLINE = "https://stuonline.zhihuishu.com"
 STUDY = "https://studyservice-api.zhihuishu.com"
 AI = "https://kg-ai-run.zhihuishu.com"
 AI_TASK = "https://kg-run-student.zhihuishu.com"
@@ -170,6 +171,12 @@ def _percent(value):
         return round(float(str(value).strip().rstrip("%")))
     except (TypeError, ValueError):
         return None
+
+
+# 考核项 → scoreAssessRuleDto 的字段，按成绩分析页的顺序。
+SCORE_SHARES = (("progress", "progressScoreShare"), ("habit", "learnedHabitScoreShare"),
+                ("interactive", "learnedInteractiveScoreShare"), ("knowledge", "learnedKnowledgeScoreShare"),
+                ("test", "examScoreShare"), ("meet", "meetCourseScoreShare"), ("final", "finalExamScoreShare"))
 
 
 class WatchPoints:
@@ -420,6 +427,21 @@ class ZHSApi:
             courses.extend(data["courseOpenDtos"])
             page += 1
         return courses
+
+    def score_shares(self, course_id, recruit_id):
+        """共享课考核规则（成绩分析页的 scoreAssessRuleDto）里各项占的分，满分 100。
+
+        habit 是学习习惯分（每日复习攒的），interactive 是问答互动分（问答区攒的）。
+        """
+        result = self._request(
+            "POST", STUONLINE + "/stuonline/json/stuLearnReportNew/loadStuLearingTab/",
+            data={"courseId": course_id, "recruitId": recruit_id, "type": "l", "courseTypeEs": 1},
+            origin=STUONLINE,
+        )
+        rule = result.get("scoreAssessRuleDto")
+        if not isinstance(rule, dict):
+            raise PlatformUnavailable("智慧树考核规则返回格式异常")
+        return {name: _percent(rule.get(field)) or 0 for name, field in SCORE_SHARES}
 
     def ai_courses(self):
         result = self.secure(
