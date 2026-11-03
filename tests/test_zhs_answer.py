@@ -482,6 +482,20 @@ class CatalogTest(unittest.TestCase):
             self.assertNotIn("typeId", item)
             self.assertNotIn("status", item)
 
+    def test_full_mark_homework_is_closed_and_the_rest_can_be_redone(self):
+        client = self.make_client()
+        client.homework[2] = {"examTestId": 12, "paperId": 23, "highMasteryScore": 96}
+        client.basic["cakeThemeList"][0]["knowledgeList"].append({"knowledgeId": 3, "knowledgeName": "知识点三"})
+        client.homework[3] = {"examTestId": 13, "paperId": 24, "highMasteryScore": 0}
+        full, partial, fresh = [item for _, item, category in catalog(client, COURSE) if category == 1]
+        self.assertEqual(full["_unavailable"][0], "已满分")
+        self.assertNotIn("_redo", full)
+        self.assertTrue(partial["_redo"])
+        self.assertIn("当前 96 分", partial["_hint"])
+        self.assertNotIn("_unavailable", partial)
+        self.assertEqual(fresh["_completion_status"], "not_started")
+        self.assertNotIn("_redo", fresh)
+
     def test_entries_have_stable_unique_ids(self):
         client = self.make_client()
         other = dict(COURSE, courseName="课程二", zhs={"kind": "ai", "courseId": 9, "classId": 2})

@@ -833,6 +833,14 @@ function studyActions(p, c) {
   return [["study", ICON.play, "自动学习", study],
     ...(f.review ? [["review", ICON.repeat, "每日复习", "重看 30 分钟攒习惯分，每天一次"]] : [])];
 }
+// 智慧课程 has no share rule; its grade is mastery, the best score of each homework. Show that instead.
+function paperSummary(papers) {
+  const scores = (papers || []).map((x) => Number(x.score)).filter((n) => Number.isFinite(n) && n > 0);
+  if (!scores.length) return "";
+  const avg = scores.reduce((a, b) => a + b, 0) / scores.length, full = scores.filter((n) => n >= 100).length;
+  return `<div class="shares" title="每份作业只记最高分"><span class="share auto"><b>${avg.toFixed(1)}</b>作业均分</span>
+    <span class="share"><b>${full}/${scores.length}</b>满分</span></div>`;
+}
 // "#/course/p/c/<tab>": the Q&A tab only exists on courses whose assessment counts it.
 const courseTab = (c, tab) => tab === "answer" ? "answer" : tab === "qa" && c.features?.qa ? "qa" : "study";
 
@@ -885,7 +893,7 @@ function renderCourse(p, c, tab, full = false) {
       <div class="hero_main">
         <div class="crumb"><span class="dot ${p.id}"></span>${esc(p.short)}<span>/</span>${esc(c.type || p.name)}</div>
         <h1 class="title">${esc(c.name)}</h1>
-        ${fingerprint(c.shares)}
+        ${c.shares ? fingerprint(c.shares) : c.kind === "ai" ? paperSummary(papers) : ""}
       </div>
       <div class="hero_side">
         <div class="hero_stat"><span class="hero_label">学习进度</span>
@@ -925,6 +933,7 @@ function renderCourse(p, c, tab, full = false) {
       const on = selected.has(x.id);
       const pill = !x.available ? ""
         : x.redo_left != null ? `<span class="pill blue">可重做 · 剩 ${esc(x.redo_left)} 次</span>`
+        : x.redo ? '<span class="pill blue">可重做</span>'
         : x.done ? `<span class="pill">已提交</span>` : "";
       const note = x.reason || (x.redo_left != null ? "重做会覆盖当前成绩" : x.hint) || (x.available ? x.status : "");
       return `<button class="paper ${on ? "on" : ""} ${x.available ? "" : "off"}" data-paper="${esc(x.id)}">
