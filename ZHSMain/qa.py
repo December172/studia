@@ -276,6 +276,7 @@ QUESTION_FROM_REFERENCE = (
     "不要重复上面任何一条，也不要换个说法问同一件事。\n" + QUESTION_RULES
 )
 MIN_QUESTION, MAX_QUESTION = 8, 200
+QA_PACE = (45, 90)         # 两条之间随机隔几秒，每次重抽：间隔一样像脚本；网页和终端共用
 REFERENCE_ANSWERS = 1      # 参考题目只取回答数为 0–1 的
 MAX_REFERENCES = 8         # 塞进提示词的参考题目数量上限
 MAX_REFERENCE_CHARS = 70   # 每条参考题目截到这个长度

@@ -86,7 +86,7 @@ class TerminalMenuTest(unittest.TestCase):
         both = [SHARED, MOOC_LIKE]
         menu = self.menu(both, {"review": [SHARED], "qa": [SHARED]})
         self.assertIn("只做新一代信息技术导论", menu["每日复习"])
-        self.assertIn("只做新一代信息技术导论", menu["问答区答题"])
+        self.assertIn("只做新一代信息技术导论", menu["问答区"])
         menu = self.menu([MOOC_LIKE], {"review": [], "qa": []})
         self.assertEqual(set(menu), {"自动学习", "AI 答题"})
         menu = self.menu([SHARED], {"review": [SHARED], "qa": [SHARED]})
