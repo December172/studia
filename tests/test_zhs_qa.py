@@ -453,6 +453,32 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(texts, [QUESTIONS[0]])
         app.ai_configuration.assert_not_called()
 
+    def test_generation_error_is_shown_and_retryable(self):
+        from course_flow import CourseWorkspace
+
+        view, app = MagicMock(), MagicMock()
+        app.ai_configuration.side_effect = [RuntimeError("AI 服务 HTTP 503"), MagicMock()]
+        app.generate_zhs_questions.return_value = [QUESTIONS[0]]
+        view.confirm.return_value = True
+        view.qa_questions_review.return_value = [QUESTIONS[0]]
+        workspace = CourseWorkspace(app)
+        workspace.view = view
+        texts = workspace.prepare_questions([COURSE], {"source": "ai", "count": 1})
+        self.assertEqual(texts, [QUESTIONS[0]])
+        self.assertEqual(view.confirm.call_count, 1)
+        self.assertTrue(any("503" in str(call.args[0]) for call in view.note.call_args_list))
+
+    def test_generation_error_can_be_abandoned(self):
+        from course_flow import CourseWorkspace
+
+        view, app = MagicMock(), MagicMock()
+        app.ai_configuration.side_effect = RuntimeError("AI 服务 HTTP 503")
+        view.confirm.return_value = False
+        workspace = CourseWorkspace(app)
+        workspace.view = view
+        self.assertEqual(workspace.prepare_questions([COURSE], {"source": "ai", "count": 1}), [])
+        view.qa_questions_review.assert_not_called()
+
     def test_cancelled_generation_stays_in_menu(self):
         from course_flow import CourseWorkspace
 
