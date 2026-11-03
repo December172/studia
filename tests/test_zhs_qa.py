@@ -396,6 +396,28 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(app.execute_zhs_ask.call_args.args[2], [QUESTIONS[0]])
         self.assertEqual(view.operation_result.call_args.args[0], [])
 
+    def test_prepare_questions_manual_mode_skips_ai(self):
+        from course_flow import CourseWorkspace
+
+        view, app = MagicMock(), MagicMock()
+        view.qa_questions_review.return_value = [QUESTIONS[0]]
+        workspace = CourseWorkspace(app)
+        workspace.view = view
+        texts = workspace.prepare_questions([COURSE], {"source": "manual", "text": QUESTIONS[0]})
+        self.assertEqual(texts, [QUESTIONS[0]])
+        app.ai_configuration.assert_not_called()
+
+    def test_cancelled_generation_stays_in_menu(self):
+        from course_flow import CourseWorkspace
+
+        view, app = MagicMock(), MagicMock()
+        app.ai_configuration.side_effect = KeyboardInterrupt
+        workspace = CourseWorkspace(app)
+        workspace.view = view
+        texts = workspace.prepare_questions([COURSE], {"source": "ai", "topic": "主题", "count": 1})
+        self.assertEqual(texts, [])
+        view.qa_questions_review.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
