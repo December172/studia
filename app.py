@@ -456,6 +456,57 @@ class Application:
                     ai_client.session.close()
         return results
 
+    def execute_zhs_qa(self, client, courses, config, options):
+        """问答区：取题 → AI 写回答 → 发布。一条失败不打断队列，登录/验证码问题停止其余课程。"""
+        from ZHSMain.qa import QaBridge, answer_questions
+        from ZHSMain.api import ZHSApiError
+
+        limit = int(options.get("limit") or 10)
+        max_answers = int(options.get("max_answers") or 0)
+        interval = options.get("interval")
+        interval = 60 if interval is None else int(interval)
+        state_path = Path(self.store.path).parent / "zhs-qa-answers.json"
+        # 计数只认已经到手的发布结果：验证码中断时队列里的统计会随异常一起丢掉。
+        totals = {"answered": 0, "failed": 0, "skipped": 0}
+        counted = {"success": "answered", "error": "failed", "skipped": "skipped"}
+        with self.view.activity("问答区答题"):
+            self.progress.begin("问答区答题", limit * len(courses), "条")
+            ai = self.verify_ai(config)
+            try:
+                for row in courses:
+                    course = (row or {}).get("zhs") or {}
+                    course_id = course.get("courseId")
+                    # 共享课带 recruitId；智慧课程只有 classId，问答区两者取其一。
+                    recruit_id = course.get("recruitId") or course.get("classId")
+                    name = row.get("courseName") or "当前课程"
+                    if not course_id or not recruit_id:
+                        self.view.log(f"{name}：没有可作答的问答区，已跳过。", "warning")
+                        continue
+                    before = dict(totals)
+
+                    def event(kind, title, status=""):
+                        if kind != "result":
+                            return
+                        if status in counted:
+                            totals[counted[status]] += 1
+                        self.progress.result(f"{name} · {title}", status)
+
+                    try:
+                        with QaBridge(client.access_token, course_id=course_id,
+                                      recruit_id=recruit_id) as qa:
+                            answer_questions(
+                                qa, ai, max_answers=max_answers, limit=limit, interval=interval,
+                                state_path=state_path, on_event=event)
+                    except (CaptchaRequired, AuthenticationExpired, PlatformUnavailable,
+                            ZHSApiError) as exc:
+                        self.view.log(f"{name}：{exc}；其余课程未执行。", "warning")
+                        break
+                    self.view.log(f"{name}：发布 {totals['answered'] - before['answered']} 条，"
+                                  f"失败 {totals['failed'] - before['failed']} 条。")
+            finally:
+                ai.session.close()
+        return totals
+
     def run(self):
         from course_flow import CourseWorkspace
         self.remember(self.store.ensure_default_model)

@@ -98,6 +98,14 @@ class CourseWorkspace:
                                 "智慧课程会跳过。每天运行一次。" % REVIEW_MINUTES))
                     result = self.execute(lambda: self.app.study(
                         self.platform, self.client, courses, review_minutes=REVIEW_MINUTES))
+                elif mode == 4 and self.platform == 2:
+                    options = self.view.qa_settings(self.store.get("qa", {}))
+                    self.app.remember(lambda: self.store.set("qa", options))
+                    self.view.qa_plan(courses, options)
+                    config = self.app.ai_configuration()
+                    result = self.execute(
+                        lambda: self.app.execute_zhs_qa(self.client, courses, config, options),
+                        "问答区答题")
                 else:
                     result = self.tasks(courses, mode, task_state.setdefault(mode, {}))
                 if result == 2:

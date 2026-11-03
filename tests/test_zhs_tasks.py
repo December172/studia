@@ -43,6 +43,11 @@ class CourseMenuTest(unittest.TestCase):
         self.assertIn("AI 答题", names)
         self.assertNotIn("导出题目", names)
 
+    def test_qa_area_is_zhs_only(self):
+        self.assertIn("问答区答题", self.menu(2))
+        self.assertNotIn("问答区答题", self.menu(0))
+        self.assertNotIn("问答区答题", self.menu(1))
+
     def test_resource_library_keeps_study_only(self):
         self.assertEqual(self.menu(1), ["自动学习"])
 

@@ -623,7 +623,8 @@ class TerminalUI:
             choices += [(2, "AI 答题", "AI 作答并自动交卷"), (3, "导出题目", "保存题目和已有答案")]
         elif platform == 2:
             choices += [(2, "AI 答题", "AI 作答，可选自动交卷"),
-                        (3, "每日复习", "共享课重看已学视频 30 分钟，攒学习习惯")]
+                        (3, "每日复习", "共享课重看已学视频 30 分钟，攒学习习惯"),
+                        (4, "问答区答题", "取回答数少的提问，AI 作答并发布")]
         return self.choice(title, choices, help_text="Esc 返回课程列表 · q 退出")
 
     def choose_platform(self, current):
@@ -1264,6 +1265,39 @@ class TerminalUI:
         mode = self.choice("AI / 执行方式", [(1, "仅生成答案", "不交卷，无平台成绩"),
                                                   (2, "答题并自动交卷", "全部题目通过校验后提交")], default=2)
         return mode == 2
+
+    def qa_settings(self, defaults=None):
+        """问答区参数：题数、题目回答数门槛、发布间隔。Esc 返回。"""
+        saved = defaults if isinstance(defaults, dict) else {}
+        fields = (("limit", "单次题数", 10, 1, 20, "一次最多处理几题"),
+                  ("max_answers", "只答回答数不超过", 1, 0, 5, "0 表示还没人回答的题"),
+                  ("interval", "发布间隔（秒）", 60, 20, 300, "太快容易被判定为刷量"))
+        current = {}
+        for key, _, fallback, low, high, _ in fields:
+            value = saved.get(key)
+            current[key] = int(value) if isinstance(value, int) and low <= value <= high else fallback
+        while True:
+            self.table("问答区答题", ["项目", "当前值"],
+                       [(label, current[key]) for key, label, _, _, _, _ in fields])
+            self.note("从课程问答区的推荐列表取题，AI 作答后逐条发布；已发布过的题会跳过。")
+            self.note("回车保留当前值 · Esc 返回 · q 退出")
+            edited = dict(current)
+            for key, label, _, low, high, hint in fields:
+                while True:
+                    text = self.ask(f"{label}（{low}–{high}，{hint}）", edited[key])
+                    if text.isdigit() and low <= int(text) <= high:
+                        edited[key] = int(text)
+                        break
+                    self.note(f"请输入 {low}–{high} 的整数。", "warning")
+            if self.confirm("按这组设置开始", default=True):
+                return edited
+            current = edited
+
+    def qa_plan(self, courses, options):
+        self.note(f"准备开始：{len(courses)} 门课程 · 本次最多 {options['limit']} 条", "accent")
+        self.note(f"只答回答数 ≤ {options['max_answers']} 的提问 · 每条间隔 {options['interval']} 秒 · "
+                  "发布后记录在本机，重复运行不会重答。")
+        self.note("题干会发送给所选 AI 服务；回答发布后公开在你的账号名下，请自行确认内容。")
 
     def concurrency_editor(self, current, *, message=''):
         from concurrency_ui import edit_concurrency
