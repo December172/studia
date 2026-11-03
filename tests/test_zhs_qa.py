@@ -274,6 +274,8 @@ class QaDraftsTest(unittest.TestCase):
         self.assertEqual(view.qa_size("条数", (5, 10, 20), 20), 20)
         view, _ = self.view([""])
         self.assertEqual(view.qa_size("条数", (5, 10, 20), 7), 10)
+        view, _ = self.view(["3"])  # 编号是第几项，不是条数
+        self.assertEqual(view.qa_size("条数", (5, 10, 20), None), 20)
 
 
 class TuiExecuteTest(unittest.TestCase):
