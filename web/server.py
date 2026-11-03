@@ -62,6 +62,7 @@ JOBS = {}
 # next start if it comes within the hour; each job is resumed at most a few times in a row.
 RESUME_WINDOW = 3600
 RESUME_LIMIT = 3
+STEADY = 600  # seconds a resumed job must run before its resume count starts over
 INTERRUPTED = "更新时中断"
 JOB_THREAD = re.compile(r"studia-job-([0-9a-f]+)")
 
@@ -207,8 +208,9 @@ class Studia:
 
     def expire(self, platform):
         logger.warning("%s 登录已失效，已删除保存的登录状态", platform.spec["name"])
-        self.store.clear_session(platform.id)
-        self.drop(platform)
+        with self.lock:
+            self.drop(platform)
+            self.store.clear_session(platform.id)
         return HttpError(401, "%s 登录已过期，请重新登录" % platform.spec["name"])
 
     # ------------------------------------------------------------ login
@@ -302,8 +304,9 @@ class Studia:
 
     def logout(self, pid):
         platform = self.platform(pid)
-        self.store.clear_session(pid)
-        self.drop(platform)
+        with self.lock:  # under the lock so save_sessions() cannot write the old cookies back in between
+            self.drop(platform)
+            self.store.clear_session(pid)
         return {}
 
     # ------------------------------------------------------------ courses
@@ -514,6 +517,7 @@ class Studia:
                 # The job changed this course's progress and papers; read them afresh next time.
                 platform.cache.pop(("units", job["course"]), None)
                 platform.cache.pop(("tasks", job["course"]), None)
+                self.save_sessions(platform)
             with self.lock:
                 if self.closing and state == "stopped":
                     summary = INTERRUPTED
@@ -544,7 +548,9 @@ class Studia:
             return
         now = stopped_at or time.time()
         active = [{"platform": j["platform"], "type": j["kind"], "course": j["course"], "course_name": j["course_name"],
-                   "resumes": j.get("resumes", 0),
+                   # Only back-to-back restarts count toward RESUME_LIMIT (a job that brings the service down);
+                   # one that has studied for a while since its last start is not a crash loop.
+                   "resumes": 0 if now - (j.get("running_since") or now) > STEADY else j.get("resumes", 0),
                    # Review time still owed: its length minus what it has already played.
                    "minutes": max(0, j.get("minutes", 0) - (now - j["running_since"]) / 60 if j.get("running_since") else j.get("minutes", 0))}
                   for j in sorted(self.jobs.values(), key=lambda j: j["started"])]
@@ -561,8 +567,23 @@ class Studia:
         except OSError:
             logger.warning("任务记录保存失败", exc_info=True)
 
+    def save_sessions(self, *platforms):
+        """Write each live client's current cookies back to the store. The platform renews them while
+        they are in use, and the copy saved at sign-in may no longer work after a restart."""
+        for platform in platforms or self.platforms.values():
+            with self.lock:
+                client = platform.client
+                if client is None:
+                    continue
+                try:
+                    if client.access_token:
+                        self.store.save_session(platform.id, client)
+                except Exception:  # a cookie jar changing under us, a full disk: keep the older copy
+                    logger.warning("保存%s登录状态失败", platform.spec["name"], exc_info=True)
+
     def shutdown(self):
         """The service is stopping (usually an update): keep the running jobs on disk for resume(), then stop them."""
+        self.save_sessions()
         with self.lock:
             self._save(stopped_at=time.time())
             self.closing = True

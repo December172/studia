@@ -65,6 +65,21 @@ class ResumeJobsTest(unittest.TestCase):
             app.start_job.assert_not_called()
             self.assertEqual(app.history[0]["summary"], INTERRUPTED)
 
+    def test_only_back_to_back_restarts_count_toward_the_limit(self):
+        app = self.app()
+        app.start_job({"platform": "zhs", "type": "study", "course": "ai-c1"}, resumes=3)
+        time.sleep(0.1)
+        (job,) = app.jobs.values()
+        with app.lock:
+            app._save()
+        self.assertEqual(json.loads(self.path.read_text())["active"][0]["resumes"], 3)  # restarted again at once
+        job["running_since"] -= 3600  # studied for an hour since it came back
+        with app.lock:
+            app._save()
+        self.assertEqual(json.loads(self.path.read_text())["active"][0]["resumes"], 0)
+        app.shutdown()
+        drain(5)
+
     def test_history_survives_a_restart(self):
         app = self.app()
         app.platforms["zhs"].spec = dict(app.platforms["zhs"].spec, handler=lambda **kw: None)
