@@ -159,29 +159,45 @@ QUESTIONS = ["第一章里的两个概念有什么区别？", "为什么这里�
 class WriteQuestionsTest(unittest.TestCase):
     def test_writes_requested_questions(self):
         ai = FakeAi(LONG)
-        self.assertEqual(write_questions(ai, "主题", 2), [LONG])  # 重复的只发一条
+        self.assertEqual(write_questions(ai, QUESTIONS, 2), [LONG])  # 重复的只发一条
         self.assertEqual(ai.calls, 2)
 
     def test_short_and_repeated_answers_are_skipped(self):
-        ai = FakeAi("太短")
-        self.assertEqual(write_questions(ai, "主题", 2), [])
-        repeated = write_questions(FakeAi(LONG), "主题", 3)
-        self.assertEqual(len(repeated), 1)
+        self.assertEqual(write_questions(FakeAi("太短"), [], 2), [])
+        self.assertEqual(len(write_questions(FakeAi(LONG), [], 3)), 1)
 
     def test_lead_ins_are_dropped(self):
         ai = FakeAi("老师好，请问合同效力的认定标准是什么？")
-        self.assertEqual(write_questions(ai, "主题", 1), ["合同效力的认定标准是什么？"])
+        self.assertEqual(write_questions(ai, [], 1), ["合同效力的认定标准是什么？"])
 
     def test_address_kept_when_it_is_part_of_the_question(self):
         text = "老师布置的作业要求和课程大纲不一致，以哪个为准？"
-        self.assertEqual(write_questions(FakeAi(text), "主题", 1), [text])
+        self.assertEqual(write_questions(FakeAi(text), [], 1), [text])
 
-    def test_prompt_names_the_course_and_topic(self):
+    def test_reference_questions_are_used_as_topics(self):
         ai = FakeAi(LONG)
-        write_questions(ai, "合同效力", 1, course_name="国家安全教育")
+        write_questions(ai, QUESTIONS, 1, course_name="国家安全教育")
         title = ai.questions[0]["title"]
         self.assertIn("国家安全教育", title)
-        self.assertIn("合同效力", title)
+        for question in QUESTIONS:
+            self.assertIn(question, title)
+
+    def test_answer_matching_a_reference_is_skipped(self):
+        self.assertEqual(write_questions(FakeAi(QUESTIONS[0]), QUESTIONS, 1), [])
+
+    def test_reference_is_capped(self):
+        ai = FakeAi(LONG)
+        write_questions(ai, ["问题 %d 号？" % index for index in range(40)], 1)
+        title = ai.questions[0]["title"]
+        self.assertIn("问题 7 号？", title)
+        self.assertNotIn("问题 8 号？", title)
+
+    def test_prompt_falls_back_to_course_topic(self):
+        ai = FakeAi(LONG)
+        write_questions(ai, [], 1, course_name="国家安全教育")
+        title = ai.questions[0]["title"]
+        self.assertIn("国家安全教育", title)
+        self.assertIn("课程的核心概念", title)
 
 
 class PublishQuestionsTest(unittest.TestCase):
@@ -230,15 +246,15 @@ class QaAskSettingsTest(unittest.TestCase):
         self.assertEqual(view.qa_ask_settings({})["text"], "第一章的两个概念有什么区别？")
         self.assertIn("请输入 10–120 个字。", output.getvalue())
 
-    def test_ai_mode_asks_topic_and_count(self):
-        view, _ = self.view(["2", "合同效力", "2", "", "y"])
+    def test_ai_mode_asks_only_count(self):
+        view, _ = self.view(["2", "2", "", "y"])
         options = view.qa_ask_settings({})
-        self.assertEqual((options["source"], options["topic"], options["count"]),
-                         ("ai", "合同效力", 2))
+        self.assertEqual((options["source"], options["count"]), ("ai", 2))
+        self.assertNotIn("topic", options)
 
     def test_saved_values_become_defaults(self):
-        view, _ = self.view(["2", "", "", "", "y"])
-        saved = {"source": "ai", "topic": "合同效力", "count": 3, "interval": 30}
+        view, _ = self.view(["2", "", "", "y"])
+        saved = {"source": "ai", "count": 3, "interval": 30}
         options = view.qa_ask_settings(saved)
         self.assertEqual({key: options[key] for key in saved}, saved)
 
@@ -350,14 +366,29 @@ class TuiAskTest(unittest.TestCase):
         self.assertEqual(stats["published"], 1)
         self.assertEqual(bridge.call_count, 1)
 
-    def test_generate_uses_ai_without_browser(self):
+    def test_generate_reads_reference_questions(self):
+        ai = FakeAi(LONG)
+        self.app.verify_ai = Mock(return_value=ai)
+        qa = FakeQa([{"id": 1, "content": QUESTIONS[0]}, {"id": 2, "content": QUESTIONS[1]}])
+        bridge = Mock()
+        bridge.return_value.__enter__ = Mock(return_value=qa)
+        bridge.return_value.__exit__ = Mock(return_value=False)
+        with patch("ZHSMain.qa.QaBridge", bridge):
+            texts = self.app.generate_zhs_questions(Mock(access_token="[]"), [COURSE], Mock(),
+                                                    {"count": 1})
+        self.assertEqual(texts, [LONG])
+        self.assertIn(QUESTIONS[0], ai.questions[0]["title"])
+        self.assertEqual(bridge.call_args.kwargs["recruit_id"], 426135)
+        self.assertTrue(ai.session.close.called)
+
+    def test_generate_without_qa_area_falls_back(self):
         ai = FakeAi(LONG)
         self.app.verify_ai = Mock(return_value=ai)
         with patch("ZHSMain.qa.QaBridge") as bridge:
-            texts = self.app.generate_zhs_questions(Mock(), "合同效力", 2, "国家安全教育")
-        self.assertEqual(texts, [LONG])
+            self.app.generate_zhs_questions(Mock(access_token="[]"), [{"courseName": "无问答区"}],
+                                            Mock(), {"count": 1})
         bridge.assert_not_called()
-        self.assertTrue(ai.session.close.called)
+        self.assertIn("课程的核心概念", ai.questions[0]["title"])
 
 
 class WorkspaceTest(unittest.TestCase):
