@@ -627,7 +627,7 @@ const VIEWS = {
     if (!p || !p.logged_in) return go(p ? `#/login/${pid}` : homeOf(currentPlatform()));
     const c = courseOf(pid, cid);
     if (!c) return setPage(`<div class="empty">${state.courses[pid] ? "没有找到这门课程" : "正在读取课程…"}</div>`);
-    renderCourse(p, c, tab === "answer" ? "answer" : "study", true);
+    renderCourse(p, c, courseTab(c, tab), true);
   },
 
   async settings(tab = "models") {
@@ -831,8 +831,34 @@ function studyActions(p, c) {
   const study = p.id === "zhs" ? (c.kind === "shared" ? "1.5 倍速看完剩下的视频，弹题自动答" : "完成文档、课件和视频")
     : p.id === "mooc" ? "学完课件和视频，自动讨论和评价" : "学完资源库里的资源";
   return [["study", ICON.play, "自动学习", study],
-    ...(f.review ? [["review", ICON.repeat, "每日复习", "重看 30 分钟攒习惯分，每天一次"]] : []),
-    ...(f.qa ? [["qa", ICON.chat, "问答区", "AI 回答回复少的提问，一次 10 条，每条隔 1 分钟"]] : [])];
+    ...(f.review ? [["review", ICON.repeat, "每日复习", "重看 30 分钟攒习惯分，每天一次"]] : [])];
+}
+// "#/course/p/c/<tab>": the Q&A tab only exists on courses whose assessment counts it.
+const courseTab = (c, tab) => tab === "answer" ? "answer" : tab === "qa" && c.features?.qa ? "qa" : "study";
+
+// Q&A tab: three numbers kept per browser, the same bounds the server checks (web/server.py _qa_options).
+const QA_OPTIONS = [["limit", "一次发几条", 1, 50, 1, 10], ["max_answers", "只挑回复不超过几条的提问", 0, 20, 1, 1],
+  ["interval", "每条间隔（秒）", 30, 600, 30, 60]];
+function qaOptions() {
+  const saved = store.get("studia-qa", {});
+  return Object.fromEntries(QA_OPTIONS.map(([k, , low, high, , fallback]) =>
+    [k, Number.isInteger(saved[k]) ? Math.max(low, Math.min(high, saved[k])) : fallback]));
+}
+function qaBody(p, c) {
+  const o = qaOptions(), block = blocker(p.id, c.id, "qa");
+  const runs = state.history.filter((j) => j.platform === p.id && j.course === c.id && j.title === LABEL.qa).slice(0, 5);
+  const row = ([k, label, low, high]) => `<div class="model plain stepper_row"><span class="m1"><b>${label}</b></span>
+    <span class="stepper"><button class="btn small" data-qa-step="${k}" data-d="-1" aria-label="减少" ${o[k] <= low ? "disabled" : ""}>−</button>
+      <output>${o[k]}</output><button class="btn small" data-qa-step="${k}" data-d="1" aria-label="增加" ${o[k] >= high ? "disabled" : ""}>＋</button></span></div>`;
+  return `<div class="section"><h3>回答提问</h3><span class="aside">AI 写好后逐条公开发布</span></div>
+    <div class="models">${QA_OPTIONS.map(row).join("")}
+      <div class="model plain qa_go"><span class="m1"><small class="sans">${esc(block || `约 ${Math.ceil((o.limit * o.interval) / 60)} 分钟发完；回答会挂在你的账号名下`)}</small></span>
+        <span class="row_btns"><button class="btn primary" data-qa-start ${block ? "disabled" : ""}>开始回答</button></span></div></div>
+    <div class="section"><h3>最近</h3></div>
+    ${runs.length ? `<div class="runs">${runs.map((j) => `<div class="run">${ICON[j.state] || ICON.stopped}
+      <span class="t1">${esc(j.summary || STATE_WORD[j.state] || "")}<small>${ago(j.ended || j.started)}</small></span>
+      <span class="fix"></span><span class="state ${j.state}">${STATE_WORD[j.state] || ""}<span class="mono">${j.ended ? duration(j.ended - j.started) : ""}</span></span>
+      <span class="when"></span></div>`).join("")}</div>` : '<div class="empty">还没在这门课发过回答</div>'}`;
 }
 
 // The course's fingerprint: where its points come from, one box per share sized by its weight.
@@ -872,6 +898,7 @@ function renderCourse(p, c, tab, full = false) {
     <div class="tabs seg" role="tablist">
       <button class="tab" role="tab" aria-selected="${tab === "study"}" data-go="#/course/${p.id}/${c.id}">学习</button>
       <button class="tab" role="tab" aria-selected="${tab === "answer"}" data-go="#/course/${p.id}/${c.id}/answer">答题${open ? `<span class="n">${open}</span>` : ""}</button>
+      ${c.features?.qa ? `<button class="tab" role="tab" aria-selected="${tab === "qa"}" data-go="#/course/${p.id}/${c.id}/qa">问答区</button>` : ""}
     </div>`;
   let body;
   if (tab === "study") {
@@ -884,6 +911,8 @@ function renderCourse(p, c, tab, full = false) {
     }).join("")}</div>
       <div class="section"><h3>学习单元</h3></div>
       ${gridHtml(k)}`;
+  } else if (tab === "qa") {
+    body = qaBody(p, c);
   } else if (!p.features.answer) {
     body = `<div class="notice">${esc(p.name)} 的网页版答题还在接入中。现在可以在终端里运行 <code>python StartWork.py</code>，选这门课后进入「AI 答题」。</div>`;
   } else if (!papers) {
@@ -923,6 +952,14 @@ function renderCourse(p, c, tab, full = false) {
   if (full) setPage(head + body); else { quiet = true; setPage(head + body); quiet = false; }
 
   page.querySelectorAll("[data-start]").forEach((el) => (el.onclick = () => startJob({ platform: p.id, course: c.id, type: el.dataset.start })));
+  page.querySelectorAll("[data-qa-step]").forEach((el) => (el.onclick = () => {
+    const o = qaOptions(), [, , low, high, step] = QA_OPTIONS.find(([k]) => k === el.dataset.qaStep);
+    o[el.dataset.qaStep] = Math.max(low, Math.min(high, o[el.dataset.qaStep] + step * Number(el.dataset.d)));
+    store.set("studia-qa", o);
+    renderCourse(p, c, tab);
+  }));
+  const qaStart = $("[data-qa-start]", page);
+  if (qaStart) qaStart.onclick = () => startJob({ platform: p.id, course: c.id, type: "qa", ...qaOptions() });
   page.querySelectorAll("[data-paper]").forEach((el) => (el.onclick = () => {
     const x = papers.find((y) => String(y.id) === el.dataset.paper);
     if (!x.available) { toast(x.reason || "这份试卷暂不可选"); return; }
@@ -1185,7 +1222,7 @@ function repaint() {
       else if (name === "me") VIEWS.me();
       else if (name === "course") {
         const p = platformOf(a), course = courseOf(a, decodeURIComponent(b || ""));
-        if (p && course) renderCourse(p, course, c === "answer" ? "answer" : "study");
+        if (p && course) renderCourse(p, course, courseTab(course, c));
         else if (p) VIEWS.course(a, decodeURIComponent(b || ""), c);
       }
     } finally { quiet = false; }
