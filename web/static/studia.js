@@ -833,14 +833,6 @@ function studyActions(p, c) {
   return [["study", ICON.play, "自动学习", study],
     ...(f.review ? [["review", ICON.repeat, "每日复习", "重看 30 分钟攒习惯分，每天一次"]] : [])];
 }
-// 智慧课程 has no share rule; its grade is mastery, the best score of each homework. Show that instead.
-function paperSummary(papers) {
-  const scores = (papers || []).map((x) => Number(x.score)).filter((n) => Number.isFinite(n) && n > 0);
-  if (!scores.length) return "";
-  const avg = scores.reduce((a, b) => a + b, 0) / scores.length, full = scores.filter((n) => n >= 100).length;
-  return `<div class="shares" title="每份作业只记最高分"><span class="share auto"><b>${avg.toFixed(1)}</b>作业均分</span>
-    <span class="share"><b>${full}/${scores.length}</b>满分</span></div>`;
-}
 // "#/course/p/c/<tab>": the Q&A tab only exists on courses whose assessment counts it.
 const courseTab = (c, tab) => tab === "answer" ? "answer" : tab === "qa" && c.features?.qa ? "qa" : "study";
 
@@ -873,16 +865,29 @@ function qaBody(p, c) {
 // Boxes Studia can fill are inked; the rest (exams, meet sessions) stay outlined.
 const SHARES = [["progress", "学习", 1], ["habit", "习惯", 1], ["interactive", "互动", 1], ["knowledge", "掌握度", 0],
   ["test", "测试", 1], ["meet", "见面课", 0], ["final", "期末", 0]];
-// Each box is as wide as its share and fills as far as the points earned; the numbers live in the tooltip.
+// Each box is exactly as wide as its share and fills as far as the points earned; a ruler underneath
+// reads the 0–100 scale, with a long tick and its number where one share ends and the next begins.
 const pts = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
 function fingerprint(shares, earned) {
   const parts = shares ? SHARES.filter(([k]) => shares[k] > 0) : [];
   if (!parts.length) return "";
-  return `<div class="shares">${parts.map(([k, word, auto]) => {
+  let at = 0;
+  const edges = [0], boxes = parts.map(([k, word, auto]) => {
     const got = earned?.[k], none = earned && !got && (k === "final" || k === "meet");
     const fill = earned && !none ? Math.min(100, (got / shares[k]) * 100) : 0;
-    return `<span class="share ${auto ? "auto" : ""}" style="flex:${shares[k]};--fill:${fill}%" title="${word} ${earned ? `${none ? "未开始" : pts(got)} / ` : ""}${shares[k]} 分">${word}</span>`;
-  }).join("")}</div>${earned ? `<p class="score_now">当前 <b>${pts(earned.total)}</b> 分</p>` : ""}`;
+    edges.push((at += shares[k]));
+    return `<span class="share ${auto ? "auto" : ""}" style="--fill:${fill}%" title="${word} ${earned ? `${none ? "未开始" : pts(got)} / ` : ""}${shares[k]} 分">${word}</span>`;
+  });
+  const ticks = [...new Set([...edges, ...Array.from({ length: Math.floor(at / 5) + 1 }, (_, i) => i * 5)])].sort((a, b) => a - b);
+  const ruler = ticks.map((v) => `<i class="${edges.includes(v) ? "edge" : v % 10 ? "" : "ten"}" style="left:${(v / at) * 100}%">${edges.includes(v) ? `<span>${v}</span>` : ""}</i>`).join("");
+  return `<div class="fp"><div class="shares" style="grid-template-columns:${parts.map(([k]) => `minmax(0, ${shares[k]}fr)`).join(" ")}">${boxes.join("")}</div>
+    <div class="ruler" aria-hidden="true">${ruler}</div></div>`;
+}
+// Under the progress digits: the course's current score where the platform gives one.
+function scoreNote(c, papers, earned) {
+  if (earned) return `当前 <b>${pts(earned.total)}</b> 分`;
+  const scores = c.kind === "ai" ? (papers || []).map((x) => Number(x.score)).filter((n) => Number.isFinite(n) && n > 0) : [];
+  return scores.length ? `作业均分 <b>${(scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1)}</b>` : "";
 }
 const loadingEarned = new Set();
 async function loadEarned(p, c) {
@@ -900,20 +905,18 @@ function renderCourse(p, c, tab, full = false) {
   const k = key(p.id, c.id);
   const papers = state.papers[k];
   const open = (papers || []).filter((x) => x.available && !x.done).length;
-  const chapters = unitsOf(k);
-  const t = chapters && tally(chapters);
   const answerBlock = blocker(p.id, c.id, "answer");
   const head = `
     <section class="hero">
       <div class="hero_main">
         <div class="crumb"><span class="dot ${p.id}"></span>${esc(p.short)}<span>/</span>${esc(c.type || p.name)}</div>
         <h1 class="title">${esc(c.name)}</h1>
-        ${c.shares ? fingerprint(c.shares, state.earned[k]) : c.kind === "ai" ? paperSummary(papers) : ""}
+        ${fingerprint(c.shares, state.earned[k])}
       </div>
       <div class="hero_side">
         <div class="hero_stat"><span class="hero_label">学习进度</span>
           ${c.progress == null ? '<span class="digits"><i>—</i></span>' : `<span class="digits">${[...String(c.progress)].map((d) => `<i>${esc(d)}</i>`).join("")}<small>%</small></span>`}
-          <span class="hero_note">${t ? `完成 ${t.done}/${t.all} · 待学 ${t.queued + t.running + t.waiting + t.failed}` : ""}</span></div>
+          <span class="hero_note score_note">${scoreNote(c, papers, state.earned[k])}</span></div>
         ${p.features.answer ? `<button class="hero_stat" data-go="#/course/${p.id}/${c.id}/answer"><span class="hero_label">可作答</span>
           <span class="pen_num">${papers ? open : "—"}</span><span class="hero_note">份试卷 ›</span></button>` : ""}
       </div>
