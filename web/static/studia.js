@@ -678,19 +678,27 @@ const VIEWS = {
   },
 };
 
+let stepTimer = 0;
 function paintSettings(tab, head, data, again) {
   if (tab === "study") {
+    // Small numbers: tap − / +, saved as soon as the taps stop. No keyboard, no save button.
+    const row = (k, label, note) => `<div class="model plain stepper_row"><span class="m1"><b>${label}</b><small class="sans">${note}</small></span>
+      <span class="stepper"><button class="btn small" data-step="${k}" data-d="-1" aria-label="减少" ${data.concurrency[k] <= 1 ? "disabled" : ""}>−</button>
+        <output>${data.concurrency[k]}</output><button class="btn small" data-step="${k}" data-d="1" aria-label="增加" ${data.concurrency[k] >= 8 ? "disabled" : ""}>＋</button></span></div>`;
     quiet = again;
-    setPage(`${head}<div class="section"><h3>并发数量</h3></div>
-      <div class="models"><div class="form_card" style="margin:0;box-shadow:none">
-        <div class="field"><label>AI 答题</label><input type="number" min="1" max="8" name="ai" value="${data.concurrency.ai}"></div>
-        <div class="field"><label>自动学习</label><input type="number" min="1" max="8" name="study" value="${data.concurrency.study}"></div>
-        <div class="form_btns"><button class="btn primary" data-concurrency>保存</button></div></div></div>`);
+    setPage(`${head}<div class="section"><h3>并发数量</h3><span class="aside">1–8</span></div>
+      <div class="models">${row("ai", "AI 答题", "同时作答的题数")}${row("study", "自动学习", "同时学的资源数，智慧树固定 1 个")}</div>`);
     quiet = false;
-    $("[data-concurrency]", page).onclick = async () => {
-      const body = { ai: Number($('input[name="ai"]', page).value), study: Number($('input[name="study"]', page).value) };
-      try { await api("/api/settings/concurrency", { method: "POST", body }); state.settings.concurrency = body; toast("已保存"); } catch (e) { toast(e.message); }
-    };
+    page.querySelectorAll("[data-step]").forEach((el) => (el.onclick = () => {
+      const c = state.settings.concurrency, k = el.dataset.step;
+      c[k] = Math.max(1, Math.min(8, c[k] + Number(el.dataset.d)));
+      paintSettings(tab, head, state.settings, true);
+      clearTimeout(stepTimer);
+      stepTimer = setTimeout(async () => {
+        try { await api("/api/settings/concurrency", { method: "POST", body: { ai: c.ai, study: c.study } }); toast("已保存"); }
+        catch (e) { toast(e.message); state.settings = null; VIEWS.settings(tab); }
+      }, 600);
+    }));
     return;
   }
   renderModels(head, data.models, null, again);
