@@ -1257,6 +1257,7 @@ async function afterLogin(pid) {
   toast("登录成功");
   forgetPlatform(pid);
   await refreshState();
+  if (!state.courses[pid]) await loadCourses(pid);  // the account event's refresh may be the one still reading them
   switchPlatform(pid);
 }
 
