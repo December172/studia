@@ -118,10 +118,13 @@ class QuestionTests(unittest.TestCase):
         self.assertEqual((result["paperId"], result["paperSubId"]), ("parent", "child"))
         self.assertEqual(json.loads(result["questionNo"]), [2, 1])
 
-    def test_media_and_unknown_types_never_guessed(self):
-        for raw in [question(12), dict(question(), title='<img src="x">辨认乐谱'), dict(question(), audioUrl="https://example.org/a")]:
-            with self.assertRaises(ValueError):
-                prepare_question(raw, 0)
+    def test_media_questions_are_answered_from_their_text_and_unknown_types_refused(self):
+        with self.assertRaises(ValueError):
+            prepare_question(question(12), 0)
+        for raw in [dict(question(), title='<img src="x">辨认乐谱'), dict(question(), audioUrl="https://example.org/a")]:
+            q = prepare_question(raw, 0)
+            self.assertIn("推测", q["context"])  # the model is told part of it is out of sight
+        self.assertEqual(prepare_question(dict(question(), title='<img src="x">'), 0)["title"], "（题干是图片或音频）")
 
 
 class APITests(unittest.TestCase):

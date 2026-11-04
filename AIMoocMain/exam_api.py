@@ -4,12 +4,30 @@ No speculative endpoints, automatic POST retries, or foreign account sessions.
 """
 import base64
 import json
+import math
+import re
 import time
 from urllib.parse import quote
 
 import requests
 
 from AIMoocMain.export_questions import unwrap_paper
+
+DIGITS = {c: i for i, c in enumerate("零一二三四五六七八九")}
+
+
+def paper_number(item):
+    """名字里第一个序号：专题五 → 5，模块 3 → 3，第二次测试 → 2；没有序号的排在后面，彼此保持原序。"""
+    match = re.search(r"\d+|[零一二三四五六七八九十]+", str(item.get("name") or ""))
+    if not match:
+        return math.inf
+    text = match.group()
+    if text.isdigit():
+        return int(text)
+    if "十" in text:  # 十、十二、二十、二十三
+        tens, _, ones = text.partition("十")
+        return DIGITS.get(tens[-1:], 1) * 10 + DIGITS.get(ones[:1], 0)
+    return int("".join(str(DIGITS[c]) for c in text))
 
 
 class ExamError(RuntimeError):
@@ -89,7 +107,8 @@ class ExamAPI:
                 seen.add(str(row.get("id") or row.get("examId")))
                 items.append(row)
             if len(rows) < 100:
-                return items
+                # 平台给的顺序是乱的（专题五、二、四、三、一），也没有排序字段：按名字里的序号排。
+                return sorted(items, key=paper_number)
         raise ExamError("试卷列表超过分页上限")
 
     def records(self, exam_id):

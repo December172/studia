@@ -100,8 +100,16 @@ class HostedServerTest(unittest.TestCase):
         app.jobs = {"j1": {"id": "j1", "kind": "study", "title": "自动学习", "course": "c", "course_name": "课",
                            "platform": "zhs", "state": "queued", "summary": "", "started": 1, "ended": None,
                            "lines": [], "cancel": threading.Event()}}
-        jobs = self.request("GET", "/api/admin/jobs", cookie=token)[1]["jobs"]
-        self.assertEqual([(j["username"], j["state"]) for j in jobs], [("alice", "queued")])
+        admin_app = self.hub.app(self.request("GET", "/api/auth/me", cookie=token)[1]["user"]["id"])
+        admin_app.jobs = {"mine": dict(app.jobs["j1"], id="mine", cancel=threading.Event())}   # under 我的, not 全站
+        people = self.request("GET", "/api/admin/jobs", cookie=token)[1]["people"]
+        admin_app.jobs = {}
+        self.assertEqual([(u["username"], u["limit"], [j["state"] for j in u["jobs"]]) for u in people], [("alice", 2, ["queued"])])
+        self.assertEqual(post("/api/admin/users/%s/jobs/j1/pause" % alice, {})[0], 200)
+        self.assertEqual(app.jobs["j1"]["state"], "paused")
+        alice_token, alice_csrf = self.login("alice", "alice-password")   # people order their own jobs too
+        self.assertEqual(self.request("POST", "/api/jobs/continue", {"id": "j1"}, cookie=alice_token, csrf=alice_csrf)[0], 200)
+        self.assertNotEqual(app.jobs["j1"]["state"], "paused")
         self.assertEqual(post("/api/admin/users/%s/jobs/j1/stop" % alice, {})[0], 200)
         self.assertTrue(app.jobs["j1"]["cancel"].is_set())
         status, text, _, _ = self.request("GET", "/api/admin/logs?kind=audit&from=%d&to=%d" % (time.time() - 3600, time.time() + 60), cookie=token)
