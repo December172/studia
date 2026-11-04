@@ -299,6 +299,8 @@ class LearningApiTest(unittest.TestCase):
         def handler(method, url, kwargs):
             if "getknowledgecurvideo" in url:
                 self.assertEqual(kwargs["data"]["mid"], "m1")
+                self.assertIn("mooc1-api.chaoxing.com", url)
+                self.assertIn("Android", kwargs["headers"]["User-Agent"])
                 return FakeResponse(json_body={"data": {"videoObject": json.dumps(blob)}})
             reports.append(kwargs["params"])
             return FakeResponse(json_body={"isPassed": bool(passed(len(reports), kwargs["params"]))})
@@ -431,7 +433,7 @@ class StatusApiTest(unittest.TestCase):
             ]}}})
 
         nodes = self.client(handler).course_nodes(COURSE)
-        self.assertIn("/gas/clazz", seen[0][0])
+        self.assertIn("mooc1-api.chaoxing.com/gas/clazz", seen[0][0])
         self.assertEqual(seen[0][1]["id"], "222")
         self.assertEqual(seen[0][1]["personid"], "333")
         self.assertEqual(nodes["123"], {"name": "1.1 函数", "finish": 2, "unfinish": 1, "click": 3})
@@ -450,6 +452,7 @@ class StatusApiTest(unittest.TestCase):
 
         api = self.client(handler)
         self.assertEqual(api.finished_job_ids(COURSE), {"j%d" % index for index in range(1, 22)})
+        self.assertTrue(all("mooc1-api.chaoxing.com" in url for url, _ in seen))
         self.assertEqual([params["page"] for _, params in seen], [1, 2])
 
     def test_job_status_ids_returns_both_sets(self):
