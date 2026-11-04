@@ -414,8 +414,9 @@ class ChaoxingApi:
     def study_video(self, course, job, *, speed=1.0, kind="Video", cancel_event=None):
         """完成一个视频/音频任务点，返回 success / forbidden / error / cancelled。
 
-        和源码一样先按“已看完”上报一次：平台接受就立即完成；不接受再按真实时间
-        累计播放进度（speed 倍速），每 30–90 秒（视频时间）上报一次。
+        先直接“拖到结尾”上报一次（isdrag=3）：平台允许拖拽的课程会立刻完成，不用等
+        真实播放时间；被拒绝时再按真实时间累计进度（speed 倍速），每 30–90 秒
+        （视频时间）上报一次，和源码的视频心跳一致。
         """
         info = self.video_status(job, kind)
         if info is None:
@@ -428,11 +429,17 @@ class ChaoxingApi:
         if duration <= 0:
             return "error"
         play_time = int(job.get("playTime") or 0) // 1000
-        passed, _ = self.video_log(course, job, dtoken, duration, play_time, kind)
-        if not passed:
-            passed, _ = self.video_log(course, job, dtoken, duration, duration, kind)
+        name = job.get("name") or job["jobid"]
+        # 直接拖到结尾。允许拖拽的课程（不少课程/视频不要求真实观看时长）一步完成，
+        # 不必每个视频都按真实时间播放。
+        passed, _ = self.video_log(course, job, dtoken, duration, duration, kind)
         if passed:
+            logger.info("%s：直接拖到结尾完成", name)
             return "success"
+        # 拖拽被拒时补报当前进度（源码是先报当前再试结尾，这里先试结尾）。
+        if self.video_log(course, job, dtoken, duration, play_time, kind)[0]:
+            return "success"
+        logger.info("%s：平台不允许拖到结尾，按真实时间播放（%.0f 倍速）", name, speed)
 
         last_log, last_iter = 0, time.time()
         wait = random.randint(30, 90)
