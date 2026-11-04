@@ -10,6 +10,9 @@ from AIMoocMain.api import AIMoocApi
 from AIMoocMain.main import AIMoocHandler
 from AIMoocMain.exam_api import ExamAPI, ExamError, ExamServiceError, TaskUnavailableError
 from AIMoocMain.export_questions import QuizExportHandler, collect_quiz_catalog, paper_display_name, paper_exam_id
+from ChaoxingMain.api import ChaoxingApi, WorkUnavailable
+from ChaoxingMain.exercise import ChaoxingExerciseRunner
+from ChaoxingMain.main import catalog as cx_catalog
 from ZYKMoocMain.api import ZYKMoocApi
 from ZYKMoocMain.main import ZYKMoocHandler
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi
@@ -19,7 +22,7 @@ from ZHSMain.answer import ZHSAnswerRunner
 from ZHSMain.memory import AnswerMemory
 from ZHSMain.login import qr_login
 from NewMoocMain.oauth_login import oauth_login
-from ai.client import AIClient, AIError
+from ai.client import AIClient, AIError, AIServiceError
 from ai.memory import MoocAnswerMemory
 from ai.runner import AnswerRunner
 from reporting import Reporter
@@ -110,6 +113,39 @@ class Application:
             rows = self.read_courses(client)
         self.remember(lambda: self.store.save_session(platform, client))
         self.view.set_user(getattr(client, "user_info", None))
+        return client, self.view.courses(rows) if choose else rows
+
+    def cx_credentials(self):
+        while True:
+            username = self.view.ask("超星手机号 / 账号").strip()
+            if not username:
+                self.view.note("账号不能为空。", "warning")
+                continue
+            password = self.view.ask("超星密码", secret=True)
+            if not password:
+                self.view.note("密码不能为空。", "warning")
+                continue
+            return username, password
+
+    def cx_client_and_courses(self, choose=True):
+        """超星用账号密码登录，只保存平台返回的 Cookie；和网页版共用一份 session。"""
+        self.view.set_user()
+        saved = self.store.session("cx")
+        if saved:
+            try:
+                with self.view.activity("恢复已保存的超星登录"):
+                    client = ChaoxingApi(cookies=saved["cookies"])
+                    rows = client.course_list()
+                self.view.note("已复用本机超星登录。")
+                return client, self.view.courses(rows) if choose else rows
+            except AuthenticationExpired:
+                self.store.clear_session("cx")
+                self.view.note("保存的超星登录已过期，请重新输入账号密码。", "warning")
+        username, password = self.cx_credentials()
+        with self.view.activity("登录超星"):
+            client = ChaoxingApi(username, password)
+            rows = client.course_list()
+        self.remember(lambda: self.store.save_session("cx", client))
         return client, self.view.courses(rows) if choose else rows
 
     @staticmethod
@@ -413,6 +449,47 @@ class Application:
                     break
         return results
 
+    def cx_task_catalog(self, client, courses):
+        """超星章节里的作业，和智慧树用同一种 (course, item, category) 结构。"""
+        catalog = []
+        with self.view.activity("读取章节作业"):
+            for course in courses:
+                catalog.extend(cx_catalog(client, course))
+        return catalog
+
+    def execute_cx_ai(self, client, selected, config, auto_submit):
+        results = []
+        ai_client = None
+        with self.view.activity("AI 答题"):
+            self.progress.begin("AI 答题", len(selected), "份作业")
+            try:
+                for course, item, category in selected:
+                    name = item.get("name") or "章节作业"
+                    if ai_client is None:
+                        ai_client = self.verify_ai(config)
+                        runner = ChaoxingExerciseRunner(client, ai_client, auto_submit=auto_submit,
+                                                        on_progress=self.view.on_progress)
+                    try:
+                        result = runner.run(course, item["_point"], item, item["_job_info"])
+                    except WorkUnavailable as exc:
+                        result = {"paper": name, "status": "skipped", "message": str(exc)}
+                    except AIServiceError as exc:
+                        result = {"paper": name, "status": "ai_error", "message": str(exc)}
+                    results.append(result)
+                    status = result["status"]
+                    if status == "ai_error":
+                        self.remember(lambda: self.store.save_ai_health(
+                            config, "error", result.get("message", "AI 服务失败")))
+                    self.progress.result(name, status)
+                    if status in ("ai_error", "submission_unknown"):
+                        logger.warning("队列停止：%s；其余作业未执行。",
+                                       result.get("message") or "本次处理已停止")
+                        break
+            finally:
+                if ai_client is not None:
+                    ai_client.session.close()
+        return results
+
     def zhs_task_catalog(self, client, courses):
         catalog = []
         with self.view.activity("读取课程任务"):
@@ -611,15 +688,18 @@ class Application:
             elif action == 2:
                 if self.manage_concurrency():
                     message = '并发设置已保存，下次运行生效。'
-            elif action in (3, 4, 5):
-                platform = {3: "mooc", 4: "zyk", 5: "zhs"}[action]
+            elif action in (3, 4, 5, 6):
+                platform = {3: "mooc", 4: "zyk", 5: "zhs", 6: "cx"}[action]
                 if self.remember(lambda: self.store.clear_session(platform)):
-                    if platform != "zhs":
+                    if platform in ("mooc", "zyk"):
                         self.browser_logout_pending = True
-                    label = {"mooc": "MOOC", "zyk": "资源库", "zhs": "智慧树"}[platform]
+                    label = {"mooc": "MOOC", "zyk": "资源库", "zhs": "智慧树", "cx": "超星"}[platform]
                     if platform == current_platform:
                         self.view.set_user()
-                        self.view.note(f"已退出{label}登录，正在打开浏览器重新登录。", "success")
+                        if platform == "cx":
+                            self.view.note("已退出超星登录，下次使用超星时重新输入账号密码。", "success")
+                        else:
+                            self.view.note(f"已退出{label}登录，正在打开浏览器重新登录。", "success")
                         return True
                     message = f"已退出{label}登录。"
                 else:

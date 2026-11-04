@@ -38,13 +38,16 @@ class CourseWorkspace:
         while True:
             try:
                 if self.platform is None:
-                    saved = [index for index, name in enumerate(("mooc", "zyk", "zhs"))
+                    saved = [index for index, name in enumerate(("mooc", "zyk", "zhs", "cx"))
                              if self.store.session(name)]
                     self.platform = saved[0] if len(saved) == 1 else self.view.choose_platform(0)
                 if self.client is None:
                     try:
-                        cls = {1: ZYKMoocApi, 2: ZHSApi}.get(self.platform, AIMoocApi)
-                        self.client, self.rows = self.app.client_and_courses(cls, choose=False)
+                        if self.platform == 3:
+                            self.client, self.rows = self.app.cx_client_and_courses(choose=False)
+                        else:
+                            cls = {1: ZYKMoocApi, 2: ZHSApi}.get(self.platform, AIMoocApi)
+                            self.client, self.rows = self.app.client_and_courses(cls, choose=False)
                     except Cancelled:
                         raise
                     except Exception as exc:
@@ -62,7 +65,7 @@ class CourseWorkspace:
 
     def root_action(self, action):
         if action == "s":
-            if self.app.manage_settings(current_platform={1: "zyk", 2: "zhs"}.get(self.platform, "mooc")):
+            if self.app.manage_settings(current_platform={1: "zyk", 2: "zhs", 3: "cx"}.get(self.platform, "mooc")):
                 self.view.set_user()
                 self.client, self.rows = None, []
                 self.library_state.clear()
@@ -237,6 +240,8 @@ class CourseWorkspace:
     def catalog_for(self, courses):
         if self.platform == 2:
             return self.app.zhs_task_catalog(self.client, courses)
+        if self.platform == 3:
+            return self.app.cx_task_catalog(self.client, courses)
         return self.app.task_catalog(self.client, courses)
 
     def tasks(self, courses, mode, state):
@@ -252,7 +257,7 @@ class CourseWorkspace:
         saved = self.store.get("export", {})
         export_options = {key: saved[key] for key in ("export_format", "quiz_mode", "include_my_answer")
                           if isinstance(saved, dict) and key in saved}
-        answer_options = {"auto_submit": True}
+        answer_options = {"auto_submit": True, "save_to_platform": self.platform == 3}
         selected = state.get("selected", [])
         while True:
             # History/status fields can change between reads; selection belongs
@@ -299,6 +304,10 @@ class CourseWorkspace:
                         if self.platform == 2:
                             # 智慧树没有本地报告文件，执行器已记录结果与错误。
                             self.app.execute_zhs_ai(self.client, selected, config, auto_submit)
+                            return []
+                        if self.platform == 3:
+                            # 超星同样只在平台侧保存答案或交卷，不写本地报告。
+                            self.app.execute_cx_ai(self.client, selected, config, auto_submit)
                             return []
                         results = self.app.execute_ai(self.client, selected, config, auto_submit)
                         for report in results:

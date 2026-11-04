@@ -285,13 +285,29 @@ class SettingsStore:
         self._save_profiles(data, profiles)
 
     def session(self, platform):
+        """A saved login: an access token, or the cookie jar for platforms that use cookies."""
         data = self.get("session_" + platform)
-        if isinstance(data, dict) and isinstance(data.get("access_token"), str) and data["access_token"]:
+        if not isinstance(data, dict):
+            return None
+        token = data.get("access_token")
+        if isinstance(token, str) and token:
+            return data
+        cookies = data.get("cookies")
+        if isinstance(cookies, dict) and cookies and all(
+                isinstance(name, str) and isinstance(value, str) for name, value in cookies.items()):
             return data
         return None
 
     def save_session(self, platform, client):
-        self.set("session_" + platform, {"access_token": client.access_token})
+        """Keep what the next start needs to restore this login without asking again."""
+        token = getattr(client, "access_token", None)
+        if isinstance(token, str) and token:
+            self.set("session_" + platform, {"access_token": token})
+            return
+        cookies = {name: value for name, value in client.session.cookies.get_dict().items() if value}
+        if not cookies:
+            raise SettingsError("平台没有返回可保存的登录状态，请重新登录")
+        self.set("session_" + platform, {"cookies": cookies})
 
     def clear_session(self, platform):
         self.set("session_" + platform, None)

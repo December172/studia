@@ -16,7 +16,7 @@ const store = {
 
 /* ---------------------------------------------------------------- icons */
 
-const COLOR = { mooc: "var(--mooc)", zyk: "var(--zyk)", zhs: "var(--zhs)" };
+const COLOR = { mooc: "var(--mooc)", cx: "var(--cx)", zyk: "var(--zyk)", zhs: "var(--zhs)" };
 function ring(percent, color = "var(--indigo)", size = 16) {
   const p = Math.max(0, Math.min(100, Number(percent) || 0));
   const r = size / 2 - 1.5, c = 2 * Math.PI * r, mid = size / 2;
@@ -174,7 +174,7 @@ function toggleTheme() {
 
 /* ---------------------------------------------------------------- sidebar */
 
-const INITIAL = { mooc: "M", zyk: "资", zhs: "智" };
+const INITIAL = { mooc: "M", cx: "超", zyk: "资", zhs: "智" };
 function currentPlatform() {
   return platformOf(state.current) || state.platforms.find((p) => p.logged_in) || state.platforms[state.platforms.length - 1];
 }
@@ -614,6 +614,15 @@ const VIEWS = {
             <button class="btn" data-start-login>刷新二维码</button></div></div>`);
       $("[data-start-login]", page).onclick = () => qrLogin(pid);
       qrLogin(pid);
+    } else if (p.login === "password") {
+      setPage(`${head}<p class="sub">用${esc(p.name)}账号登录</p>
+        <div class="login_card"><form class="auth_form" data-password-login>
+          <label class="auth_field"><span>手机号 / 账号</span><input name="username" autocomplete="username" required autofocus></label>
+          <label class="auth_field"><span>密码</span><input name="password" type="password" autocomplete="current-password" required></label>
+          <div class="login_status"><div data-status><b>账号密码只用于登录</b><p>登录成功后只保存平台下发的 Cookie，不保存密码</p></div></div>
+          <button class="btn primary" data-start-login>登录</button></form></div>`);
+      const form = $("[data-password-login]", page);
+      form.onsubmit = (event) => { event.preventDefault(); passwordLogin(pid, form); };
     } else {
       setPage(`${head}<p class="sub">用职教云账号登录</p>
         <div class="login_card"><div class="login_status"><div data-status><b>在浏览器中登录</b><p>登录完成后自动继续</p></div>
@@ -654,7 +663,7 @@ const VIEWS = {
         </div>` : "";
       setPage(`${head}${studia}<div class="section"><h3>平台账号</h3></div>
         <div class="models">${state.platforms.map((p) => `<div class="model"><span class="plat ${p.id}">${INITIAL[p.id]}</span>
-          <span class="m1"><b>${esc(p.name)}</b><small class="sans">${esc(platformStatus(p))} · ${p.login === "qr" ? "App 扫码登录" : "职教云浏览器授权"}</small></span><span></span>
+          <span class="m1"><b>${esc(p.name)}</b><small class="sans">${esc(platformStatus(p))} · ${p.login === "qr" ? "App 扫码登录" : p.login === "password" ? `${p.name}账号密码` : "职教云浏览器授权"}</small></span><span></span>
           <span class="row_btns">${p.logged_in ? `<button class="btn small danger" data-logout="${p.id}" data-confirm="确认退出">退出</button>` : `<button class="btn small primary" data-go="#/login/${p.id}">登录</button>`}</span></div>`).join("")}</div>`);
       page.querySelectorAll("[data-logout]").forEach((el) => (el.onclick = async () => {
         try { await api(`/api/platforms/${el.dataset.logout}/logout`, { method: "POST" }); } catch (e) { toast(e.message); return; }
@@ -834,7 +843,8 @@ function studyActions(p, c) {
     ...(f.review ? [["review", ICON.repeat, "每日复习", "重看 30 分钟攒习惯分，每天一次"]] : [])];
 }
 // "#/course/p/c/<tab>": the Q&A tab only exists on courses whose assessment counts it.
-const courseTab = (c, tab) => tab === "answer" ? "answer" : tab === "qa" && c.features?.qa ? "qa" : "study";
+const courseTab = (c, tab) => tab === "answer" ? "answer" : tab === "qa" && c.features?.qa ? "qa"
+  : c.features && c.features.study === false ? "answer" : "study";
 
 // Q&A tab. Where the interaction share stands, then two actions: answer a few questions now, or have
 // AI draft new ones that the person edits before they go out. Everything posted is listed below.
@@ -953,11 +963,11 @@ function renderCourse(p, c, tab, full = false) {
           ${c.progress == null ? '<span class="digits"><i>—</i></span>' : `<span class="digits">${[...String(c.progress)].map((d) => `<i>${esc(d)}</i>`).join("")}<small>%</small></span>`}
           <span class="hero_note score_note">${scoreNote(c, papers, state.earned[k])}</span></div>
         ${p.features.answer ? `<button class="hero_stat" data-go="#/course/${p.id}/${c.id}/answer"><span class="hero_label">可作答</span>
-          <span class="pen_num">${papers ? open : "—"}</span><span class="hero_note">份试卷 ›</span></button>` : ""}
+          <span class="pen_num">${papers ? open : "—"}</span><span class="hero_note">${p.id === "cx" ? "份作业" : "份试卷"} ›</span></button>` : ""}
       </div>
     </section>
     <div class="tabs seg" role="tablist">
-      <button class="tab" role="tab" aria-selected="${tab === "study"}" data-go="#/course/${p.id}/${c.id}">学习</button>
+      ${p.features.study ? `<button class="tab" role="tab" aria-selected="${tab === "study"}" data-go="#/course/${p.id}/${c.id}">学习</button>` : ""}
       <button class="tab" role="tab" aria-selected="${tab === "answer"}" data-go="#/course/${p.id}/${c.id}/answer">答题${open ? `<span class="n">${open}</span>` : ""}</button>
       ${c.features?.qa ? `<button class="tab" role="tab" aria-selected="${tab === "qa"}" data-go="#/course/${p.id}/${c.id}/qa">问答区</button>` : ""}
     </div>`;
@@ -999,16 +1009,17 @@ function renderCourse(p, c, tab, full = false) {
     const rank = (label) => (order.includes(label) ? order.indexOf(label) : order.length);
     const categories = [...new Set(papers.map((x) => x.category))].sort((a, b) => rank(a) - rank(b));
     const n = selected.size;
-    body = categories.map((label) => {
+    const cxNote = p.id === "cx" ? '<div class="notice">超星不提供章节作业的提交状态，请到平台确认哪些还没做，只勾选要作答的。</div>' : "";
+    body = cxNote + (categories.map((label) => {
       const list = papers.filter((x) => x.category === label), open = list.filter((x) => x.available);
       const all = open.length && open.every((x) => selected.has(x.id));
       return `<div class="section"><h3>${esc(label)}</h3><span class="aside">${open.length} / ${list.length} 份可选</span>
           ${open.length > 1 ? `<button class="link" data-pick-all="${esc(label)}">${all ? "取消全选" : "全选"}</button>` : ""}</div>
         <div class="papers">${list.map(row).join("")}</div>`;
-    }).join("") || `<div class="empty">这门课没有作业、测验或考试</div>`;
+    }).join("") || `<div class="empty">这门课没有作业、测验或考试</div>`);
     if (categories.length) body += `<div class="dock"><span class="info">${answerBlock ? esc(answerBlock) : n ? `已选 <b>${n}</b> 份 · 交卷前会再确认一次` : "勾选要作答的试卷"}</span>
-      <button class="btn" data-save ${n && !answerBlock ? "" : "disabled"}>仅生成答案</button>
-      <button class="btn primary" data-submit data-confirm="再按一次，交 ${n} 份卷" ${n && !answerBlock ? "" : "disabled"}>AI 作答并交卷</button></div>`;
+      <button class="btn" data-save ${n && !answerBlock ? "" : "disabled"}>${p.id === "cx" ? "保存答案（不交卷）" : "仅生成答案"}</button>
+      <button class="btn primary" data-submit data-confirm="再按一次，交 ${n} ${p.id === "cx" ? "份作业" : "份卷"}" ${n && !answerBlock ? "" : "disabled"}>AI 作答并交卷</button></div>`;
   }
   page.style.setProperty("--c", inkOf(c));
   if (full) setPage(head + body); else { quiet = true; setPage(head + body); quiet = false; }
@@ -1350,6 +1361,23 @@ async function qrLogin(pid) {
   }
 }
 
+async function passwordLogin(pid, form) {
+  const status = $("[data-status]", form), button = $("[data-start-login]", form);
+  const say = (title, text) => { status.innerHTML = `<b>${esc(title)}</b><p>${esc(text)}</p>`; };
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "登录中…";
+  try {
+    // The server signs in with the platform's own form; the password is not kept.
+    await api(`/api/platforms/${pid}/login`, { method: "POST", body: { username: form.username.value.trim(), password: form.password.value } });
+    await afterLogin(pid);
+  } catch (error) {
+    say("登录失败", error.message);
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
 async function browserLogin(pid) {
   state.loginToken.cancelled = true;
   const token = (state.loginToken = { cancelled: false });
@@ -1400,8 +1428,9 @@ async function readCourses(pid) {
   const p = platformOf(pid);
   // Warm every course's papers and units so a later click finds them ready.
   for (const c of state.courses[pid] || []) {
-    if (p?.features.answer) inBackground(() => (state.papers[key(pid, c.id)] ? null : loadPapers(p, c)));
-    inBackground(() => loadUnits(pid, c.id));
+    // 超星的作业目录要逐个章节请求任务点，等打开答题页再读，登录后不要一次打满接口。
+    if (p?.features.answer && p.id !== "cx") inBackground(() => (state.papers[key(pid, c.id)] ? null : loadPapers(p, c)));
+    if (p?.features.study !== false) inBackground(() => loadUnits(pid, c.id));
   }
 }
 

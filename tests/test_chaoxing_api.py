@@ -106,6 +106,19 @@ class RequestTest(unittest.TestCase):
         return ChaoxingApi(cookies={"UID": "1"}, session=FakeSession(lambda *args: response),
                            sleep=lambda _: None)
 
+    def test_signed_in_reads_the_course_list_page(self):
+        session = FakeSession(lambda *args: FakeResponse("<html></html>"))
+        api = ChaoxingApi(cookies={"UID": "1"}, session=session, sleep=lambda _: None)
+        self.assertTrue(api.signed_in())
+        self.assertEqual(session.calls[0][1],
+                         "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/courselistdata")
+
+    def test_signed_in_reports_expiry(self):
+        api = ChaoxingApi(cookies={"UID": "1"},
+                          session=FakeSession(lambda *args: FakeResponse(status_code=401)), sleep=lambda _: None)
+        with self.assertRaises(AuthenticationExpired):
+            api.signed_in()
+
     def test_unauthorized(self):
         with self.assertRaises(AuthenticationExpired):
             self.client(FakeResponse(status_code=401))._request("get", "https://x/")
