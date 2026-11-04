@@ -287,7 +287,7 @@ class LearningApiTest(unittest.TestCase):
         self.assertEqual(video_enc(222, "work-1", "obj", 120, 600, 99),
                          hashlib.md5(raw.encode()).hexdigest())
 
-    def test_video_reports_current_time_then_full_duration(self):
+    def test_video_tries_dragging_to_the_end_first(self):
         seen = []
         state = {"logs": 0}
 
@@ -302,13 +302,28 @@ class LearningApiTest(unittest.TestCase):
         self.assertEqual(api.study_video(COURSE, VIDEO_JOB, speed=1), "success")
         logs = [kwargs for url, kwargs in seen if "/multimedia/log/" in url]
         self.assertEqual(len(logs), 2)
-        first, second = logs[0]["params"], logs[1]["params"]
-        self.assertEqual(first["playingTime"], 5)      # job.playTime 5000ms → 5s
-        self.assertEqual(second["playingTime"], 600)   # 先按“已看完”再报一次
-        self.assertEqual(first["userid"], "99")
-        self.assertEqual(first["rt"], "0.9")
-        self.assertEqual(first["dtype"], "Video")
-        self.assertEqual(first["enc"], video_enc(222, "work-v", "obj", 5, 600, "99"))
+        drag, current = logs[0]["params"], logs[1]["params"]
+        self.assertEqual(drag["playingTime"], 600)     # 先尝试直接拖到结尾
+        self.assertEqual(current["playingTime"], 5)    # 拖拽被拒后补报当前进度
+        self.assertEqual(drag["userid"], "99")
+        self.assertEqual(drag["rt"], "0.9")
+        self.assertEqual(drag["dtype"], "Video")
+        self.assertEqual(drag["enc"], video_enc(222, "work-v", "obj", 600, 600, "99"))
+
+    def test_video_that_allows_dragging_finishes_in_one_report(self):
+        seen = []
+
+        def handler(method, url, kwargs):
+            seen.append((url, kwargs))
+            if "/ananas/status/" in url:
+                return FakeResponse(json_body={"status": "success", "dtoken": "dt", "duration": 600})
+            return FakeResponse(json_body={"isPassed": True})
+
+        api = ChaoxingApi(cookies={"UID": "99", "fid": "7"}, session=FakeSession(handler), sleep=lambda _: None)
+        self.assertEqual(api.study_video(COURSE, VIDEO_JOB, speed=1), "success")
+        logs = [kwargs for url, kwargs in seen if "/multimedia/log/" in url]
+        self.assertEqual(len(logs), 1)                  # 不再补报当前进度，也不等待
+        self.assertEqual(logs[0]["params"]["playingTime"], 600)
 
     def test_document_read_and_empty_page(self):
         seen = []
