@@ -171,11 +171,23 @@ class Studia:
                 del job["lines"][60:]
         if job is not None and event.get("type") == "progress":
             _track(job.setdefault("progress", {}), event)
+            if event.get("kind") == "unit" and event.get("status") != "running":
+                self._mark_unit(job, event.get("key"), event.get("status"))
         for subscriber in list(self.subscribers):
             try:
                 subscriber.put_nowait(event)
             except queue.Full:
                 pass
+
+    def _mark_unit(self, job, unit_id, unit_state):
+        """Carry a finished unit into the cached grid. The cache holds the platform's answer from when the job
+        began, so a page reloaded mid-run showed every unit learned since then as not started again."""
+        platform = self.platforms.get(job["platform"])
+        hit = platform and platform.cache.get(("units", job["course"]))
+        for chapter in (hit[1] if hit else []):
+            for unit in chapter.get("units", []):
+                if unit.get("id") == unit_id:
+                    unit["state"] = unit_state
 
     def progress_of(self, job):
         """The on_progress callback for one job's business code."""
@@ -473,7 +485,8 @@ class Studia:
                 "id": task_id,
                 "name": (item.get("name") if pid == "zhs" else paper_display_name(item)) or "未命名试卷",
                 "category": "作业" if pid == "zhs" and category == 1 else "考试" if pid == "zhs" else task_type_label(item, category),
-                "status": availability.label or STATUS_LABEL.get(item.get("_completion_status"), "未作答"),
+                # A handed-in paper reads 已提交 even once closed or out of attempts; the reason says which.
+                "status": "已提交" if done else availability.label or STATUS_LABEL.get(item.get("_completion_status"), "未作答"),
                 "score": score,
                 "available": availability.available,
                 "done": done and not item.get("_redo"),
@@ -500,7 +513,7 @@ class Studia:
 
     # ------------------------------------------------------------ jobs
 
-    def start_job(self, body, *, minutes=None, resumes=0):
+    def start_job(self, body, *, minutes=None, resumes=0, paused=False):
         platform = self.platform(str(body.get("platform", "")))
         kind = body.get("type")
         course_id = str(body.get("course", ""))
@@ -535,6 +548,8 @@ class Studia:
                 target = lambda: self._study(platform, row, job["minutes"], job)
             self.jobs[job["id"]] = job
             JOBS[job["id"]] = self
+            if paused:  # an administrator's pause, carried over a restart
+                job["state"] = "paused"
             self._take_turn(job)
             self._save()
         self.publish(dict(_job_public(job), type="job"))
@@ -558,13 +573,143 @@ class Studia:
 
     def stop_job(self, job_id=None):
         """Stop one job, or every running job when no id is given."""
-        for job in list(self.jobs.values()):
-            if job_id in (None, job["id"]):
-                job["cancel"].set()
+        with self.lock:
+            for job in list(self.jobs.values()):
+                if job_id in (None, job["id"]):
+                    job["hold"] = None  # a stop outranks a pause or a step aside on its way
+                    job["cancel"].set()
         return {}
 
+    # ------------------------------------------------------------ this person's line of jobs
+
+    def act_job(self, action, job_id, body=None, who=""):
+        """pause, continue or move one job, by the person or (who="管理员") an administrator. Stop has its own route."""
+        if action == "move":
+            return self.move_job(job_id, to=(body or {}).get("to"), swap=(body or {}).get("swap"), who=who)
+        return (self.pause_job if action == "pause" else self.continue_job)(job_id, who)
+
+    def pause_job(self, job_id, who=""):
+        """Set a job aside: it stays in the list but takes no run slot. A learning job that is running
+        stops at once and later carries on from the progress the platform recorded."""
+        with self.lock:
+            job = self._job(job_id)
+            if job["state"] == "paused" or job.get("hold") == "pause":
+                return {}
+            if job["state"] == "queued":
+                job["state"] = "paused"
+                self._save()
+            elif GROUP[job["kind"]] != "learn":
+                raise HttpError(400, "答题和问答在运行中不能暂停，只能停止")
+            else:
+                job["hold"] = "pause"
+                job["cancel"].set()
+        self._announce(job, "%s暂停了这个任务" % who)
+        return {}
+
+    def continue_job(self, job_id, who=""):
+        """A paused job joins the back of the queue (the arrows move it up from there)."""
+        with self.lock:
+            job = self._job(job_id)
+            if job.get("hold") == "pause":   # still stopping: let it come back queued instead
+                job["hold"] = "queue"
+            elif job["state"] == "paused":
+                job["state"] = "queued"
+            else:
+                return {}
+            job["order"] = max(_order(j) for j in self.jobs.values()) + 1
+            self._take_turn(job)
+            self._save()
+        self._announce(job, "%s让这个任务继续，排在最后" % who)
+        return {}
+
+    def move_job(self, job_id, to=None, swap=None, who=""):
+        """Move a waiting job within this person's queue (to: its new place, 0 = next to run), or swap it into
+        a running job's slot (swap: that job's id), which then waits at the front of the queue. The first
+        job_limit() jobs in line run: a learning job pushed out steps aside and later carries on from the
+        platform's progress. Answering is never interrupted."""
+        with self.lock:
+            job = self._job(job_id)
+            running, queue = self._line()
+            if job not in queue:
+                raise HttpError(400, "只能移动排队中的任务")
+            queue.remove(job)
+            other = None
+            if swap is not None:
+                other = self.jobs.get(str(swap))
+                if other not in running:
+                    raise HttpError(409, "那个任务已经不在运行，请刷新")
+                if GROUP[other["kind"]] != "learn":
+                    raise HttpError(400, "答题和问答在运行中不能替换")
+                running[running.index(other)] = job
+                queue.insert(0, other)
+            else:
+                try:
+                    queue.insert(max(0, int(to)), job)
+                except (TypeError, ValueError):
+                    raise HttpError(400, "位置无效") from None
+            line = running + queue
+            for place, j in enumerate(line):
+                j["order"] = place
+            limit = self.job_limit()
+            # Slots the queued jobs now in front need, beyond the free ones (a job on its way out frees its slot);
+            # the learning jobs furthest back give them up.
+            short = sum(1 for j in line[:limit] if j["state"] == "queued") - (
+                limit - sum(1 for j in self.jobs.values() if j["state"] == "running" and not j.get("hold")))
+            aside = [j for j in reversed(line[limit:])
+                     if j["state"] == "running" and not j.get("hold") and GROUP[j["kind"]] == "learn"][:max(0, short)]
+            for j in aside:
+                j["hold"] = "queue"
+                j["cancel"].set()
+            for j in queue:
+                if j["state"] == "queued":
+                    self._take_turn(j)
+            self._save()
+        if other is not None:
+            self._announce(job, "%s把这个任务换上，「%s」先排队" % (who, other["course_name"]))
+            self._announce(other, "%s让「%s」先跑，这个任务排在队首，学过的不受影响" % (who, job["course_name"]))
+        for j in line:  # every place in line may have moved
+            if other is None or j not in (job, other):
+                self.publish(dict(_job_public(j), type="job"))
+        return {}
+
+    def _line(self):
+        """This person's running jobs and queue, each in order. Paused jobs, and jobs on their way to a pause,
+        are in neither; a job stepping aside is already in the queue. Call with self.lock held."""
+        jobs = sorted((j for j in self.jobs.values() if j["state"] != "paused" and j.get("hold") != "pause"), key=_order)
+        going = [j for j in jobs if j["state"] == "running" and j.get("hold") != "queue"]
+        return going, [j for j in jobs if j not in going]
+
+    def _job(self, job_id):
+        job = self.jobs.get(job_id)
+        if job is None:
+            raise HttpError(404, "任务已经结束")
+        return job
+
+    def _announce(self, job, text):
+        """Tell the job's page what changed: a line in its log, and its new state."""
+        self.publish({"type": "log", "text": text, "level": "", "job": job["id"]})
+        self.publish(dict(_job_public(job), type="job"))
+
+    def _set_aside(self, job):
+        """The job's work stopped because an administrator paused it or gave its slot away (job["hold"]).
+        Keep it in the list, paused or queued, for its thread to take its turn again. Returns False
+        when it was a plain stop and the job should end."""
+        with self.lock:
+            hold = job.pop("hold", None)
+            if not hold or self.closing:
+                return False
+            if job.get("minutes") and job.get("running_since"):
+                # Review time still owed: only the unplayed part comes back.
+                job["minutes"] = max(1, round(job["minutes"] - (time.time() - job["running_since"]) / 60))
+            job.update(state="paused" if hold == "pause" else "queued", running_since=None, cancel=threading.Event())
+            self._save()
+        self.publish(dict(_job_public(job), type="job"))
+        return True
+
     def _running(self):
-        return [_job_public(job) for job in sorted(self.jobs.values(), key=lambda j: j["started"])]
+        """Running jobs first, then the queue in the order it will run, then the paused ones."""
+        rank = {"running": 0, "queued": 1, "paused": 2}
+        return [_job_public(job) for job in sorted(self.jobs.values(), key=lambda j: (rank.get(j["state"], 1), _order(j)))]
 
     def jobs_state(self):
         return {"jobs": self._running(), "history": [_job_public(j) for j in self.history]}
@@ -577,32 +722,47 @@ class Studia:
         return selected
 
     def _take_turn(self, job):
-        """Start a waiting job when this person has a free place; first come, first served.
+        """Start a waiting job when this person has a free place; first come, first served, unless an
+        the person or an administrator moved it (move_job). A paused job waits for continue_job.
         Call with self.lock held. Returns whether the job may run."""
         if job["state"] == "running":
             return True
+        if job["state"] == "paused":
+            return False
         running = sum(1 for other in self.jobs.values() if other["state"] == "running")
         ahead = sum(1 for other in self.jobs.values()
-                    if other["state"] == "queued" and other["started"] < job["started"])
+                    if other["state"] == "queued" and other is not job and _order(other) < _order(job))
         if running + ahead >= self.job_limit():
             return False
         job["state"], job["running_since"] = "running", time.time()
         return True
 
+    def _wait_turn(self, job):
+        """Wait (cancellably) for a place among this person's running jobs before touching any platform."""
+        while True:
+            with self.lock:
+                waited, ready = job["state"] != "running", self._take_turn(job)
+            if ready:
+                break
+            if job["cancel"].wait(1):
+                raise KeyboardInterrupt
+        if waited:
+            self.publish(dict(_job_public(job), type="job"))
+
     def _run_job(self, job, target, platform):
         state, summary = "done", ""
         try:
-            # Wait (cancellably) for a place among this person's running jobs before touching any platform.
             while True:
-                with self.lock:
-                    queued, ready = job["state"] == "queued", self._take_turn(job)
-                if ready:
+                self._wait_turn(job)
+                try:
+                    summary = target() or "已完成"
+                except KeyboardInterrupt:
+                    if not self._set_aside(job):
+                        raise
+                    continue
+                # Paused or stepped aside by an administrator: wait for its turn again, then carry on.
+                if not (job["cancel"].is_set() and self._set_aside(job)):
                     break
-                if job["cancel"].wait(1):
-                    raise KeyboardInterrupt
-            if queued:
-                self.publish(dict(_job_public(job), type="job"))
-            summary = target() or "已完成"
             if job["cancel"].is_set():
                 state, summary = "stopped", "已停止"
         except KeyboardInterrupt:
@@ -657,8 +817,10 @@ class Studia:
                    # one that has studied for a while since its last start is not a crash loop.
                    "resumes": 0 if now - (j.get("running_since") or now) > STEADY else j.get("resumes", 0),
                    # Review time still owed: its length minus what it has already played.
-                   "minutes": max(0, j.get("minutes", 0) - (now - j["running_since"]) / 60 if j.get("running_since") else j.get("minutes", 0))}
-                  for j in sorted(self.jobs.values(), key=lambda j: j["started"])]
+                   "minutes": max(0, j.get("minutes", 0) - (now - j["running_since"]) / 60 if j.get("running_since") else j.get("minutes", 0)),
+                   "paused": j["state"] == "paused" or j.get("hold") == "pause"}
+                  # In queue order, so a restart starts them again in the order an administrator left them.
+                  for j in sorted(self.jobs.values(), key=lambda j: (j["state"] != "running", _order(j)))]
         data = {"stopped_at": stopped_at, "saved_at": now, "active": active,
                 "history": [_job_public(j) for j in self.history]}
         path = self._jobs_path()
@@ -706,13 +868,16 @@ class Studia:
             kind = entry["type"]
             if kind == "review" and entry.get("minutes", 0) < 1:
                 continue
-            if kind in ("answer", "qa", "ask") or not fresh or entry.get("resumes", 0) >= RESUME_LIMIT:
+            # A paused job does not run by itself, so it comes back however long the service was down.
+            paused = entry.get("paused") is True and kind in ("study", "review")
+            if kind in ("answer", "qa", "ask") or (not paused and (not fresh or entry.get("resumes", 0) >= RESUME_LIMIT)):
                 self._record(entry, "stopped", INTERRUPTED)
                 continue
             body = {"platform": entry.get("platform"), "type": kind, "course": entry.get("course")}
             for attempt in range(3):
                 try:
-                    self.start_job(body, minutes=max(1, round(entry.get("minutes", 0))), resumes=entry.get("resumes", 0) + 1)
+                    self.start_job(body, minutes=max(1, round(entry.get("minutes", 0))),
+                                   resumes=0 if paused else entry.get("resumes", 0) + 1, paused=paused)
                     break
                 except HttpError as exc:
                     if exc.status == 401:
@@ -1075,7 +1240,8 @@ def _mooc_catalog(client, row):
         open_ids = list(dict.fromkeys(paper_exam_id(item) for _, item, category in listed
                                       if task_availability(item, category).available))
         statuses = dict(zip(open_ids, pool.map(status, open_ids)))
-    return [(course, dict(item, _completion_status=completion_with_score(item, statuses.get(paper_exam_id(item), "unsupported"))), category)
+    # Papers not checked (closed, attempts used up) still count as handed in when they carry a score.
+    return [(course, dict(item, _completion_status=completion_with_score(item, statuses.get(paper_exam_id(item), "unknown"))), category)
             for course, item, category in listed]
 
 
@@ -1186,13 +1352,21 @@ def _track(progress, event):
         progress["detail"] = name
     elif kind == "unit" and event.get("status") == "running":
         progress["unit"] = {"name": name, "key": event.get("key")}
+    elif kind == "unit" and (progress.get("unit") or {}).get("key") == event.get("key"):
+        # That unit is over; what follows (MOOC's discussion and rating) is told by "detail", not by the last unit.
+        progress.pop("unit")
 
 
 def _job_public(job):
     if job is None:
         return None
     return {key: job.get(key) for key in ("id", "kind", "title", "course", "course_name", "platform", "state",
-                                      "summary", "started", "ended", "lines", "progress")}
+                                      "summary", "started", "ended", "running_since", "lines", "progress", "hold")} | {"order": _order(job)}
+
+
+def _order(job):
+    """A job's place in its person's queue: when it was started, unless an administrator moved it."""
+    return job.get("order", job["started"])
 
 
 def _data_url(image):
@@ -1246,6 +1420,7 @@ ROUTES = [
     ("GET", r"/api/jobs", lambda app, m, q, b: app.jobs_state()),
     ("POST", r"/api/jobs", lambda app, m, q, b: app.start_job(b)),
     ("POST", r"/api/jobs/stop", lambda app, m, q, b: app.stop_job((b or {}).get("id"))),
+    ("POST", r"/api/jobs/(pause|continue|move)", lambda app, m, q, b: app.act_job(m[1], str((b or {}).get("id", "")), b)),
     ("GET", r"/api/settings", lambda app, m, q, b: app.settings()),
     ("POST", r"/api/settings/models", lambda app, m, q, b: app.add_model(b)),
     ("POST", r"/api/settings/models/activate", lambda app, m, q, b: app.activate_model(b)),

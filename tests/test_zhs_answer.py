@@ -343,15 +343,16 @@ class HomeworkFlowTest(unittest.TestCase):
         self.assertEqual(result["status"], "preview")
         self.assertNotIn("exam_submit", client.names())
 
-    def test_bad_answer_stops_without_saving_or_submit(self):
+    def test_unusable_answers_end_in_a_random_option_not_a_blank(self):
+        # A blank held back the whole paper; a random option may still score.
         client = FakeClient({1: raw_question(1), 2: raw_question(2), 3: raw_question(3)})
         ai = FakeAI(["Z"] * 9)
-        result = runner(client, ai).run_paper(COURSE, homework_item(), 1)
-        self.assertEqual(result["status"], "error")
-        self.assertIn("格式不符", result["message"])
-        self.assertNotIn("exam_submit", client.names())
-        self.assertEqual(len(client.call("exam_question")), 3)
-        self.assertEqual(client.call("exam_save_answer"), [])
+        runner(client, ai).run_paper(COURSE, homework_item(), 1)
+        self.assertEqual(len(ai.asked), 9)  # three tries per question, the last two told to guess
+        self.assertIn("必须作答", str(ai.asked[1]))
+        saved = client.call("exam_save_answer")
+        self.assertEqual(len(saved), 3)
+        self.assertTrue(all(item["answer"] in {"101", "102"} for item in saved))
 
     def test_ai_error(self):
         client = FakeClient({1: raw_question(1)})

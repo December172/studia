@@ -196,14 +196,11 @@ class SharedHomeworkFlowTest(unittest.TestCase):
         self.assertIs(client.call("shared_save_answer")[0]["captcha_vision"], ai)
         self.assertNotIn("shared_submit_homework", client.names())
 
-    def test_bad_answer_stops_without_saving_or_submit(self):
+    def test_unusable_answers_end_in_a_random_option_not_a_blank(self):
         client = FakeSharedClient([shared_question("e1"), shared_question("e2"),
                                    shared_question("e3")])
-        result = runner(client, FakeAI(["Z"] * 9)).run_paper(COURSE, homework_item(), 1)
-        self.assertEqual(result["status"], "error")
-        self.assertIn("格式不符", result["message"])
-        self.assertEqual(client.call("shared_save_answer"), [])
-        self.assertNotIn("shared_submit_homework", client.names())
+        runner(client, FakeAI(["Z"] * 9)).run_paper(COURSE, homework_item(), 1)
+        self.assertEqual(len(client.call("shared_save_answer")), 3)
 
     def test_captcha_propagates(self):
         client = FakeSharedClient([shared_question("e1")])
