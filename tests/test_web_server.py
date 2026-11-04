@@ -51,6 +51,12 @@ class WebServerTest(unittest.TestCase):
         self.assertFalse(any(p["logged_in"] for p in state["platforms"]))
         self.assertEqual(state["jobs"], [])
 
+    def test_event_stream_asks_proxies_not_to_buffer(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        self.addCleanup(conn.close)
+        conn.request("GET", "/api/events?t=" + self.app.token, headers={"Host": "127.0.0.1:%d" % self.port})
+        self.assertEqual(conn.getresponse().getheader("X-Accel-Buffering"), "no")
+
     def test_static_files_stay_inside_the_bundle(self):
         self.assertEqual(self.request("GET", "/")[0], 200)
         self.assertEqual(self.request("GET", "/../settings.py")[0], 404)
@@ -115,7 +121,11 @@ class WebServerTest(unittest.TestCase):
         platform.client = Mock()
         platform.spec = dict(platform.spec, handler=lambda **kwargs: kwargs["on_progress"](
             ProgressEvent("result", "第一节", status="success")))
-        self.assertEqual(self.request("POST", "/api/jobs", body={"platform": "zhs", "type": "study", "course": "ai-c1"})[0], 200)
+        status, body = self.request("POST", "/api/jobs", body={"platform": "zhs", "type": "study", "course": "ai-c1"})
+        self.assertEqual(status, 200)
+        # The page shows the job from the reply when a proxy holds the event stream back.
+        started = json.loads(body)["job"]
+        self.assertEqual((started["id"], started["course"]), (json.loads(body)["id"], "ai-c1"))
         for _ in range(50):
             if not self.app.jobs:
                 break
