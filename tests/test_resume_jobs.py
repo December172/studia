@@ -53,7 +53,7 @@ class ResumeJobsTest(unittest.TestCase):
         app = self.app()
         app.start_job = Mock()
         app.resume()
-        app.start_job.assert_called_once_with({"platform": "zhs", "type": "review", "course": "ai-c1"}, minutes=12, resumes=1)
+        app.start_job.assert_called_once_with({"platform": "zhs", "type": "review", "course": "ai-c1"}, minutes=12, resumes=1, paused=False)
         self.assertEqual((app.history[0]["title"], app.history[0]["state"], app.history[0]["summary"]),
                          ("AI 答题", "stopped", INTERRUPTED))
 
@@ -81,6 +81,52 @@ class ResumeJobsTest(unittest.TestCase):
         self.assertEqual(json.loads(self.path.read_text())["active"][0]["resumes"], 0)
         app.shutdown()
         drain(5)
+
+    def test_an_administrator_reorders_pauses_and_continues_without_losing_a_job(self):
+        app = self.app()
+        app.job_limit, app.zhs_parallel = (lambda: 1), (lambda: True)
+        platform = app.platforms["zhs"]
+        platform.rows = [{"courseName": c, "zhs": {"kind": "ai", "courseId": c}} for c in ("a", "b", "c")]
+        runs = []
+
+        def handler(course_rows, cancel_event, **_):
+            runs.append(course_rows[0]["courseName"])
+            cancel_event.wait(5)
+        platform.spec = dict(platform.spec, handler=handler)
+        ids = {c: app.start_job({"platform": "zhs", "type": "study", "course": "ai-" + c})["id"] for c in "abc"}
+        line = lambda: [(j["course"][3:], j["state"]) for j in app._running()]
+        wait = lambda want: self.assertTrue(any(line() == want or time.sleep(0.05) for _ in range(100)), line())
+        wait([("a", "running"), ("b", "queued"), ("c", "queued")])
+
+        # c moves to the front of the queue, then into a's slot: a steps aside and waits at the front.
+        app.move_job(ids["c"], to=0)
+        wait([("a", "running"), ("c", "queued"), ("b", "queued")])
+        app.act_job("move", ids["c"], {"swap": ids["a"]})
+        wait([("c", "running"), ("a", "queued"), ("b", "queued")])
+        app.pause_job(ids["b"])                    # waiting: paused at once
+        app.pause_job(ids["c"])                    # running: stops, keeps its place in the list
+        wait([("a", "running"), ("c", "paused"), ("b", "paused")])   # c keeps the place it was moved to
+        with self.assertRaises(HttpError):
+            app.move_job(ids["b"], to=0)           # paused: continue it first
+        app.continue_job(ids["c"])
+        wait([("a", "running"), ("c", "queued"), ("b", "paused")])
+        self.assertEqual(runs, ["a", "c", "a"])    # the same jobs ran again; none was dropped or duplicated
+
+        # A pause outlasts an update, however long the service is down; the rest resume as before.
+        app.shutdown()
+        drain(5)
+        saved = json.loads(self.path.read_text())
+        self.assertEqual([(e["course"][3:], e["paused"]) for e in saved["active"]], [("a", False), ("b", True), ("c", False)])
+        saved["stopped_at"] -= 2 * 3600
+        self.path.write_text(json.dumps(saved))
+        again = self.app()
+        again.zhs_parallel = lambda: True
+        again.platforms["zhs"].rows = platform.rows
+        again.resume()
+        self.assertEqual([(j["course"][3:], j["state"]) for j in again._running()], [("b", "paused")])
+        again.stop_job()
+        drain(5)
+        self.assertEqual(again.history[0]["state"], "stopped")
 
     def test_qa_posting_is_not_rerun_after_a_restart(self):
         self.write({"platform": "zhs", "type": "qa", "course": "ai-c1", "course_name": "网络课"})

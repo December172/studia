@@ -429,6 +429,35 @@ code { font: 12px var(--mono); padding: 1px 5px; border-radius: 3px; background:
 .run .state.running .bar { flex: 1; max-width: 70px; }
 .run.past > svg { opacity: .35; }
 .run > .state { justify-content: space-between; }
+/* A person's jobs as a board: slots for what runs, the queue below (dragged by its grip), the paused folded away. */
+.slots { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.slot { display: grid; align-content: start; gap: 4px; min-width: 0; min-height: 92px; padding: 11px 10px 11px 14px; border-radius: 6px; background: var(--card);
+        box-shadow: inset 3px 0 0 var(--c), 0 0 0 1px var(--line); transition: box-shadow .15s; }
+.slot small { color: var(--text-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slot_head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.slot_head b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slot_foot { display: flex; align-items: center; gap: 10px; margin-top: 6px; font-size: 11.5px; color: var(--text-3); white-space: nowrap; }
+.slot.empty { place-items: center; box-shadow: none; outline: 1px dashed var(--line-2); outline-offset: -1px; color: var(--text-4); font-size: 12.5px; }
+.slot.drop { box-shadow: inset 3px 0 0 var(--c, var(--indigo)), 0 0 0 2px var(--indigo); }
+.slot.empty.drop { outline-color: var(--indigo); color: var(--indigo); }
+.dots { display: grid; place-items: center; flex: none; width: 26px; height: 26px; margin: -4px -2px -4px 0; border-radius: 5px; color: var(--text-3); }
+@media (hover: hover) { .dots:hover { background: var(--well); color: var(--text); } }
+.board_head { display: flex; align-items: baseline; gap: 10px; margin: 18px 0 8px; font-size: 13px; font-weight: 600; color: var(--text-2); }
+.board_head small { font-weight: 400; font-size: 12px; color: var(--text-3); }
+.board_head.fold { align-items: center; gap: 6px; }
+.board_head.fold .chev_r { transition: transform .2s; } .board_head.fold[aria-expanded="true"] .chev_r { transform: rotate(45deg); }
+.qrow { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 6px 10px 6px 4px; background: var(--card); }
+.qrow .t1 { flex: 1; min-width: 0; font-weight: 600; }
+.qrow .t1 small { display: block; font-weight: 400; font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qrow .place { width: 14px; font-size: 12px; color: var(--text-3); text-align: center; }
+.grip { display: grid; place-items: center; flex: none; width: 26px; height: 34px; border-radius: 4px; color: var(--text-4); cursor: grab; touch-action: none; }
+.grip.off { cursor: default; }
+@media (hover: hover) { .grip[data-grip]:hover { background: var(--well); color: var(--text-2); } }
+.qrow.dragging { opacity: .35; }
+.qrow.drop_before { box-shadow: inset 0 2px 0 var(--indigo); } .qrow.drop_after { box-shadow: inset 0 -2px 0 var(--indigo); }
+.qrow.ghost { position: fixed; z-index: 50; pointer-events: none; border-radius: 6px; box-shadow: var(--shadow-pop); opacity: .95; }
+body.dragging, body.dragging * { cursor: grabbing !important; user-select: none; }
+.job_menu { position: fixed; left: 0; right: auto; width: 160px; }
 .run_lines { padding: 6px 0 10px; background: var(--well); font: 11.5px/19px var(--mono); }
 
 /* ---------------------------------------------------------------- settings, admin, forms */

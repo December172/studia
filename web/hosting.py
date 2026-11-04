@@ -225,11 +225,17 @@ class Hub:
         return users
 
     def all_jobs(self):
-        """Every running or waiting job on the site, oldest first, with whose it is."""
-        names = {user["id"]: user["username"] for user in self.accounts.users()}
-        jobs = [dict(job, user_id=uid, username=names.get(uid, uid))
-                for uid, app in list(self.apps.items()) for job in app._running()]
-        return sorted(jobs, key=lambda job: job["started"])
+        """Every user (not administrator: theirs are under 我的) who has jobs, with their limit and jobs in run order."""
+        people = []
+        for user in self.accounts.users():
+            if user["role"] == "admin":
+                continue
+            app = self.apps.get(user["id"])
+            jobs = app._running() if app else []
+            if jobs:
+                people.append({"id": user["id"], "username": user["username"],
+                               "limit": user["max_jobs"] or self.default_job_limit(), "jobs": jobs})
+        return people
 
     def disable(self, uid):
         self.accounts.set_disabled(uid, True)
@@ -427,7 +433,7 @@ class HostedAccess:
         if method == "GET" and path == "/api/admin/memory":
             return dict(hub.memory.stats(), mooc=hub.mooc_memory.stats())
         if method == "GET" and path == "/api/admin/jobs":
-            return {"jobs": hub.all_jobs()}
+            return {"people": hub.all_jobs()}
         if method == "GET" and path == "/api/admin/settings":
             return hub.site_settings()
         if method == "POST" and path == "/api/admin/settings":
@@ -436,13 +442,12 @@ class HostedAccess:
             if "zhs_parallel_study" in body:
                 hub.accounts.set_setting("zhs_parallel_study", body.get("zhs_parallel_study") is True)
             return hub.site_settings()
-        match = re.fullmatch(r"/api/admin/users/(\w+)/jobs/(\w+)/stop", path)
+        match = re.fullmatch(r"/api/admin/users/(\w+)/jobs/(\w+)/(stop|pause|continue|move)", path)
         if method == "POST" and match:
             app = hub.apps.get(match[1])
             if app is None or match[2] not in app.jobs:
                 raise HttpError(404, "任务已经结束")
-            app.stop_job(match[2])
-            return {}
+            return app.stop_job(match[2]) if match[3] == "stop" else app.act_job(match[3], match[2], body, who="管理员")
         if method == "POST" and path == "/api/admin/invites":
             days = min(max(int(body.get("days") or 7), 1), 30)
             return {"code": hub.accounts.create_invite(me["id"], ttl=days * 86400)}
