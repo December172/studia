@@ -94,7 +94,7 @@ PLATFORMS = {
              "handler": AIMoocHandler, "units": mooc_units, "answer": True, "review": False, "needs_ai": True},
     "zyk": {"name": "资源库", "short": "资源库", "login": "browser", "api": ZYKMoocApi,
             "handler": ZYKMoocHandler, "units": None, "answer": False, "review": False, "needs_ai": False, "hidden": True},
-    "cx": {"name": "超星", "short": "超星", "login": "password", "api": ChaoxingApi,
+    "cx": {"name": "超星", "short": "超星", "login": "qr", "password": True, "api": ChaoxingApi,
            "handler": None, "units": cx_units, "answer": True, "review": False, "study": False,
            "needs_ai": True},
     "zhs": {"name": "智慧树", "short": "智慧树", "login": "qr", "api": ZHSApi,
@@ -133,7 +133,7 @@ class Platform:
     def public(self, logged_in):
         spec = self.spec
         return {"id": self.id, "name": spec["name"], "short": spec["short"], "login": spec["login"],
-                "logged_in": logged_in,
+                "password": bool(spec.get("password")), "logged_in": logged_in,
                 "features": {"study": spec.get("study", True), "answer": spec["answer"],
                              "review": spec["review"], "qa": bool(spec.get("qa"))}}
 
@@ -265,11 +265,16 @@ class Studia:
 
     def login_start(self, pid, body=None):
         platform = self.platform(pid)
-        if platform.spec["login"] == "password":
-            return self.password_login(platform, body or {})
+        body = body or {}
+        # 扫码登录的平台也可以在网页上改用账号密码（平台支持 password 能力时）。
+        # 前端提交账号密码表单时一定带 username/password 字段；空表单也走账号密码，
+        # 由 password_login 报「请输入账号和密码」，而不是悄悄改成扫码。
+        if platform.spec["login"] == "password" or (
+                platform.spec.get("password") and ("username" in body or "password" in body)):
+            return self.password_login(platform, body)
         with self.lock:
             if platform.spec["login"] == "qr":
-                client = ZHSApi()
+                client = platform.spec["api"]()
                 qr_token, image = client.login_qr()
                 qid = secrets.token_hex(6)
                 platform.qr[qid] = {"client": client, "qr": qr_token, "refreshes": 0}
@@ -380,10 +385,11 @@ class Studia:
                     logger.exception("%s%s 扫码已确认，但登录没完成", self.who(), name)
                     client.close()
                     return {"status": "failed", "message": "扫码已确认，但登录没完成（%s），请刷新二维码重试" % (str(exc) or "平台没响应")}
-                try:
-                    client.shared_exam_sso()
-                except (AuthenticationExpired, PlatformUnavailable, ZHSError):
-                    logger.warning("考试会话初始化失败，进入共享课试卷时将重新尝试")
+                if hasattr(client, "shared_exam_sso"):  # 智慧树扫码后还要建考试会话
+                    try:
+                        client.shared_exam_sso()
+                    except (AuthenticationExpired, PlatformUnavailable, ZHSError):
+                        logger.warning("考试会话初始化失败，进入共享课试卷时将重新尝试")
                 for other in platform.qr.values():  # the other pages' codes are moot now
                     other["client"].close()
                 platform.qr.clear()
@@ -398,12 +404,17 @@ class Studia:
                 if login["refreshes"] > QR_REFRESHES:
                     platform.qr.pop(qid)["client"].close()
                     return {"status": "failed", "message": "二维码多次过期，请点击刷新"}
-                login["qr"], image = login["client"].login_qr()
+                try:
+                    refresh = getattr(login["client"], "refresh_login_qr", None)
+                    login["qr"], image = refresh(login["qr"]) if refresh else login["client"].login_qr()
+                except (PlatformUnavailable, ChaoxingError, ZHSError) as exc:
+                    platform.qr.pop(qid)["client"].close()
+                    return {"status": "failed", "message": "二维码刷新失败：%s" % (str(exc) or "平台没响应")}
                 return {"status": "refreshed", "message": "二维码已过期，已自动刷新", "qr": _data_url(image)}
             if status == 3:
                 platform.qr.pop(qid)["client"].close()
-                logger.info("%s%s 在手机上取消了扫码登录", self.who(), name)
-                return {"status": "failed", "message": "已在手机上取消登录"}
+                logger.info("%s%s 扫码登录中止：%s", self.who(), name, result.get("message") or "已在手机上取消")
+                return {"status": "failed", "message": result.get("message") or "已在手机上取消登录"}
             return {"status": "waiting", "message": ""}
 
     def logout(self, pid):

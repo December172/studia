@@ -12,6 +12,7 @@ from AIMoocMain.exam_api import ExamAPI, ExamError, ExamServiceError, TaskUnavai
 from AIMoocMain.export_questions import QuizExportHandler, collect_quiz_catalog, paper_display_name, paper_exam_id
 from ChaoxingMain.api import ChaoxingApi, WorkUnavailable
 from ChaoxingMain.exercise import ChaoxingExerciseRunner
+from ChaoxingMain.login import qr_login as cx_qr_login
 from ChaoxingMain.main import catalog as cx_catalog
 from ZYKMoocMain.api import ZYKMoocApi
 from ZYKMoocMain.main import ZYKMoocHandler
@@ -127,8 +128,43 @@ class Application:
                 continue
             return username, password
 
+    def cx_login(self):
+        """学习通 App 扫码优先；扫码不方便（没有浏览器、需要二次验证）时用账号密码。"""
+        from ui import Cancelled
+        while True:
+            method = self.view.choice("超星登录", [
+                (1, "学习通 App 扫码", "手机学习通扫描浏览器里的二维码"),
+                (2, "账号密码登录", "扫码不方便或需要二次验证时使用"),
+            ], default=1, help_text="Esc 返回 · q 退出")
+            client = None
+            if method == 1:
+                client = ChaoxingApi()
+                try:
+                    with self.view.activity("等待学习通扫码"):
+                        ok = cx_qr_login(client, on_status=lambda message: self.view.note(message))
+                    if ok:
+                        with self.view.activity("读取课程列表"):
+                            rows = client.course_list()
+                        self.remember(lambda: self.store.save_session("cx", client))
+                        self.view.note("超星扫码登录成功。", "success")
+                        return client, rows
+                    self.view.note("扫码未完成或已超时。", "warning")
+                except Exception as exc:
+                    logger.exception("超星扫码登录异常")
+                    self.view.note(f"扫码登录失败：{exc}", "error")
+                if client is not None:
+                    client.close()
+                if not self.view.confirm("改用账号密码登录", default=True):
+                    raise Cancelled()
+            username, password = self.cx_credentials()
+            with self.view.activity("登录超星"):
+                client = ChaoxingApi(username, password)
+                rows = client.course_list()
+            self.remember(lambda: self.store.save_session("cx", client))
+            return client, rows
+
     def cx_client_and_courses(self, choose=True):
-        """超星用账号密码登录，只保存平台返回的 Cookie；和网页版共用一份 session。"""
+        """超星登录一次后只保存平台返回的 Cookie；和网页版共用一份 session。"""
         self.view.set_user()
         saved = self.store.session("cx")
         if saved:
@@ -140,12 +176,8 @@ class Application:
                 return client, self.view.courses(rows) if choose else rows
             except AuthenticationExpired:
                 self.store.clear_session("cx")
-                self.view.note("保存的超星登录已过期，请重新输入账号密码。", "warning")
-        username, password = self.cx_credentials()
-        with self.view.activity("登录超星"):
-            client = ChaoxingApi(username, password)
-            rows = client.course_list()
-        self.remember(lambda: self.store.save_session("cx", client))
+                self.view.note("保存的超星登录已过期，请重新扫码或输入账号密码。", "warning")
+        client, rows = self.cx_login()
         return client, self.view.courses(rows) if choose else rows
 
     @staticmethod
@@ -697,7 +729,7 @@ class Application:
                     if platform == current_platform:
                         self.view.set_user()
                         if platform == "cx":
-                            self.view.note("已退出超星登录，下次使用超星时重新输入账号密码。", "success")
+                            self.view.note("已退出超星登录，下次使用超星时重新扫码或输入账号密码。", "success")
                         else:
                             self.view.note(f"已退出{label}登录，正在打开浏览器重新登录。", "success")
                         return True

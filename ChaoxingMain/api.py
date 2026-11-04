@@ -5,6 +5,7 @@
 超星返回的 ``status`` 就是平台自己的确认，和源码一样不再单独回查一份作业的状态。
 """
 import base64
+import re
 import time
 
 import requests
@@ -26,6 +27,9 @@ logger = Logger(__name__).get_log()
 BASE_URL = "https://mooc1.chaoxing.com"
 MOOC2_URL = "https://mooc2-ans.chaoxing.com/mooc2-ans"
 PASSPORT_URL = "https://passport2.chaoxing.com"
+MOOC_HOME_URL = "https://i.mooc.chaoxing.com/space/index"
+# 登录页上的扫码地址；fid=-1 是不指定学校，和网页登录框一致。
+QR_LOGIN_PAGE = {"fid": "", "newversion": "true", "refer": "https%3A%2F%2Fi.chaoxing.com"}
 
 # passport2 登录密码的 AES 密钥；这是页面前端自带、所有客户端共用的固定值。
 AES_KEY = b"u2oh6Vu^HWe4_AES"
@@ -57,6 +61,16 @@ class LoginError(ChaoxingError):
 
 class WorkUnavailable(ChaoxingError):
     """这道作业本身不可作答（例如教师还没出完题），跳过它不影响其他作业。"""
+
+
+def _hidden_value(html_text, name):
+    """登录页里的 <input id="uuid" value="...">；属性顺序不固定，两种都认。"""
+    for pattern in (r'<input[^>]*id="%s"[^>]*value="([^"]*)"' % name,
+                    r'<input[^>]*value="([^"]*)"[^>]*id="%s"' % name):
+        found = re.search(pattern, html_text or "")
+        if found:
+            return found.group(1)
+    return ""
 
 
 def encrypt(value):
@@ -115,6 +129,82 @@ class ChaoxingApi:
         self.logged_in = True
         logger.info("超星登录成功")
 
+    def login_qr(self):
+        """学习通 App 扫码登录：取登录页里的 uuid/enc，再拿二维码图片。
+
+        返回值可以原样交给 login_qr_status()；网页版会把它保存在待扫码会话里。
+        """
+        page = self._request("get", PASSPORT_URL + "/login", params=QR_LOGIN_PAGE)
+        token = {"uuid": _hidden_value(page.text, "uuid"), "enc": _hidden_value(page.text, "enc")}
+        if not token["uuid"] or not token["enc"]:
+            raise LoginError("超星登录页没有返回二维码参数，请稍后重试")
+        return token, self._qr_image(token)
+
+    def refresh_login_qr(self, token):
+        """二维码过期时向平台换一张，不重新走登录页（避免换掉整个扫码会话）。"""
+        response = self._request("post", PASSPORT_URL + "/refreshQRCode")
+        try:
+            payload = response.json()
+        except ValueError:
+            raise ChaoxingError("超星没有返回新的二维码") from None
+        if not isinstance(payload, dict) or not payload.get("uuid") or not payload.get("enc"):
+            raise ChaoxingError("超星没有返回新的二维码")
+        token = {"uuid": str(payload["uuid"]), "enc": str(payload["enc"])}
+        return token, self._qr_image(token)
+
+    def login_qr_status(self, token):
+        """扫码状态，沿用项目里智慧树已经用到的约定：
+
+        -1 等待扫码、0 已扫码待手机确认、1 已确认（Cookie 已写入）、
+        2 二维码失效（可刷新）、3 手机取消或需要二次验证（跑不通）。
+        """
+        response = self._request("post", PASSPORT_URL + "/getauthstatus/v2", data={
+            "enc": token.get("enc", ""), "uuid": token.get("uuid", ""),
+            "doubleFactorLogin": 0, "forbidotherlogin": 0,
+        })
+        try:
+            data = response.json()
+        except ValueError:
+            raise ChaoxingError("超星没有返回扫码状态") from None
+        if not isinstance(data, dict):
+            raise ChaoxingError("超星返回了未知的扫码状态")
+        if data.get("status") in (True, "true"):
+            if data.get("containTwoFactorLogin"):
+                return {"status": 3, "message": "这个账号需要手机二次验证，请改用账号密码登录"}
+            return {"status": 1, "nickname": data.get("nickname") or ""}
+        kind = str(data.get("type") or "")
+        if kind == "4":
+            return {"status": 0, "nickname": data.get("nickname") or ""}
+        if kind in ("2", "7"):
+            # 2 = 二维码/会话失效，7 = 平台给出 mes 的错误；都按「换一张」处理。
+            return {"status": 2, "message": data.get("mes") or "二维码已失效"}
+        if kind == "6":
+            return {"status": 3, "message": "已在手机上取消登录"}
+        return {"status": -1, "message": "等待扫码"}
+
+    def finish_qr_login(self, result=None):
+        """扫码确认后把会话落到课程域名上，并确认 Cookie 真的可用。
+
+        手机确认时 Cookie 写在 passport 域；浏览器登录后会跳到 i.mooc，这里照做，
+        再用一次只读请求确认，避免把没生效的会话当成登录成功。
+        """
+        try:
+            self._request("get", MOOC_HOME_URL)
+        except (AuthenticationExpired, ChaoxingError):
+            raise LoginError("扫码已确认，但登录状态没有生效，请重试") from None
+        try:
+            self.signed_in()
+        except AuthenticationExpired:
+            raise LoginError("扫码已确认，但登录状态没有生效，请重试") from None
+        self.logged_in = True
+
+    def _qr_image(self, token):
+        response = self._request("get", PASSPORT_URL + "/createqr",
+                                 params={"uuid": token["uuid"], "fid": -1})
+        if not response.content:
+            raise LoginError("超星没有返回二维码图片，请稍后重试")
+        return response.content
+
     # ------------------------------------------------------------------ 请求
 
     def _request(self, method, url, *, params=None, data=None, headers=None):
@@ -129,7 +219,8 @@ class ChaoxingApi:
         if response.status_code != 200:
             raise ChaoxingError("超星平台返回 HTTP %s" % response.status_code)
         # 被重定向到登录页说明 cookie 已经失效，不能把登录页当成数据页解析。
-        if str(response.url).startswith(PASSPORT_URL):
+        # 登录相关的请求本来就打在 passport 上，不能按这条判断。
+        if not url.startswith(PASSPORT_URL) and str(response.url).startswith(PASSPORT_URL):
             raise AuthenticationExpired("超星登录已过期，请重新登录")
         return response
 

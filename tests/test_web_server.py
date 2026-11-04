@@ -262,11 +262,14 @@ class WebServerTest(unittest.TestCase):
 
     def test_each_page_keeps_its_own_qr_code(self):
         codes = iter(range(10))
-        with patch("web.server.ZHSApi") as api:
-            api.side_effect = lambda: Mock(login_qr=Mock(return_value=("q%d" % next(codes), b"png")),
-                                           login_qr_status=Mock(return_value={"status": -1}))
-            first = self.app.login_start("zhs")["id"]
-            second = self.app.login_start("zhs")["id"]  # a second tab opens the login page
+        from web.server import PLATFORMS
+        original = PLATFORMS["zhs"]["api"]
+        PLATFORMS["zhs"]["api"] = lambda: Mock(
+            login_qr=Mock(return_value=("q%d" % next(codes), b"png")),
+            login_qr_status=Mock(return_value={"status": -1}))
+        self.addCleanup(lambda: PLATFORMS["zhs"].__setitem__("api", original))
+        first = self.app.login_start("zhs")["id"]
+        second = self.app.login_start("zhs")["id"]  # a second tab opens the login page
         platform = self.app.platforms["zhs"]
         platform.qr[first]["client"].login_qr_status.return_value = {"status": 1, "oncePassword": "o"}
         self.app.store.save_session = Mock()
