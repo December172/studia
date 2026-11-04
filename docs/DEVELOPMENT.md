@@ -26,6 +26,8 @@
 | `ZYKMoocMain/` | 资源库平台接口与学习管理 |
 | `ZHSMain/` | 智慧树：扫码登录、接口加密、共享课/智慧课程学习、AI 答题与按课程的答案记忆 |
 | `ZHSMain/qa.py` | 智慧树问答区（qah5）：用 Playwright 复用已登录 Cookie，页面内签名取题、提问与发布回答；终端「问答区答题」「问答区提问」和网页任务类型 `qa` 共用取题/发布逻辑，答题按 `max_answers` 过滤题目。Playwright 同步 API 会在调用线程上占住一个事件循环，而 `__enter__` 失败时 `with` 不会调用 `__exit__`，失败路径必须自己 `close()`，否则同线程后续的 `asyncio.run()`（prompt_toolkit 界面）会直接抛错 |
+| `ChaoxingMain/` | 超星学习通：passport2 账号登录、课程/章节/作业读取、加密字体解码与章节作业 AI 作答。入口是 `python -m ChaoxingMain`，尚未接入网页版和终端界面；`exercise.py` 的覆盖率/提交策略与 `decode.py` 的页面解析来自 chaoxing 项目 |
+| `ChaoxingMain/font.py` | 超星加密字体解码：按下发字体逐字算字形哈希，对回 `resource/font_map_table.json` 里的 Unicode 名称，再按康熙部首表还原。映射表读入失败或字体不是 TrueType 时抛 `FontDecodeError`，调用方必须放弃这份作业而不是拿乱码问 AI |
 | `web/server.py` | 网页版后端：本机模式的 HTTP 接口、任务队列、SSE 事件推送 |
 | `web/hosting.py` | 服务器模式：多用户会话、CSRF、加密配置存储、审计日志、管理接口 |
 | `web/accounts.py` | 服务器模式的账号、邀请码、登录会话（SQLite：`数据目录/studia.db`）与登录限流 |
