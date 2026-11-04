@@ -126,7 +126,7 @@ class WorkJobTest(unittest.TestCase):
 
 ALL_CARDS = """
 <script>
-mArg={"defaults":{"ktoken":"kt","cpi":"333","knowledgeid":"123"},"attachments":[{"type":"video","jobid":"v1","mid":"m","objectId":"o1","playTime":5000,"otherInfo":"nodeId_123-a&x=1","property":{"name":"视频1","rt":"0.9"},"attDuration":"10","attDurationEnc":"e","videoFaceCaptureEnc":"f","isPassed":false},{"type":"video","jobid":"v2","mid":"m","objectId":"o2","isPassed":true,"property":{"name":"已看完"}},{"type":"video","jobid":"v3","objectId":"o3","property":{"name":"转码失败"}},{"type":"document","jobid":"d1","jtoken":"jt","mid":"m","otherInfo":"nodeId_123-d","property":{"objectid":"od","name":"讲义"}},{"type":"read","jobid":"r1","jtoken":"jt","property":{"id":"p1","title":"阅读"}},{"type":"read","jobid":"r2","property":{"read":true,"title":"已读"}},{"type":"workid","jobid":"w1","property":{"title":"测验"},"isPassed":true},{"type":"live","jobid":"l1","property":{"title":"直播"}}]};
+mArg={"defaults":{"ktoken":"kt","cpi":"333","knowledgeid":"123"},"attachments":[{"type":"video","jobid":"v1","mid":"m","objectId":"o1","playTime":5000,"otherInfo":"nodeId_123-a&x=1","property":{"name":"视频1","rt":"0.9"},"attDuration":"10","attDurationEnc":"e","videoFaceCaptureEnc":"f","isPassed":false},{"type":"video","jobid":"v2","mid":"m","objectId":"o2","isPassed":true,"property":{"name":"已看完"}},{"type":"video","jobid":"v3","property":{"name":"没有 objectId"}},{"type":"video","jobid":"v4","objectId":"o4","property":{"name":"mp4 直链（没有 mid）"}},{"type":"document","jobid":"d1","jtoken":"jt","mid":"m","otherInfo":"nodeId_123-d","property":{"objectid":"od","name":"讲义"}},{"type":"pdf","jobid":"d2","jtoken":"jt","property":{"objectid":"op","name":"课程 PDF"}},{"type":"read","jobid":"r1","jtoken":"jt","property":{"id":"p1","title":"阅读"}},{"type":"read","jobid":"r2","property":{"read":true,"title":"已读"}},{"type":"workid","jobid":"w1","property":{"title":"测验"},"isPassed":true},{"type":"live","jobid":"l1","property":{"title":"直播"}},{"type":"video","jobid":"v5","objectId":"o5","property":{"name":"字符串 false"},"isPassed":"0"}]};
 </script>
 """
 
@@ -136,9 +136,23 @@ class AllJobTest(unittest.TestCase):
         self.jobs, self.info = decode_jobs(ALL_CARDS)
 
     def test_all_supported_task_types(self):
-        self.assertEqual([job["jobid"] for job in self.jobs], ["v1", "d1", "r1", "w1"])
-        self.assertEqual([job["type"] for job in self.jobs], ["video", "document", "read", "workid"])
+        self.assertEqual([job["jobid"] for job in self.jobs], ["v1", "v4", "d1", "d2", "r1", "w1", "v5"])
+        self.assertEqual([job["type"] for job in self.jobs],
+                         ["video", "video", "document", "document", "read", "workid", "video"])
         self.assertEqual(self.info["knowledgeid"], "123")
+
+    def test_pdf_and_ppt_are_documents(self):
+        pdf = next(job for job in self.jobs if job["jobid"] == "d2")
+        self.assertEqual((pdf["type"], pdf["name"], pdf["objectid"]), ("document", "课程 PDF", "op"))
+
+    def test_video_without_mid_still_has_object_id(self):
+        video = next(job for job in self.jobs if job["jobid"] == "v4")
+        self.assertEqual(video["objectid"], "o4")
+        self.assertEqual(video["mid"], "")
+
+    def test_string_false_is_not_treated_as_passed(self):
+        video = next(job for job in self.jobs if job["jobid"] == "v5")
+        self.assertFalse(video["is_passed"])
 
     def test_video_fields(self):
         video = self.jobs[0]
@@ -153,7 +167,7 @@ class AllJobTest(unittest.TestCase):
     def test_finished_and_broken_cards_are_skipped(self):
         ids = {job["jobid"] for job in self.jobs}
         self.assertNotIn("v2", ids)   # 已看完的视频
-        self.assertNotIn("v3", ids)   # 转码失败（没有 mid）
+        self.assertNotIn("v3", ids)   # 没有 objectId，无法上报进度
         self.assertNotIn("r2", ids)   # 已读
         self.assertNotIn("l1", ids)   # 暂不支持的直播
 

@@ -180,43 +180,87 @@ def decode_jobs(html_text):
     return jobs, _job_info(data)
 
 
+# 任务点类型别名：平台/不同课程可能把文档叫 document，也可能直接给 pdf/ppt，
+# 视频也可能叫 audio/mp4；都归到同一组接口上处理。
+VIDEO_TYPES = {"video", "audio", "mp4", "mp3", "video/mp4"}
+DOCUMENT_TYPES = {"document", "doc", "docx", "pdf", "ppt", "pptx", "xls", "xlsx",
+                  "txt", "zip", "image", "img", "pic"}
+READ_TYPES = {"read"}
+WORK_TYPES = {"workid"}
+
+
+def _flag(value):
+    """平台有些字段是 "0"/"1" 或 "true"/"false" 字符串，直接用 bool 会把 "0" 当成真。"""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y")
+    return bool(value)
+
+
+def _first(*values):
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return ""
+
+
 def _card_job(card):
     if not isinstance(card, dict):
         return None
-    kind = str(card.get("type", "")).lower()
-    passed = bool(card.get("isPassed"))
-    # 作业卡片的完成标志不可靠（源码特意不跳过），其他任务已完成就不再处理。
-    if passed and kind != "workid":
-        return None
+    prop = card.get("property") if isinstance(card.get("property"), dict) else {}
+    name = prop.get("name") or prop.get("title") or ""
+    kind = str(card.get("type") or "").lower().strip()
+    # 有些任务点只把类型写在 property.type / resourceType 里。
+    for candidate in (kind, str(prop.get("type") or "").lower(), str(prop.get("resourceType") or "").lower()):
+        if candidate in VIDEO_TYPES | DOCUMENT_TYPES | READ_TYPES | WORK_TYPES:
+            kind = candidate
+            break
+    passed = _flag(card.get("isPassed"))
     job_id = card.get("jobid")
     if not job_id:
+        logger.warning("跳过没有 jobid 的任务点：[%s] %s", kind or "?", name or "?")
         return None
-    prop = card.get("property") if isinstance(card.get("property"), dict) else {}
+    # 作业卡片的 isPassed 不可靠（源码特意不跳过），其他任务已完成就不再处理。
+    if passed and kind not in WORK_TYPES:
+        logger.info("跳过已完成的任务点：[%s] %s", kind or "?", name or job_id)
+        return None
     # otherInfo 有时带一串附加参数，超星只用第一段。
     other = str(card.get("otherInfo") or "").split("&")[0]
     common = {"jobid": job_id, "otherinfo": other, "is_passed": passed,
               "mid": card.get("mid", ""), "enc": card.get("enc", ""), "aid": card.get("aid", "")}
-    if kind == "video":
-        if not card.get("mid"):  # 转码失败的视频没有 mid，源码直接跳过
-            logger.warning("跳过转码失败的视频任务：%s", prop.get("name") or job_id)
+    if kind in VIDEO_TYPES:
+        object_id = _first(card.get("objectId"), card.get("objectid"), prop.get("objectid"))
+        if not object_id:
+            logger.warning("跳过缺少 objectId 的视频任务点：%s", name or job_id)
             return None
-        return dict(common, type="video", name=prop.get("name") or "",
-                    objectid=card.get("objectId", ""), playTime=card.get("playTime", 0),
-                    rt=prop.get("rt", ""), attDuration=card.get("attDuration", ""),
+        if not card.get("mid"):
+            # 源码把缺 mid 的卡片当转码失败跳过；实际有些 mp4 直链视频没有 mid，
+            # 进度接口只用 objectId，仍可以正常完成。
+            logger.info("视频任务没有 mid，按 objectId 继续处理：%s", name or job_id)
+        fast = _first(card.get("fastforward"), prop.get("fastforward"))
+        return dict(common, type="video", name=name, objectid=str(object_id),
+                    playTime=_first(card.get("playTime"), prop.get("playTime"), 0),
+                    rt=_first(prop.get("rt"), card.get("rt")),
+                    # 卡片上没有 fastforward 时留空，等播放信息接口给准确值。
+                    fastforward=None if fast == "" else _flag(fast),
+                    vbegin=_first(prop.get("vbegin"), card.get("vbegin")),
+                    vend=_first(prop.get("vend"), card.get("vend")),
+                    attDuration=card.get("attDuration", ""),
                     attDurationEnc=card.get("attDurationEnc", ""),
                     videoFaceCaptureEnc=card.get("videoFaceCaptureEnc", ""))
-    if kind == "document":
-        return dict(common, type="document", name=prop.get("name") or prop.get("title") or "",
-                    jtoken=card.get("jtoken", ""), objectid=prop.get("objectid", ""))
-    if kind == "read":
-        if prop.get("read"):  # 已经读过的阅读任务
+    if kind in DOCUMENT_TYPES:
+        return dict(common, type="document", name=name,
+                    jtoken=card.get("jtoken", ""),
+                    objectid=_first(prop.get("objectid"), card.get("objectId"), card.get("objectid")))
+    if kind in READ_TYPES:
+        if _flag(prop.get("read")):  # 已经读过的阅读任务
+            logger.info("跳过已完成的阅读任务：%s", name or job_id)
             return None
-        return dict(common, type="read", name=prop.get("title") or prop.get("name") or "",
-                    jtoken=card.get("jtoken", ""), page_id=prop.get("id", ""))
-    if kind == "workid":
+        return dict(common, type="read", name=name, jtoken=card.get("jtoken", ""),
+                    page_id=prop.get("id", ""))
+    if kind in WORK_TYPES:
         return dict(common, type="workid", name=prop.get("title") or "",
                     is_passed=False)  # 作业的完成标志不展示、也不跳过
-    logger.debug("跳过暂不支持的任务点类型：%s", kind)
+    logger.info("跳过暂不支持的任务点类型：[%s] %s", kind or "?", name or job_id)
     return None
 
 
