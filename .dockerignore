@@ -7,7 +7,6 @@ __pycache__
 *.log
 tiku/
 ai_results/
-exports/
 design-research/
 tests/
 docs/
@@ -21,5 +20,3 @@ settings.enc
 secret.key
 accounts.json
 studia.db*
-studia-data-*.tgz
-docker-compose.override.yml
