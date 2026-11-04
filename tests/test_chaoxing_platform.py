@@ -168,6 +168,13 @@ class WebTaskTest(unittest.TestCase):
         self.assertFalse(task["done"])
         self.assertIn("提交状态", task["hint"])
 
+    def test_units_platform_error_returns_bad_gateway_and_keeps_login(self):
+        with patch.dict(self.platform.spec, {"units": Mock(side_effect=ChaoxingError("HTTP 403"))}):
+            with self.assertRaises(HttpError) as caught:
+                self.app.units("cx", "111-222")
+        self.assertEqual(caught.exception.status, 502)
+        self.assertIsNotNone(self.platform.client)
+
     def test_answer_job_runs_the_chaoxing_runner(self):
         job = {"id": "job1", "cancel": threading.Event()}
         runner = Mock()

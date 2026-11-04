@@ -12,7 +12,6 @@
 和网页/终端的「自动学习」「AI 答题」两个入口对应。
 """
 import threading
-import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from base.auth import AuthenticationExpired, PlatformUnavailable
@@ -25,6 +24,7 @@ logger = Logger(__name__).get_log()
 
 MAX_TRIES = 5          # 章节失败/未开放的重试次数（源码 max_tries）
 TASK_WORKERS = 5       # 一个章节内同时处理的任务点数（源码 ThreadPoolExecutor(5)）
+RETRY_DELAY = 30       # 给章节解锁和平台限流留出时间，等待可被取消
 NOT_OPEN_ACTIONS = ("retry", "continue")
 
 
@@ -45,7 +45,7 @@ class ChaoxingStudyHandler:
         self.cancel_event = cancel_event if cancel_event is not None else threading.Event()
         # 源码把倍速限制在 1–2 倍；超过 2 倍上报会被平台判定异常。
         self.speed = min(2.0, max(1.0, float(speed or 1.0)))
-        self.sleep = sleep if sleep is not None else time.sleep
+        self.sleep = sleep if sleep is not None else self.cancel_event.wait
         self.notopen_action = notopen_action if notopen_action in NOT_OPEN_ACTIONS else "retry"
         self.progress = Reporter(on_progress)
         # 当前课程已完成的 jobid；章节里先过滤掉，避免重复上报文档/视频。
@@ -101,7 +101,7 @@ class ChaoxingStudyHandler:
             while (pending or running) and not self.cancel_event.is_set():
                 while pending and len(running) < self.max_workers and not self.cancel_event.is_set():
                     task = pending.pop(0)
-                    running[pool.submit(self.process_chapter, course, task.point)] = task
+                    running[pool.submit(self.process_chapter, course, task.point, retry=task.tries > 0)] = task
                 if not running:
                     break
                 finished, _ = wait(list(running), return_when=FIRST_COMPLETED, timeout=1)
@@ -173,7 +173,9 @@ class ChaoxingStudyHandler:
 
     # ------------------------------------------------------------------ 章节
 
-    def process_chapter(self, course, point):
+    def process_chapter(self, course, point, *, retry=False):
+        if retry and not self.cancel_event.is_set():
+            self.sleep(RETRY_DELAY)
         if self.cancel_event.is_set():
             return "cancelled"
         if point.get("has_finished"):

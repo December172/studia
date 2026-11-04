@@ -45,7 +45,8 @@ def course_units(client, course):
 
     已完成的卡片也会带回来，所以整章学完时显示的是 n/n 而不是 0/0；完成状态优先
     相信平台的两份状态（gas/clazz 的节点计数、手机端 finished/unfinished 列表），
-    卡片上的 isPassed 只作兜底——文档/PPT 的卡片标志经常不更新。
+    状态接口不可用时采用章节完成标志，再用卡片 isPassed 兜底——文档/PPT 的
+    卡片标志经常不更新，即使章节页已经确认完成。
     """
     def status(name):
         method = getattr(client, name, None)
@@ -64,7 +65,8 @@ def course_units(client, course):
     for point in client.course_points(course)["points"]:
         jobs, _ = client.job_list(course, point, include_finished=True)
         counts = nodes.get(str(point.get("id"))) if isinstance(nodes, dict) else None
-        all_done = bool(counts) and counts.get("unfinish", 0) == 0 and counts.get("finish", 0) > 0
+        all_done = (counts.get("unfinish", 0) == 0 and counts.get("finish", 0) > 0
+                    if counts else bool(point.get("has_finished")))
         units = []
         for job in jobs:
             work = job["type"] == "workid"
