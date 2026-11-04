@@ -21,6 +21,7 @@ import json
 import time
 
 from MoocMain.log import Logger
+from ai.client import AIResponseError
 from base.auth import PlatformUnavailable
 from ZHSMain.api import AuthenticationExpired, CaptchaRequired, ZHSApiError
 
@@ -335,7 +336,16 @@ def write_questions(ai, reference, count, *, course_name="", on_progress=None):
             prompt = QUESTION_PROMPT % (course_name or "这门课", "课程的核心概念", index)
         if on_progress is not None:
             on_progress(index, total)
-        answer = ai.answer({"type": "问答题", "title": prompt}).get("answer")
+        try:
+            answer = ai.answer({"type": "问答题", "title": prompt}).get("answer")
+        except AIResponseError:
+            # 推理模型偶尔只回思考、正文为空或被截断：再要一次，还不行就跳过这条。超时等其他错误照常抛出，不再多等一轮。
+            logger.warning("AI 第 %d 条提问的回复不完整，重试一次", index)
+            try:
+                answer = ai.answer({"type": "问答题", "title": prompt}).get("answer")
+            except AIResponseError:
+                logger.warning("AI 第 %d 条提问的回复仍不完整，已跳过", index)
+                continue
         text = _clean_question(answer)
         if not MIN_QUESTION <= len(text) <= MAX_QUESTION:
             logger.warning("AI 给出的第 %d 条提问不可用：%s", index, text[:40])
