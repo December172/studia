@@ -13,6 +13,7 @@ from AIMoocMain.export_questions import QuizExportHandler, collect_quiz_catalog,
 from ChaoxingMain.api import ChaoxingApi, WorkUnavailable
 from ChaoxingMain.exercise import ChaoxingExerciseRunner
 from ChaoxingMain.login import qr_login as cx_qr_login
+from ChaoxingMain.study import ChaoxingStudyHandler
 from ChaoxingMain.main import catalog as cx_catalog
 from ZYKMoocMain.api import ZYKMoocApi
 from ZYKMoocMain.main import ZYKMoocHandler
@@ -313,9 +314,11 @@ class Application:
 
     def study(self, version, client=None, selected=None, review_minutes=0):
         api_class, handler = {1: (ZYKMoocApi, ZYKMoocHandler),
-                              2: (ZHSApi, ZHSHandler)}.get(version, (AIMoocApi, AIMoocHandler))
+                              2: (ZHSApi, ZHSHandler),
+                              3: (ChaoxingApi, ChaoxingStudyHandler)}.get(version, (AIMoocApi, AIMoocHandler))
         if client is None:
-            client, selected = self.client_and_courses(api_class)
+            client, selected = (self.cx_client_and_courses() if version == 3
+                                else self.client_and_courses(api_class))
         if not selected:
             self.view.cancelled = True
             return
@@ -338,6 +341,9 @@ class Application:
             self.view.plan("学习管理", selected)
             if version == 2 and review_minutes:
                 note = "智慧树每日复习：共享课 1 倍速重看已学视频 %d 分钟。" % review_minutes
+            elif version == 3:
+                note = ("超星学习：最多 %d 个章节同时处理，章节内的视频、文档、阅读任务点并行完成；"
+                        "视频先尝试直接完成，不通过再按真实时间累计。" % max_workers)
             elif version == 2:
                 note = ("智慧树学习：逐个视频实时播放（约 1.5 倍速），同一账号不能同时观看多个视频；"
                         "遇到验证码或当日学习时长上限会停止。")

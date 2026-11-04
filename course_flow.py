@@ -90,11 +90,16 @@ class CourseWorkspace:
                 return
             try:
                 if mode == 1:
+                    notice = ""
+                    if self.platform == 2:
+                        notice = ("逐个视频实时播放，耗时约为视频时长的三分之二；"
+                                  "平台限制同一账号同时只能看一个视频。")
+                    elif self.platform == 3:
+                        notice = ("超星学习：多个章节同时处理，视频先尝试直接完成；"
+                                  "章节测验在「AI 答题」里做。")
                     self.view.review_study(
                         courses, max_workers=self.store.concurrency()['study'],
-                        activities=self.platform == 0,
-                        notice=("逐个视频实时播放，耗时约为视频时长的三分之二；"
-                                "平台限制同一账号同时只能看一个视频。") if self.platform == 2 else "")
+                        activities=self.platform == 0, notice=notice)
                     result = self.execute(lambda: self.app.study(self.platform, self.client, courses))
                 elif mode == 3 and self.platform == 2:
                     targets = offers["review"]  # 只复习考核里有学习习惯分的课

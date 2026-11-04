@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import unittest
 
 from Crypto.Cipher import AES
@@ -6,7 +7,8 @@ from Crypto.Util.Padding import unpad
 from requests.cookies import RequestsCookieJar
 
 from base.auth import AuthenticationExpired
-from ChaoxingMain.api import AES_KEY, ChaoxingApi, ChaoxingError, LoginError, WorkUnavailable, encrypt
+from ChaoxingMain.api import (AES_KEY, ChaoxingApi, ChaoxingError, LoginError, WorkUnavailable,
+                              encrypt, video_enc)
 
 
 class FakeResponse:
@@ -258,6 +260,13 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(numbers, list("0123456789"))
         self.assertEqual(set(knowledge_ids), {"123"})
 
+    def test_job_list_includes_learning_tasks(self):
+        from tests.test_chaoxing_decode import ALL_CARDS
+        session = FakeSession(lambda *args: FakeResponse(ALL_CARDS))
+        api = ChaoxingApi(cookies={"UID": "1"}, session=session, sleep=lambda _: None)
+        jobs, _ = api.job_list(COURSE, POINT)
+        self.assertEqual({job["type"] for job in jobs}, {"video", "document", "read", "workid"})
+
     def test_not_open_chapter_stops_reading(self):
         session = FakeSession(lambda *args: FakeResponse("章节未开放"))
         api = ChaoxingApi(cookies={"UID": "1"}, session=session, sleep=lambda _: None)
@@ -265,6 +274,65 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(jobs, [])
         self.assertEqual(info, {"notOpen": True})
         self.assertEqual(len(session.calls), 1)
+
+
+VIDEO_JOB = {"type": "video", "jobid": "work-v", "name": "视频1", "objectid": "obj",
+             "otherinfo": "nodeId_123-a", "playTime": 5000, "rt": "0.9",
+             "attDuration": "", "attDurationEnc": "", "videoFaceCaptureEnc": ""}
+
+
+class LearningApiTest(unittest.TestCase):
+    def test_video_enc_matches_the_platform_formula(self):
+        raw = "[222][99][work-1][obj][120000][d_yHJ!$pdA~5][600000][0_600]"
+        self.assertEqual(video_enc(222, "work-1", "obj", 120, 600, 99),
+                         hashlib.md5(raw.encode()).hexdigest())
+
+    def test_video_reports_current_time_then_full_duration(self):
+        seen = []
+        state = {"logs": 0}
+
+        def handler(method, url, kwargs):
+            seen.append((url, kwargs))
+            if "/ananas/status/" in url:
+                return FakeResponse(json_body={"status": "success", "dtoken": "dt", "duration": 600})
+            state["logs"] += 1
+            return FakeResponse(json_body={"isPassed": state["logs"] >= 2})
+
+        api = ChaoxingApi(cookies={"UID": "99", "fid": "7"}, session=FakeSession(handler), sleep=lambda _: None)
+        self.assertEqual(api.study_video(COURSE, VIDEO_JOB, speed=1), "success")
+        logs = [kwargs for url, kwargs in seen if "/multimedia/log/" in url]
+        self.assertEqual(len(logs), 2)
+        first, second = logs[0]["params"], logs[1]["params"]
+        self.assertEqual(first["playingTime"], 5)      # job.playTime 5000ms → 5s
+        self.assertEqual(second["playingTime"], 600)   # 先按“已看完”再报一次
+        self.assertEqual(first["userid"], "99")
+        self.assertEqual(first["rt"], "0.9")
+        self.assertEqual(first["dtype"], "Video")
+        self.assertEqual(first["enc"], video_enc(222, "work-v", "obj", 5, 600, "99"))
+
+    def test_document_read_and_empty_page(self):
+        seen = []
+
+        def handler(method, url, kwargs):
+            seen.append((url, kwargs))
+            return FakeResponse("{}")
+
+        api = ChaoxingApi(cookies={"UID": "1"}, session=FakeSession(handler), sleep=lambda _: None)
+        self.assertEqual(api.study_document(COURSE, {"jobid": "d1", "otherinfo": "nodeId_123-rt_1"}), "success")
+        self.assertIn("/ananas/job/document", seen[-1][0])
+        self.assertEqual(seen[-1][1]["params"]["knowledgeid"], "123")
+        self.assertEqual(seen[-1][1]["params"]["courseid"], "111")
+        self.assertEqual(api.study_read(COURSE, {"jobid": "r1", "jtoken": "jt"}, {"knowledgeid": "123"}), "success")
+        self.assertIn("/ananas/job/readv2", seen[-1][0])
+        self.assertEqual(seen[-1][1]["params"]["jtoken"], "jt")
+        self.assertEqual(api.empty_page(COURSE, {"id": "p1"}), "success")
+        self.assertIn("/mycourse/studentstudyAjax", seen[-1][0])
+        self.assertEqual(seen[-1][1]["params"]["chapterId"], "p1")
+
+    def test_document_without_knowledgeid_is_an_error(self):
+        api = ChaoxingApi(cookies={"UID": "1"}, session=FakeSession(lambda *a: FakeResponse("{}")),
+                          sleep=lambda _: None)
+        self.assertEqual(api.study_document(COURSE, {"jobid": "d1", "otherinfo": ""}), "error")
 
 
 class WorkTest(unittest.TestCase):

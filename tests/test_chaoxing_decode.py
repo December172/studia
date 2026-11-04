@@ -4,6 +4,7 @@ from ChaoxingMain.decode import (
     decode_course_folder,
     decode_course_list,
     decode_course_point,
+    decode_jobs,
     decode_questions_info,
     decode_work_jobs,
 )
@@ -121,6 +122,45 @@ class WorkJobTest(unittest.TestCase):
 
     def test_page_without_cards(self):
         self.assertEqual(decode_work_jobs("<html></html>"), ([], {}))
+
+
+ALL_CARDS = """
+<script>
+mArg={"defaults":{"ktoken":"kt","cpi":"333","knowledgeid":"123"},"attachments":[{"type":"video","jobid":"v1","mid":"m","objectId":"o1","playTime":5000,"otherInfo":"nodeId_123-a&x=1","property":{"name":"视频1","rt":"0.9"},"attDuration":"10","attDurationEnc":"e","videoFaceCaptureEnc":"f","isPassed":false},{"type":"video","jobid":"v2","mid":"m","objectId":"o2","isPassed":true,"property":{"name":"已看完"}},{"type":"video","jobid":"v3","objectId":"o3","property":{"name":"转码失败"}},{"type":"document","jobid":"d1","jtoken":"jt","mid":"m","otherInfo":"nodeId_123-d","property":{"objectid":"od","name":"讲义"}},{"type":"read","jobid":"r1","jtoken":"jt","property":{"id":"p1","title":"阅读"}},{"type":"read","jobid":"r2","property":{"read":true,"title":"已读"}},{"type":"workid","jobid":"w1","property":{"title":"测验"},"isPassed":true},{"type":"live","jobid":"l1","property":{"title":"直播"}}]};
+</script>
+"""
+
+
+class AllJobTest(unittest.TestCase):
+    def setUp(self):
+        self.jobs, self.info = decode_jobs(ALL_CARDS)
+
+    def test_all_supported_task_types(self):
+        self.assertEqual([job["jobid"] for job in self.jobs], ["v1", "d1", "r1", "w1"])
+        self.assertEqual([job["type"] for job in self.jobs], ["video", "document", "read", "workid"])
+        self.assertEqual(self.info["knowledgeid"], "123")
+
+    def test_video_fields(self):
+        video = self.jobs[0]
+        self.assertEqual(video["name"], "视频1")
+        self.assertEqual(video["objectid"], "o1")
+        self.assertEqual(video["playTime"], 5000)
+        self.assertEqual(video["rt"], "0.9")
+        self.assertEqual((video["attDuration"], video["attDurationEnc"], video["videoFaceCaptureEnc"]),
+                         ("10", "e", "f"))
+        self.assertEqual(video["otherinfo"], "nodeId_123-a")
+
+    def test_finished_and_broken_cards_are_skipped(self):
+        ids = {job["jobid"] for job in self.jobs}
+        self.assertNotIn("v2", ids)   # 已看完的视频
+        self.assertNotIn("v3", ids)   # 转码失败（没有 mid）
+        self.assertNotIn("r2", ids)   # 已读
+        self.assertNotIn("l1", ids)   # 暂不支持的直播
+
+    def test_work_completion_flag_is_not_trusted(self):
+        work = next(job for job in self.jobs if job["jobid"] == "w1")
+        self.assertFalse(work["is_passed"])
+        self.assertEqual([job["jobid"] for job in decode_work_jobs(ALL_CARDS)[0]], ["w1"])
 
 
 class QuestionTest(unittest.TestCase):

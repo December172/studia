@@ -41,13 +41,18 @@ def catalog(client, course):
 
 
 def course_units(client, course):
-    """章节和其中的作业，给网页课程页的单元格子用（只读）。"""
+    """章节和其中的任务点，给网页课程页的单元格子用（只读）。
+
+    非作业任务点的完成状态来自平台卡片；作业的 isPassed 不可靠，统一显示未完成。
+    """
     chapters = []
     for point in client.course_points(course)["points"]:
         jobs, _ = client.job_list(course, point)
         chapters.append({"name": point.get("title") or "未命名章节", "units": [
-            {"id": job["jobid"], "name": job.get("name") or "章节作业", "kind": "work", "state": "queued"}
-            for job in jobs if job["type"] == "workid"]})
+            {"id": job["jobid"], "name": job.get("name") or job["type"],
+             "kind": "work" if job["type"] == "workid" else job["type"],
+             "state": "done" if job.get("is_passed") and job["type"] != "workid" else "queued"}
+            for job in jobs]})
     return chapters
 
 

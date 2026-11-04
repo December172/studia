@@ -851,7 +851,9 @@ function coverHtml(p, c) {
 function studyActions(p, c) {
   const f = c.features || {};
   const study = p.id === "zhs" ? (c.kind === "shared" ? "1.5 倍速看完剩下的视频，弹题自动答" : "完成文档、课件和视频")
-    : p.id === "mooc" ? "学完课件和视频，自动讨论和评价" : "学完资源库里的资源";
+    : p.id === "mooc" ? "学完课件和视频，自动讨论和评价"
+    : p.id === "cx" ? "视频、文档、阅读任务点：章节并行，视频先尝试直接完成"
+    : "学完资源库里的资源";
   return [["study", ICON.play, "自动学习", study],
     ...(f.review ? [["review", ICON.repeat, "每日复习", "重看 30 分钟攒习惯分，每天一次"]] : [])];
 }
@@ -1443,7 +1445,8 @@ async function readCourses(pid) {
   for (const c of state.courses[pid] || []) {
     // 超星的作业目录要逐个章节请求任务点，等打开答题页再读，登录后不要一次打满接口。
     if (p?.features.answer && p.id !== "cx") inBackground(() => (state.papers[key(pid, c.id)] ? null : loadPapers(p, c)));
-    if (p?.features.study !== false) inBackground(() => loadUnits(pid, c.id));
+    // 超星的单元要逐章节请求任务点，等打开课程页再读。
+    if (p?.features.study !== false && p.id !== "cx") inBackground(() => loadUnits(pid, c.id));
   }
 }
 

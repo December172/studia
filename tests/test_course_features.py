@@ -29,7 +29,7 @@ class CourseFeaturesTest(unittest.TestCase):
                          {"study": True, "answer": True, "review": False, "qa": False})
         # 超星没有自动学习，界面上也不显示学习标签页。
         self.assertEqual(course_features("cx", {"title": "高等数学"}, None),
-                         {"study": False, "answer": True, "review": False, "qa": False})
+                         {"study": True, "answer": True, "review": False, "qa": False})
 
     def test_score_shares_reads_the_rule(self):
         api = ZHSApi()

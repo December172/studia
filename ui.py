@@ -624,7 +624,8 @@ class TerminalUI:
         if platform == 0:
             choices += [(2, "AI 答题", "AI 作答并自动交卷"), (3, "导出题目", "保存题目和已有答案")]
         elif platform == 3:
-            choices = [(2, "AI 答题", "AI 作答章节作业，可选自动交卷")]
+            choices = [(1, "自动学习", "看完视频、完成文档和阅读任务点"),
+                       (2, "AI 答题", "AI 作答章节作业，可选自动交卷")]
         elif platform == 2:
             def only(rows, text):
                 if offers is None or len(rows) == len(courses):
@@ -675,7 +676,7 @@ class TerminalUI:
         activity_note = "讨论由AI生成，最多20字；课程评价五星，评语由AI生成" if activities else ""
         if self.native_enabled():
             from native_ui import action_page
-            names = [safe_text(c.get("courseName", "未知课程")) for c in courses]
+            names = [safe_text(c.get("courseName") or c.get("title") or "未知课程") for c in courses]
             lines = lambda: ([f"共 {len(names)} 门课程"] + ([notice] if notice else [])
                              + ([activity_note] if activities else []) + names)
             while True:
@@ -689,7 +690,8 @@ class TerminalUI:
                 if result.kind == "quit":
                     raise Cancelled()
                 return None
-        self.table(title, ["课程", "操作"], [(c.get("courseName", "未知课程"), "完成课程学习任务") for c in courses],
+        self.table(title, ["课程", "操作"],
+                   [(c.get("courseName") or c.get("title") or "未知课程", "完成课程学习任务") for c in courses],
                    "回车开始 · Esc 返回 · q 退出")
         if notice:
             self.note(notice)

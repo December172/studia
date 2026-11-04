@@ -152,11 +152,12 @@ def _job_count(node):
     return int(value) if value.isdigit() else 1
 
 
-def decode_work_jobs(html_text):
-    """章节任务点里的作业/测验卡片，以及这一章的公共参数（ktoken/cpi/knowledgeid 等）。
+def decode_jobs(html_text):
+    """章节任务点：视频、文档、阅读、作业，以及这一章的公共参数（ktoken/cpi/knowledgeid 等）。
 
-    只解析 workid 卡片：本次迁移只做「章节作业自动作答」，视频、文档、阅读任务
-    不在范围内。``notOpen`` 表示这一章还没开放。
+    对应源码 ``decode_course_card``：已完成的非作业卡片直接跳过，作业卡片的 isPassed
+    不可靠所以保留；``otherInfo`` 只取第一段。videod 转码失败的卡片（没有 mid）跳过。
+    ``notOpen`` 表示这一章还没开放。
     """
     if "章节未开放" in (html_text or ""):
         return [], {"notOpen": True}
@@ -170,29 +171,59 @@ def decode_work_jobs(html_text):
         return [], {}
     if not isinstance(data, dict) or not data:
         return [], {}
-    job_info = _job_info(data)
     jobs = []
     cards = data.get("attachments")
     for card in cards if isinstance(cards, list) else []:
-        if not isinstance(card, dict) or str(card.get("type", "")).lower() != "workid":
-            continue
-        job_id = card.get("jobid")
-        if not job_id:
-            continue
-        job_info_card = card.get("property") if isinstance(card.get("property"), dict) else {}
-        jobs.append({
-            "type": "workid",
-            "jobid": job_id,
-            # otherInfo 有时带一串附加参数，超星只用第一段。
-            "otherinfo": str(card.get("otherInfo") or "").split("&")[0],
-            "name": job_info_card.get("title") or "",
-            "mid": card.get("mid", ""),
-            "enc": card.get("enc", ""),
-            "aid": card.get("aid", ""),
-            "is_passed": bool(card.get("isPassed")),
-        })
-    logger.debug("本章节作业任务 %d 个", len(jobs))
-    return jobs, job_info
+        job = _card_job(card)
+        if job is not None:
+            jobs.append(job)
+    return jobs, _job_info(data)
+
+
+def _card_job(card):
+    if not isinstance(card, dict):
+        return None
+    kind = str(card.get("type", "")).lower()
+    passed = bool(card.get("isPassed"))
+    # 作业卡片的完成标志不可靠（源码特意不跳过），其他任务已完成就不再处理。
+    if passed and kind != "workid":
+        return None
+    job_id = card.get("jobid")
+    if not job_id:
+        return None
+    prop = card.get("property") if isinstance(card.get("property"), dict) else {}
+    # otherInfo 有时带一串附加参数，超星只用第一段。
+    other = str(card.get("otherInfo") or "").split("&")[0]
+    common = {"jobid": job_id, "otherinfo": other, "is_passed": passed,
+              "mid": card.get("mid", ""), "enc": card.get("enc", ""), "aid": card.get("aid", "")}
+    if kind == "video":
+        if not card.get("mid"):  # 转码失败的视频没有 mid，源码直接跳过
+            logger.warning("跳过转码失败的视频任务：%s", prop.get("name") or job_id)
+            return None
+        return dict(common, type="video", name=prop.get("name") or "",
+                    objectid=card.get("objectId", ""), playTime=card.get("playTime", 0),
+                    rt=prop.get("rt", ""), attDuration=card.get("attDuration", ""),
+                    attDurationEnc=card.get("attDurationEnc", ""),
+                    videoFaceCaptureEnc=card.get("videoFaceCaptureEnc", ""))
+    if kind == "document":
+        return dict(common, type="document", name=prop.get("name") or prop.get("title") or "",
+                    jtoken=card.get("jtoken", ""), objectid=prop.get("objectid", ""))
+    if kind == "read":
+        if prop.get("read"):  # 已经读过的阅读任务
+            return None
+        return dict(common, type="read", name=prop.get("title") or prop.get("name") or "",
+                    jtoken=card.get("jtoken", ""), page_id=prop.get("id", ""))
+    if kind == "workid":
+        return dict(common, type="workid", name=prop.get("title") or "",
+                    is_passed=False)  # 作业的完成标志不展示、也不跳过
+    logger.debug("跳过暂不支持的任务点类型：%s", kind)
+    return None
+
+
+def decode_work_jobs(html_text):
+    """只取作业卡片（答题流程用），其余任务点交给 decode_jobs。"""
+    jobs, job_info = decode_jobs(html_text)
+    return [job for job in jobs if job["type"] == "workid"], job_info
 
 
 def _job_info(cards_data):
