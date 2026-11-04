@@ -239,7 +239,7 @@ class WebServerTest(unittest.TestCase):
         state = json.loads(self.request("GET", "/api/state")[1])
         cx = next(platform for platform in state["platforms"] if platform["id"] == "cx")
         self.assertTrue(cx["logged_in"])
-        self.assertFalse(cx["features"]["study"])
+        self.assertTrue(cx["features"]["study"])
 
         class WrongPassword:
             def __init__(self, *args, **kwargs):

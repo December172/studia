@@ -1,11 +1,15 @@
-"""超星学习通接口：登录、课程/章节/任务点读取、作业页面与交卷。
+"""超星学习通接口：登录、课程/章节/任务点读取、学习任务、作业页面与交卷。
 
-与 studia 其他平台客户端一样，这里只负责 HTTP 和解析，不决定答题策略；整章读取、
-覆盖率判断和提交都由 ChaoxingMain.exercise 决定。写操作（交卷）不自动重试：
-超星返回的 ``status`` 就是平台自己的确认，和源码一样不再单独回查一份作业的状态。
+与 studia 其他平台客户端一样，这里只负责 HTTP 和解析，不决定调度策略；章节并行、
+重试和答题覆盖率分别由 ChaoxingMain.study / exercise 决定。学习任务的接口和参数
+来自 chaoxing 项目的 study_video / study_document / study_read / study_emptypage。
+写操作（交卷、上报进度）不自动重试。
 """
 import base64
+import hashlib
+import random
 import re
+import threading
 import time
 
 import requests
@@ -18,7 +22,7 @@ from ChaoxingMain.decode import (
     decode_course_folder,
     decode_course_list,
     decode_course_point,
-    decode_work_jobs,
+    decode_jobs,
 )
 from MoocMain.log import Logger
 
@@ -49,6 +53,27 @@ SUBMIT_HEADERS = {
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     "Origin": BASE_URL,
 }
+VIDEO_HEADERS = {"Referer": "https://mooc1.chaoxing.com/ananas/modules/video/index.html?v=2025-0725-1842"}
+AUDIO_HEADERS = {"Referer": "https://mooc1.chaoxing.com/ananas/modules/audio/index_new.html?v=2025-0725-1842"}
+VIDEO_STATUS_URL = BASE_URL + "/ananas/status/%s"
+VIDEO_LOG_URL = BASE_URL + "/mooc-ans/multimedia/log/a/%s/%s"
+DOCUMENT_URL = BASE_URL + "/ananas/job/document"
+READ_URL = BASE_URL + "/ananas/job/readv2"
+EMPTY_PAGE_URL = BASE_URL + "/mooc-ans/mycourse/studentstudyAjax"
+# 上报视频进度时 enc 里的固定盐值，来自网页播放器。
+VIDEO_ENC_SALT = "d_yHJ!$pdA~5"
+
+
+def timestamp():
+    return str(int(time.time() * 1000))
+
+
+def video_enc(clazz_id, jobid, objectid, playing_time, duration, userid):
+    """网页播放器上报进度用的 enc：md5("[课时][用户][任务][对象][毫秒播放][盐][毫秒时长][0_时长]")。"""
+    raw = "[%s][%s][%s][%s][%s][%s][%s][0_%s]" % (
+        clazz_id, userid, jobid, objectid, int(playing_time) * 1000,
+        VIDEO_ENC_SALT, int(duration) * 1000, int(duration))
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
 class ChaoxingError(RuntimeError):
@@ -85,6 +110,10 @@ class ChaoxingApi:
         self.session.headers.update(HEADERS)
         self.sleep = sleep if sleep is not None else time.sleep
         self.logged_in = False
+        # 视频进度上报的节流（多个章节同时学习时也共用）。
+        self._video_lock = threading.Lock()
+        self._video_next = 0.0
+        self.VIDEO_LOG_INTERVAL = 2.0
         if cookies:
             for name, value in cookies.items():
                 self.session.cookies.set(name, value)
@@ -256,7 +285,7 @@ class ChaoxingApi:
         return decode_course_point(self._request("get", MOOC2_URL + "/mycourse/studentcourse", params=params).text)
 
     def job_list(self, course, point):
-        """章节里的作业任务和这一章的公共参数。
+        """章节里的任务点（视频/文档/阅读/作业）和这一章的公共参数。
 
         页面用 num=0..9 分批返回任务卡片，数量事先不知道，所以和源码一样逐个请求，
         直到没有新卡片；这一步是纯读取。
@@ -275,7 +304,7 @@ class ChaoxingApi:
         for number in "0123456789":
             params["num"] = number
             page = self._request("get", BASE_URL + "/mooc-ans/knowledge/cards", params=params)
-            found, found_info = decode_work_jobs(page.text)
+            found, found_info = decode_jobs(page.text)
             if found_info.get("notOpen"):
                 return [], found_info
             jobs += found
@@ -288,6 +317,184 @@ class ChaoxingApi:
             seen.add(job["jobid"])
             unique.append(job)
         return unique, job_info
+
+    # ------------------------------------------------------------------ 学习
+
+    def user_id(self):
+        return str(self.session.cookies.get("_uid") or self.session.cookies.get("UID") or "")
+
+    def fid(self):
+        return str(self.session.cookies.get("fid") or "")
+
+    def _raw(self, method, url, *, params=None, headers=None):
+        merged = dict(HEADERS)
+        merged.update(headers or {})
+        try:
+            return getattr(self.session, method)(url, params=params, headers=merged,
+                                                 timeout=(10, 30), allow_redirects=True)
+        except requests.RequestException as error:
+            raise PlatformUnavailable("暂时无法连接超星平台：%s" % error) from None
+
+    def _video_throttle(self):
+        """上报进度很容易触发 403：和源码一样每次先随机停 0–2 秒，再保证 2 秒间隔。"""
+        self.sleep(random.uniform(0, 2))
+        with self._video_lock:
+            wait = self._video_next - time.time()
+            if wait > 0:
+                self.sleep(wait)
+            self._video_next = time.time() + self.VIDEO_LOG_INTERVAL
+
+    def video_status(self, job, kind="Video"):
+        """视频/音频的最新元数据（dtoken、duration、playTime）；失败返回 None。"""
+        headers = VIDEO_HEADERS if kind == "Video" else AUDIO_HEADERS
+        response = self._raw("get", VIDEO_STATUS_URL % job["objectid"],
+                             params={"k": self.fid(), "flag": "normal"}, headers=headers)
+        if response.status_code != 200:
+            return None
+        try:
+            data = response.json()
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) and data.get("status") == "success" else None
+
+    @staticmethod
+    def _passed(response):
+        try:
+            return bool(response.json().get("isPassed"))
+        except (ValueError, AttributeError):
+            return False
+
+    def video_log(self, course, job, dtoken, duration, playing_time, kind="Video"):
+        """上报一次播放进度，返回 (isPassed, HTTP 状态码)；403 交给调用方决定是否重试。"""
+        self._video_throttle()
+        headers = VIDEO_HEADERS if kind == "Video" else AUDIO_HEADERS
+        params = {
+            "clazzId": course["clazzId"],
+            "playingTime": int(playing_time),
+            "duration": int(duration),
+            "clipTime": "0_%d" % int(duration),
+            "objectId": job["objectid"],
+            "otherInfo": job["otherinfo"],
+            "courseId": course["courseId"],
+            "jobid": job["jobid"],
+            "userid": self.user_id(),
+            "isdrag": "3",
+            "view": "pc",
+            "enc": video_enc(course["clazzId"], job["jobid"], job["objectid"],
+                             playing_time, duration, self.user_id()),
+            "dtype": kind,
+        }
+        for key in ("videoFaceCaptureEnc", "attDuration", "attDurationEnc"):
+            if job.get(key):
+                params[key] = job[key]
+        url = VIDEO_LOG_URL % (course["cpi"], dtoken)
+
+        def send(rt):
+            params.update({"rt": rt, "_t": timestamp()})
+            return self._raw("get", url, params=dict(params), headers=headers)
+
+        rt = job.get("rt") or ""
+        if not rt:
+            found = re.search(r"-rt_([1d])", job.get("otherinfo") or "")
+            if found:
+                rt = "0.9" if found.group(1) == "d" else "1"
+        if rt:
+            response = send(rt)
+            return self._passed(response), response.status_code
+        # 没有 rt 时两个值都试，和源码一致。
+        response = None
+        for candidate in ("0.9", "1"):
+            response = send(candidate)
+            if response.status_code == 200:
+                return self._passed(response), 200
+            if response.status_code != 403:
+                return False, response.status_code
+        return False, response.status_code if response is not None else 0
+
+    def study_video(self, course, job, *, speed=1.0, kind="Video", cancel_event=None):
+        """完成一个视频/音频任务点，返回 success / forbidden / error / cancelled。
+
+        和源码一样先按“已看完”上报一次：平台接受就立即完成；不接受再按真实时间
+        累计播放进度（speed 倍速），每 30–90 秒（视频时间）上报一次。
+        """
+        info = self.video_status(job, kind)
+        if info is None:
+            return "error"
+        try:
+            dtoken = info["dtoken"]
+            duration = int(info.get("duration") or 0)
+        except (KeyError, TypeError, ValueError):
+            return "error"
+        if duration <= 0:
+            return "error"
+        play_time = int(job.get("playTime") or 0) // 1000
+        passed, _ = self.video_log(course, job, dtoken, duration, play_time, kind)
+        if not passed:
+            passed, _ = self.video_log(course, job, dtoken, duration, duration, kind)
+        if passed:
+            return "success"
+
+        last_log, last_iter = 0, time.time()
+        wait = random.randint(30, 90)
+        forbidden = 0
+        try:
+            while not passed:
+                if cancel_event is not None and cancel_event.is_set():
+                    return "cancelled"
+                if play_time - last_log >= wait or play_time >= duration:
+                    passed, state = self.video_log(course, job, dtoken, duration, int(play_time), kind)
+                    if state == 403:
+                        if forbidden >= 2:
+                            logger.warning("%s：视频进度连续 403，跳过", job.get("name") or job["jobid"])
+                            return "forbidden"
+                        forbidden += 1
+                        self.sleep(random.uniform(2, 4))
+                        refreshed = self.video_status(job, kind)
+                        if refreshed is not None:
+                            dtoken = refreshed.get("dtoken", dtoken)
+                            duration = int(refreshed.get("duration") or duration)
+                            play_time = min(duration, int(refreshed.get("playTime") or 0) // 1000)
+                            last_iter = time.time()
+                            continue
+                    elif not passed and state != 200:
+                        return "error"
+                    wait, last_log = random.randint(30, 90), play_time
+                now = time.time()
+                play_time = min(duration, play_time + (now - last_iter) * speed)
+                last_iter = now
+                self.sleep(1)
+        except PlatformUnavailable:
+            raise
+        return "success"
+
+    def study_document(self, course, job):
+        found = re.findall(r"nodeId_(.*?)-", job.get("otherinfo") or "")
+        if not found:
+            logger.warning("%s：文档任务缺少 knowledgeid", job.get("name") or job["jobid"])
+            return "error"
+        self._request("get", DOCUMENT_URL, params={
+            "jobid": job["jobid"], "knowledgeid": found[0],
+            "courseid": course["courseId"], "clazzid": course["clazzId"],
+            "jtoken": job.get("jtoken", ""), "_dc": timestamp(),
+        })
+        return "success"
+
+    def study_read(self, course, job, job_info):
+        self._request("get", READ_URL, params={
+            "jobid": job["jobid"], "knowledgeid": job_info.get("knowledgeid", ""),
+            "jtoken": job.get("jtoken", ""), "courseid": course["courseId"],
+            "clazzid": course["clazzId"],
+        })
+        return "success"
+
+    def empty_page(self, course, point):
+        """没有任务点的空章节：点一下完成，和源码 study_emptypage 一致。"""
+        self._request("get", EMPTY_PAGE_URL, params={
+            "courseId": course["courseId"], "clazzid": course["clazzId"],
+            "chapterId": point["id"], "cpi": course["cpi"], "verificationcode": "",
+            "mooc2": 1, "microTopicId": 0, "editorPreview": 0,
+        })
+        return "success"
 
     # ------------------------------------------------------------------ 作业
 

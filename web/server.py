@@ -33,6 +33,7 @@ from base.auth import AuthenticationExpired, PlatformUnavailable
 from ChaoxingMain.api import ChaoxingApi, ChaoxingError, LoginError, WorkUnavailable
 from ChaoxingMain.exercise import ChaoxingExerciseRunner
 from ChaoxingMain.main import catalog as cx_catalog, course_units as cx_units
+from ChaoxingMain.study import ChaoxingStudyHandler
 from NewMoocMain.oauth_login import oauth_login
 from settings import DEFAULT_PROFILE_ID, SettingsError, SettingsStore
 from task_capabilities import task_availability, task_type_label
@@ -95,8 +96,8 @@ PLATFORMS = {
     "zyk": {"name": "资源库", "short": "资源库", "login": "browser", "api": ZYKMoocApi,
             "handler": ZYKMoocHandler, "units": None, "answer": False, "review": False, "needs_ai": False, "hidden": True},
     "cx": {"name": "超星", "short": "超星", "login": "qr", "password": True, "api": ChaoxingApi,
-           "handler": None, "units": cx_units, "answer": True, "review": False, "study": False,
-           "needs_ai": True},
+           "handler": ChaoxingStudyHandler, "units": cx_units, "answer": True, "review": False,
+           "needs_ai": False},
     "zhs": {"name": "智慧树", "short": "智慧树", "login": "qr", "api": ZHSApi,
             "handler": ZHSHandler, "units": zhs_units, "answer": True, "review": True, "qa": True, "needs_ai": False},
 }

@@ -98,7 +98,7 @@ class WebLoginTest(unittest.TestCase):
             self.assertEqual(courses[0]["name"], "高等数学")
             self.assertEqual(courses[0]["id"], "111-222")
             self.assertEqual(courses[0]["type"], "张老师")
-            self.assertFalse(courses[0]["features"]["study"])
+            self.assertTrue(courses[0]["features"]["study"])
             self.assertTrue(courses[0]["features"]["answer"])
 
     def test_missing_credentials_are_refused(self):
@@ -209,10 +209,19 @@ class WebTaskTest(unittest.TestCase):
                                        {"id": "job1", "cancel": threading.Event()})
         self.assertIn("1/2", summary)
 
-    def test_learning_jobs_are_refused_for_chaoxing(self):
-        with self.assertRaises(HttpError) as caught:
-            self.app.start_job({"platform": "cx", "type": "study", "course": "111-222"})
-        self.assertEqual(caught.exception.status, 400)
+    def test_study_job_uses_the_learning_handler(self):
+        self.platform.client = Mock()
+        job = {"id": "job1", "cancel": threading.Event(), "course": "111-222"}
+        handler = Mock(blocked=None)
+        factory = Mock(return_value=handler)
+        with patch.dict(self.platform.spec, {"handler": factory}):
+            summary = self.app._study(self.platform, dict(CX_COURSE), 0, job)
+        factory.assert_called_once()
+        kwargs = factory.call_args.kwargs
+        self.assertEqual(kwargs["course_rows"], [dict(CX_COURSE)])
+        self.assertIs(kwargs["client"], self.platform.client)
+        self.assertEqual(kwargs["max_workers"], self.app.store.concurrency()["study"])
+        self.assertEqual(summary, "学习完成")
 
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 16
@@ -310,10 +319,10 @@ class TerminalTest(unittest.TestCase):
         self.assertEqual(view.choose_platform(0), 3)
         self.assertIn("超星", output.getvalue())
 
-        view, output = make_view(["2"])
-        self.assertEqual(view.course_menu([CX_COURSE], 3), 2)
+        view, output = make_view(["1"])
+        self.assertEqual(view.course_menu([CX_COURSE], 3), 1)
+        self.assertIn("自动学习", output.getvalue())
         self.assertIn("AI 答题", output.getvalue())
-        self.assertNotIn("自动学习", output.getvalue())
 
     def test_saved_cookie_login_is_reused(self):
         view, _ = make_view([])
