@@ -194,3 +194,11 @@ studia-data-*.tgz
 
 # 本地构建/端口覆盖，不提交（compose 会自动加载）
 docker-compose.override.yml
+
+# 私人部署记录与服务器账号数据
+/docs/DOCKER_OPS.md
+/data/
+/settings.enc
+/secret.key
+/accounts.json
+/studia.db*
