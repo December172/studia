@@ -22,6 +22,7 @@ import time
 
 from MoocMain.log import Logger
 from base.auth import PlatformUnavailable
+from ai.client import AIError
 from ZHSMain.api import AuthenticationExpired, CaptchaRequired, ZHSApiError
 
 logger = Logger(__name__).get_log()
@@ -317,6 +318,21 @@ def _clean_question(text):
     return _strip_lead_ins(text)
 
 
+QUESTION_ATTEMPTS = 2  # 空的或坏掉的 JSON 属可重试结果，再要一次
+
+
+def _draft(ai, prompt, *, attempts=QUESTION_ATTEMPTS, sleep=None):
+    """要一条提问正文。推理模型偶尔只回思考、正文为空或 JSON 被截断，这类结果再要一次。"""
+    for attempt in range(1, attempts + 1):
+        try:
+            return ai.answer({"type": "问答题", "title": prompt}).get("answer")
+        except AIError as exc:
+            if not getattr(exc, "retryable", False) or attempt >= attempts:
+                raise
+            logger.warning("出题第 %d 次失败，重试：%s", attempt, exc)
+            (sleep or time.sleep)(1)
+
+
 def write_questions(ai, reference, count, *, course_name="", on_progress=None):
     """参考回答较少的提问，让模型写 count 条新提问。
 
@@ -335,7 +351,7 @@ def write_questions(ai, reference, count, *, course_name="", on_progress=None):
             prompt = QUESTION_PROMPT % (course_name or "这门课", "课程的核心概念", index)
         if on_progress is not None:
             on_progress(index, total)
-        answer = ai.answer({"type": "问答题", "title": prompt}).get("answer")
+        answer = _draft(ai, prompt)
         text = _clean_question(answer)
         if not MIN_QUESTION <= len(text) <= MAX_QUESTION:
             logger.warning("AI 给出的第 %d 条提问不可用：%s", index, text[:40])

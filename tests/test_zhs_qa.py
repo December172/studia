@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, Mock, patch
 from rich.console import Console
 
 import theme
+from ai.client import AIResponseError
 from app import Application
 from base.auth import PlatformUnavailable
 from settings import SettingsStore
@@ -138,6 +139,22 @@ class BridgeLifecycleTest(unittest.TestCase):
         playwright.stop.assert_called_once()
 
 
+class FlakyAi(FakeAi):
+    """先回坏 JSON 再正常，模拟推理模型偶尔只回思考、正文为空。"""
+
+    def __init__(self, text=LONG, failures=1):
+        super().__init__(text)
+        self.failures = failures
+
+    def answer(self, question):
+        self.calls += 1
+        self.questions.append(question)
+        if self.failures:
+            self.failures -= 1
+            raise AIResponseError("AI 响应不是完整的答案 JSON；本题未作答（finish_reason=length）")
+        return {"answer": self.text}
+
+
 class FakeAsk:
     """只实现 ask() 的桥替身，用来验证提问队列。"""
 
@@ -191,6 +208,19 @@ class WriteQuestionsTest(unittest.TestCase):
         title = ai.questions[0]["title"]
         self.assertIn("问题 7 号？", title)
         self.assertNotIn("问题 8 号？", title)
+
+    def test_broken_response_is_asked_again(self):
+        ai = FlakyAi()
+        with patch("ZHSMain.qa.time.sleep"):
+            self.assertEqual(write_questions(ai, [], 1), [LONG])
+        self.assertEqual(ai.calls, 2)
+
+    def test_repeated_broken_response_is_raised(self):
+        ai = FlakyAi(failures=5)
+        with patch("ZHSMain.qa.time.sleep"):
+            with self.assertRaises(AIResponseError):
+                write_questions(ai, [], 1)
+        self.assertEqual(ai.calls, 2)
 
     def test_progress_callback_reports_each_question(self):
         seen = []

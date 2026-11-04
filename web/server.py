@@ -902,7 +902,13 @@ class Studia:
                 reference = self._cached(platform, ("qa_reference", course_id), False, lambda: self._reference(platform, row))
             except AuthenticationExpired:
                 raise HttpError(409, "问答区没进去，稍后重试；一直不行就重新扫码智慧树") from None
-            return {"questions": write_questions(ai, have + reference, 1, course_name=row.get("courseName") or "这门课")}
+            try:
+                questions = write_questions(ai, have + reference, 1,
+                                            course_name=row.get("courseName") or "这门课")
+            except AIError as exc:
+                # 模型偶尔只回思考、正文是空的或被截断；给出能重试的提示，别落成 500。
+                raise HttpError(502, "AI 没写出可用的提问：%s；再试一次" % exc) from None
+            return {"questions": questions}
         finally:
             ai.session.close()
 
