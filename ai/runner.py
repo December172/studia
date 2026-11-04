@@ -17,6 +17,7 @@ from ai.questions import answer_record, model_question, question_fingerprint
 from task_capabilities import task_availability
 
 
+
 class AttemptClock:
     """Report only real elapsed time, at the web client's 10-second interval."""
     def __init__(self, api, course, exam_id, task_id, remaining, enabled):
@@ -226,7 +227,7 @@ class AnswerRunner:
             delay -= interval
         clock.check()
 
-    def answer_question(self, question, clock, on_retry=None):
+    def answer_question(self, question, clock, on_retry=None, guess=False):
         """Retry only AI generation, preserving the paper and completed answers."""
         clock.check()
         cooldown = self.service_cooldown_until - time.monotonic()
@@ -235,7 +236,7 @@ class AnswerRunner:
         for attempt in range(3):
             clock.check()
             try:
-                return self.ai.answer(question)
+                return self.ai.guess(question) if guess else self.ai.answer(question)
             except AIError as exc:
                 if not exc.retryable:
                     raise
@@ -479,8 +480,15 @@ class AnswerRunner:
                             on_retry=lambda retry: self.progress.questions(
                                 stage + " · 重试 %s/2" % retry, completed, question_total))
                     self.progress.questions(stage + " · 校验答案", completed, question_total)
+                    try:
+                        entry = answer_record(q, answer.get("answer"))
+                    except (ValueError, TypeError) as exc:
+                        # 一道题空着整份卷就不交、一分没有：没把握（null）或格式不对，都再问一次，
+                        # 要它给出最可能的答案；报告里标「推测」。
+                        self.output("第 %s 题 AI 没给出可用答案（%s），改为让它给出最可能的答案" % (position + 1, exc))
+                        answer = dict(self.answer_question(model_question(q), clock, guess=True), guessed=True)
+                        entry = answer_record(q, answer.get("answer"))
                     item_report.update(answer)
-                    entry = answer_record(q, answer["answer"])
                     entries[position] = entry
                     item_report["record"] = entry
                     item_report["source"] = "ai"

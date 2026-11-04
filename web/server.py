@@ -171,11 +171,23 @@ class Studia:
                 del job["lines"][60:]
         if job is not None and event.get("type") == "progress":
             _track(job.setdefault("progress", {}), event)
+            if event.get("kind") == "unit" and event.get("status") != "running":
+                self._mark_unit(job, event.get("key"), event.get("status"))
         for subscriber in list(self.subscribers):
             try:
                 subscriber.put_nowait(event)
             except queue.Full:
                 pass
+
+    def _mark_unit(self, job, unit_id, unit_state):
+        """Carry a finished unit into the cached grid. The cache holds the platform's answer from when the job
+        began, so a page reloaded mid-run showed every unit learned since then as not started again."""
+        platform = self.platforms.get(job["platform"])
+        hit = platform and platform.cache.get(("units", job["course"]))
+        for chapter in (hit[1] if hit else []):
+            for unit in chapter.get("units", []):
+                if unit.get("id") == unit_id:
+                    unit["state"] = unit_state
 
     def progress_of(self, job):
         """The on_progress callback for one job's business code."""
@@ -473,7 +485,8 @@ class Studia:
                 "id": task_id,
                 "name": (item.get("name") if pid == "zhs" else paper_display_name(item)) or "未命名试卷",
                 "category": "作业" if pid == "zhs" and category == 1 else "考试" if pid == "zhs" else task_type_label(item, category),
-                "status": availability.label or STATUS_LABEL.get(item.get("_completion_status"), "未作答"),
+                # A handed-in paper reads 已提交 even once closed or out of attempts; the reason says which.
+                "status": "已提交" if done else availability.label or STATUS_LABEL.get(item.get("_completion_status"), "未作答"),
                 "score": score,
                 "available": availability.available,
                 "done": done and not item.get("_redo"),
@@ -1069,7 +1082,8 @@ def _mooc_catalog(client, row):
         open_ids = list(dict.fromkeys(paper_exam_id(item) for _, item, category in listed
                                       if task_availability(item, category).available))
         statuses = dict(zip(open_ids, pool.map(status, open_ids)))
-    return [(course, dict(item, _completion_status=completion_with_score(item, statuses.get(paper_exam_id(item), "unsupported"))), category)
+    # Papers not checked (closed, attempts used up) still count as handed in when they carry a score.
+    return [(course, dict(item, _completion_status=completion_with_score(item, statuses.get(paper_exam_id(item), "unknown"))), category)
             for course, item, category in listed]
 
 
@@ -1180,6 +1194,9 @@ def _track(progress, event):
         progress["detail"] = name
     elif kind == "unit" and event.get("status") == "running":
         progress["unit"] = {"name": name, "key": event.get("key")}
+    elif kind == "unit" and (progress.get("unit") or {}).get("key") == event.get("key"):
+        # That unit is over; what follows (MOOC's discussion and rating) is told by "detail", not by the last unit.
+        progress.pop("unit")
 
 
 def _job_public(job):
