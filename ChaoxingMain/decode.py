@@ -152,12 +152,14 @@ def _job_count(node):
     return int(value) if value.isdigit() else 1
 
 
-def decode_jobs(html_text):
+def decode_jobs(html_text, include_finished=False):
     """章节任务点：视频、文档、阅读、作业，以及这一章的公共参数（ktoken/cpi/knowledgeid 等）。
 
-    对应源码 ``decode_course_card``：已完成的非作业卡片直接跳过，作业卡片的 isPassed
-    不可靠所以保留；``otherInfo`` 只取第一段。videod 转码失败的卡片（没有 mid）跳过。
-    ``notOpen`` 表示这一章还没开放。
+    对应源码 ``decode_course_card``：默认跳过已完成的非作业卡片（学习流程用），
+    ``include_finished=True`` 时保留它们（网页课程页展示 1/1 用）；作业卡片的
+    isPassed 不可靠所以始终保留。``otherInfo`` 只取第一段；没有 mid 但有 objectId
+    的 mp4 仍可处理；pdf/ppt 等文档类型统一归到 document。``notOpen`` 表示这一章
+    还没开放。
     """
     if "章节未开放" in (html_text or ""):
         return [], {"notOpen": True}
@@ -174,7 +176,7 @@ def decode_jobs(html_text):
     jobs = []
     cards = data.get("attachments")
     for card in cards if isinstance(cards, list) else []:
-        job = _card_job(card)
+        job = _card_job(card, include_finished=include_finished)
         if job is not None:
             jobs.append(job)
     return jobs, _job_info(data)
@@ -203,7 +205,7 @@ def _first(*values):
     return ""
 
 
-def _card_job(card):
+def _card_job(card, include_finished=False):
     if not isinstance(card, dict):
         return None
     prop = card.get("property") if isinstance(card.get("property"), dict) else {}
@@ -219,8 +221,9 @@ def _card_job(card):
     if not job_id:
         logger.warning("跳过没有 jobid 的任务点：[%s] %s", kind or "?", name or "?")
         return None
-    # 作业卡片的 isPassed 不可靠（源码特意不跳过），其他任务已完成就不再处理。
-    if passed and kind not in WORK_TYPES:
+    # 作业卡片的 isPassed 不可靠（源码特意不跳过）；其他任务默认跳过已完成的，
+    # 但网页课程页需要把已完成的任务点画出来（1/1），所以带了 include_finished。
+    if passed and kind not in WORK_TYPES and not include_finished:
         logger.info("跳过已完成的任务点：[%s] %s", kind or "?", name or job_id)
         return None
     # otherInfo 有时带一串附加参数，超星只用第一段。
@@ -252,11 +255,12 @@ def _card_job(card):
                     jtoken=card.get("jtoken", ""),
                     objectid=_first(prop.get("objectid"), card.get("objectId"), card.get("objectid")))
     if kind in READ_TYPES:
-        if _flag(prop.get("read")):  # 已经读过的阅读任务
+        read = _flag(prop.get("read"))
+        if read and not include_finished:  # 已经读过的阅读任务
             logger.info("跳过已完成的阅读任务：%s", name or job_id)
             return None
         return dict(common, type="read", name=name, jtoken=card.get("jtoken", ""),
-                    page_id=prop.get("id", ""))
+                    page_id=prop.get("id", ""), is_passed=read or passed)
     if kind in WORK_TYPES:
         return dict(common, type="workid", name=prop.get("title") or "",
                     is_passed=False)  # 作业的完成标志不展示、也不跳过

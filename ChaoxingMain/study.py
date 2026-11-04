@@ -48,6 +48,8 @@ class ChaoxingStudyHandler:
         self.sleep = sleep if sleep is not None else time.sleep
         self.notopen_action = notopen_action if notopen_action in NOT_OPEN_ACTIONS else "retry"
         self.progress = Reporter(on_progress)
+        # 当前课程已完成的 jobid；章节里先过滤掉，避免重复上报文档/视频。
+        self.finished_jobs = set()
         # 与其他平台 handler 的约定一致：没有需要 UI 处理的中断时保持 None。
         self.blocked = None
         self.start_courses()
@@ -78,11 +80,21 @@ class ChaoxingStudyHandler:
         except ChaoxingError as error:
             logger.error("%s：读取章节失败：%s", title, error)
             return "error"
+        nodes, self.finished_jobs = self._preflight(course)
         total = len(points)
-        self.progress.resources("%s · 章节" % title, 0, total)
-        pending = [ChapterTask(point) for point in points]
         running = {}
         counts = {"completed": 0, "skipped": 0, "failed": 0}
+        pending = []
+        for point in points:
+            counts_node = nodes.get(str(point.get("id"))) or {}
+            if counts_node.get("unfinish", 0) == 0 and counts_node.get("finish", 0) > 0:
+                logger.info("%s / %s：平台显示已学完 %d 个任务点，跳过", title,
+                            point.get("title", ""), counts_node["finish"])
+                self.progress.unit(str(point.get("id")), point.get("title") or "", "done")
+                counts["skipped"] += 1
+            else:
+                pending.append(ChapterTask(point))
+        self.progress.resources("%s · 章节" % title, counts["skipped"], total)
         fatal = None
         pool = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix=child_thread_name("chapter"))
         try:
@@ -135,6 +147,30 @@ class ChaoxingStudyHandler:
             return "error"
         return "success" if counts["completed"] else "skipped"
 
+    def _preflight(self, course):
+        """开跑前用两份平台状态省掉无用章节：节点完成计数 + 已完成 jobid。
+
+        取不到就退回卡片里的 isPassed，不影响原来的行为。
+        """
+        nodes, finished = {}, set()
+        method = getattr(self.client, "course_nodes", None)
+        if callable(method):
+            try:
+                nodes = method(course) or {}
+            except (AuthenticationExpired, PlatformUnavailable):
+                raise
+            except ChaoxingError as error:
+                logger.info("读取章节完成状态失败，按卡片状态处理：%s", error)
+        method = getattr(self.client, "finished_job_ids", None)
+        if callable(method):
+            try:
+                finished = set(method(course) or ())
+            except (AuthenticationExpired, PlatformUnavailable):
+                raise
+            except ChaoxingError as error:
+                logger.info("读取已完成任务点失败，按卡片状态处理：%s", error)
+        return nodes, finished
+
     # ------------------------------------------------------------------ 章节
 
     def process_chapter(self, course, point):
@@ -145,6 +181,12 @@ class ChaoxingStudyHandler:
         jobs, job_info = self.client.job_list(course, point)
         if job_info.get("notOpen"):
             return "not_open"
+        if jobs and self.finished_jobs:
+            jobs = [job for job in jobs if job["jobid"] not in self.finished_jobs]
+            if not jobs:
+                logger.info("%s / %s：任务点都已完成，跳过", self._name(course),
+                            point.get("title", ""))
+                return "skipped"
         if not jobs:
             # 源码在 get_job_list 里顺手完成空章节；这里放在学习流程里，保证任务列表是只读的。
             self.client.empty_page(course, point)

@@ -416,6 +416,56 @@ class LearningApiTest(unittest.TestCase):
                                             {"knowledgeid": "123"}), "error")
 
 
+class StatusApiTest(unittest.TestCase):
+    def client(self, handler):
+        return ChaoxingApi(cookies={"UID": "99", "fid": "7"}, session=FakeSession(handler), sleep=lambda _: None)
+
+    def test_course_nodes_reads_gear_counts(self):
+        seen = []
+
+        def handler(method, url, kwargs):
+            seen.append((url, kwargs["params"]))
+            return FakeResponse(json_body={"data": {"course": {"knowledge": [
+                {"id": "123", "name": "1.1 函数", "finishcount": 2, "unfinishcount": 1, "clickcount": 3},
+                {"id": "456", "name": "1.2 极限", "jobFinishedCount": 1, "jobUnfinishedCount": 0},
+            ]}}})
+
+        nodes = self.client(handler).course_nodes(COURSE)
+        self.assertIn("/gas/clazz", seen[0][0])
+        self.assertEqual(seen[0][1]["id"], "222")
+        self.assertEqual(seen[0][1]["personid"], "333")
+        self.assertEqual(nodes["123"], {"name": "1.1 函数", "finish": 2, "unfinish": 1, "click": 3})
+        self.assertEqual((nodes["456"]["finish"], nodes["456"]["unfinish"]), (1, 0))
+
+    def test_finished_job_ids_pages_until_short(self):
+        seen = []
+
+        def handler(method, url, kwargs):
+            seen.append((url, kwargs["params"]))
+            if "/jobfinishedList" not in url:
+                return FakeResponse(json_body={})
+            page = int(kwargs["params"]["page"])
+            rows = [{"jobid": "j%d" % (index + 1)} for index in range(20)] if page == 1 else [{"jobId": "j21"}]
+            return FakeResponse(json_body={"data": {"list": rows}})
+
+        api = self.client(handler)
+        self.assertEqual(api.finished_job_ids(COURSE), {"j%d" % index for index in range(1, 22)})
+        self.assertEqual([params["page"] for _, params in seen], [1, 2])
+
+    def test_job_status_ids_returns_both_sets(self):
+        def handler(method, url, kwargs):
+            if "/jobfinishedList" in url:
+                return FakeResponse(json_body={"data": [{"jobid": "done-1"}]})
+            return FakeResponse(json_body={"data": {"list": [{"jobid": "todo-1"}]}})
+
+        api = self.client(handler)
+        self.assertEqual(api.job_status_ids(COURSE), ({"done-1"}, {"todo-1"}))
+
+    def test_course_nodes_falls_back_to_empty_on_failure(self):
+        api = self.client(lambda *a: FakeResponse("not json", status_code=500))
+        self.assertEqual(api.course_nodes(COURSE), {})
+
+
 class WorkTest(unittest.TestCase):
     def test_work_page_params(self):
         session = FakeSession(lambda *args: FakeResponse("<html>题目</html>"))

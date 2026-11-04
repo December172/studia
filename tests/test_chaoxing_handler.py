@@ -23,13 +23,16 @@ class FakeAI:
 
 class FakeClient:
     def __init__(self, courses=(COURSE,), points=(POINT,), jobs=(JOB,), page=PAGE, error=None,
-                 confirmation=None):
+                 confirmation=None, nodes=None, finished=(), unfinished=()):
         self.courses = list(courses)
         self.points = list(points)
         self.jobs = list(jobs)
         self.page = page
         self.error = error
         self.confirmation = confirmation
+        self.nodes = dict(nodes or {})
+        self.finished = set(finished)
+        self.unfinished = set(unfinished)
         self.payloads = []
         self.closed = False
 
@@ -41,10 +44,16 @@ class FakeClient:
     def course_points(self, course):
         return {"hasLocked": False, "points": self.points}
 
-    def job_list(self, course, point):
+    def job_list(self, course, point, include_finished=False):
         if isinstance(self.error, Exception):
             raise self.error
         return self.jobs, {"knowledgeid": "123", "ktoken": "kt", "cpi": "333"}
+
+    def course_nodes(self, course):
+        return dict(self.nodes)
+
+    def job_status_ids(self, course):
+        return set(self.finished), set(self.unfinished)
 
     def work_page(self, course, job, job_info):
         return self.page
@@ -75,6 +84,25 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(course_units(FakeClient(), COURSE), [
             {"name": "1.1 函数", "units": [
                 {"id": "work-abc", "name": "1.1 章节测验", "kind": "work", "state": "queued"}]}])
+
+    def test_units_keep_learned_cards_and_use_platform_counts(self):
+        jobs = [
+            {"type": "video", "jobid": "v1", "name": "视频", "is_passed": True},
+            {"type": "document", "jobid": "d1", "name": "PPT", "is_passed": False},
+            {"type": "workid", "jobid": "w1", "name": "作业", "is_passed": False},
+        ]
+        client = FakeClient(jobs=jobs, nodes={"123": {"finish": 2, "unfinish": 0}})
+        units = course_units(client, COURSE)[0]["units"]
+        self.assertEqual([unit["state"] for unit in units], ["done", "done", "done"])
+
+    def test_units_use_finished_job_ids_for_documents(self):
+        jobs = [
+            {"type": "document", "jobid": "d1", "name": "PDF", "is_passed": False},
+            {"type": "document", "jobid": "d2", "name": "PPT", "is_passed": False},
+        ]
+        client = FakeClient(jobs=jobs, finished={"d1"}, unfinished={"d2"})
+        units = course_units(client, COURSE)[0]["units"]
+        self.assertEqual([unit["state"] for unit in units], ["done", "queued"])
 
 
 class HandlerTest(unittest.TestCase):

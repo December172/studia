@@ -164,6 +164,16 @@ class AllJobTest(unittest.TestCase):
                          ("10", "e", "f"))
         self.assertEqual(video["otherinfo"], "nodeId_123-a")
 
+    def test_include_finished_keeps_completed_cards_for_the_course_page(self):
+        jobs, _ = decode_jobs(ALL_CARDS, include_finished=True)
+        by_id = {job["jobid"]: job for job in jobs}
+        self.assertIn("v2", by_id)          # 已看完的视频也要显示
+        self.assertTrue(by_id["v2"]["is_passed"])
+        self.assertIn("r2", by_id)          # 已读的阅读任务
+        self.assertTrue(by_id["r2"]["is_passed"])
+        self.assertNotIn("v3", by_id)       # 没有 objectId 仍然无法展示/上报
+        self.assertNotIn("l1", by_id)       # 直播暂不支持
+
     def test_finished_and_broken_cards_are_skipped(self):
         ids = {job["jobid"] for job in self.jobs}
         self.assertNotIn("v2", ids)   # 已看完的视频

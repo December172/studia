@@ -23,7 +23,7 @@ def work(job_id):
 
 class FakeClient:
     def __init__(self, chapters, jobs=None, *, job_delay=0.0, task_delay=0.0,
-                 job_error=None, not_open=False, video_results=None):
+                 job_error=None, not_open=False, video_results=None, nodes=None, finished=()):
         self.chapters = chapters
         self.jobs = jobs or {}
         self.job_delay = job_delay
@@ -31,6 +31,8 @@ class FakeClient:
         self.job_error = job_error
         self.not_open = not_open
         self.video_results = dict(video_results or {})
+        self.nodes = dict(nodes or {})
+        self.finished = set(finished)
         self.lock = threading.Lock()
         self.course_points_calls = 0
         self.job_calls = []
@@ -46,6 +48,12 @@ class FakeClient:
     def course_points(self, course):
         self.course_points_calls += 1
         return {"hasLocked": False, "points": list(self.chapters)}
+
+    def course_nodes(self, course):
+        return dict(self.nodes)
+
+    def finished_job_ids(self, course):
+        return set(self.finished)
 
     def job_list(self, course, point_info):
         with self.lock:
@@ -149,6 +157,16 @@ class TaskTest(unittest.TestCase):
         fake, _, events = run([point("1", finished=True)])
         self.assertEqual(fake.job_calls, [])
         self.assertEqual([event.status for event in events if event.kind == "result"], ["skipped"])
+
+    def test_chapter_with_zero_unfinished_jobs_is_skipped_without_reading_cards(self):
+        fake, _, events = run([point("1")], nodes={"1": {"finish": 2, "unfinish": 0}})
+        self.assertEqual(fake.job_calls, [])
+        self.assertEqual([event.status for event in events if event.kind == "result"], ["skipped"])
+        self.assertIn(("1", "done"), [(event.key, event.status) for event in events if event.kind == "unit"])
+
+    def test_finished_jobs_are_filtered_from_a_chapter(self):
+        fake, _, _ = run([point("1")], {"1": [video("v1"), video("v2")]}, finished={"v1"})
+        self.assertEqual([call[0] for call in fake.video_calls], ["v2"])
 
     def test_empty_chapter_is_completed(self):
         fake, _, events = run([point("1")], {"1": []})
