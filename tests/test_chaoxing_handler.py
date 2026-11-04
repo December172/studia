@@ -80,10 +80,9 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(item["_completion_status"], "unknown")
         self.assertEqual(category, 1)
 
-    def test_units_list_chapter_works(self):
-        self.assertEqual(course_units(FakeClient(), COURSE), [
-            {"name": "1.1 函数", "units": [
-                {"id": "work-abc", "name": "1.1 章节测验", "kind": "work", "state": "queued"}]}])
+    def test_units_leave_out_chapter_works(self):
+        # 作业在「AI 答题」里做；只有作业的章节不进学习格子。
+        self.assertEqual(course_units(FakeClient(), COURSE), [])
 
     def test_completed_chapter_confirms_documents_when_mobile_status_is_unavailable(self):
         # 真实复测：文档上报成功后，章节已完成，但卡片仍是 isPassed=false。
@@ -107,7 +106,7 @@ class CatalogTest(unittest.TestCase):
         ]
         client = FakeClient(jobs=jobs, nodes={"123": {"finish": 2, "unfinish": 0}})
         units = course_units(client, COURSE)[0]["units"]
-        self.assertEqual([unit["state"] for unit in units], ["done", "done", "done"])
+        self.assertEqual([(unit["id"], unit["state"]) for unit in units], [("v1", "done"), ("d1", "done")])
 
     def test_units_use_finished_job_ids_for_documents(self):
         jobs = [
