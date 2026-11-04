@@ -188,3 +188,9 @@ settings.json
 # 本机 Claude/DeepSeek 分工配置
 CLAUDE.local.md
 .claude/ds
+
+# 服务器数据卷的备份包（含账号数据，不进仓库）
+studia-data-*.tgz
+
+# 本地构建/端口覆盖，不提交（compose 会自动加载）
+docker-compose.override.yml
