@@ -552,10 +552,12 @@ class Studia:
                 job["state"] = "paused"
             self._take_turn(job)
             self._save()
-        self.publish(dict(_job_public(job), type="job"))
+        public = _job_public(job)
+        self.publish(dict(public, type="job"))
         threading.Thread(target=self._run_job, args=(job, target, platform), daemon=True,
                          name="studia-job-%s" % job["id"]).start()
-        return {"ok": True, "id": job["id"]}
+        # The page shows the job from this reply too, not only from the event stream, which a proxy may hold back.
+        return {"ok": True, "id": job["id"], "job": public}
 
     def _check_conflicts(self, pid, course_id, kind):
         if len(self.jobs) >= MAX_PENDING:
@@ -1540,7 +1542,9 @@ def make_handler(access):
             try:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-                self.send_header("Cache-Control", "no-store")
+                self.send_header("Cache-Control", "no-store, no-transform")
+                # Nginx buffers proxied responses by default: events then reached the page in batches, or not at all.
+                self.send_header("X-Accel-Buffering", "no")
                 self.send_header("Connection", "close")  # no length: the stream ends when the socket does
                 self.end_headers()
                 while True:
