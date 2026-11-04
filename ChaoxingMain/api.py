@@ -30,6 +30,9 @@ from MoocMain.log import Logger
 logger = Logger(__name__).get_log()
 
 BASE_URL = "https://mooc1.chaoxing.com"
+# 移动端 API（gas/clazz、knowledge/getknowledgecurvideo、api/phone/job*）在另一个域名，
+# 而且 WAF 认移动端 UA；用网页端 UA 会直接 403（2026-11 实测）。
+MOBILE_BASE = "https://mooc1-api.chaoxing.com"
 MOOC2_URL = "https://mooc2-ans.chaoxing.com/mooc2-ans"
 PASSPORT_URL = "https://passport2.chaoxing.com"
 MOOC_HOME_URL = "https://i.mooc.chaoxing.com/space/index"
@@ -45,6 +48,12 @@ HEADERS = {
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": '"Windows"',
 }
+MOBILE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 9 Pro) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+}
 COURSE_LIST_HEADERS = {
     "Referer": "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction?moocDomain=https://mooc1-1.chaoxing.com/mooc-ans",
 }
@@ -58,11 +67,11 @@ VIDEO_HEADERS = {"Referer": "https://mooc1.chaoxing.com/ananas/modules/video/ind
 AUDIO_HEADERS = {"Referer": "https://mooc1.chaoxing.com/ananas/modules/audio/index_new.html?v=2025-0725-1842"}
 VIDEO_STATUS_URL = BASE_URL + "/ananas/status/%s"
 VIDEO_LOG_URL = BASE_URL + "/mooc-ans/multimedia/log/a/%s/%s"
-VIDEO_CUR_URL = BASE_URL + "/knowledge/getknowledgecurvideo"
-VIDEO_NEXT_URL = BASE_URL + "/knowledge/getnextknowledgevideo"
-GAS_CLAZZ_URL = BASE_URL + "/gas/clazz"
-PHONE_FINISHED_URL = BASE_URL + "/api/phone/jobfinishedList"
-PHONE_UNFINISHED_URL = BASE_URL + "/api/phone/jobunfinishedList"
+VIDEO_CUR_URL = MOBILE_BASE + "/knowledge/getknowledgecurvideo"
+VIDEO_NEXT_URL = MOBILE_BASE + "/knowledge/getnextknowledgevideo"
+GAS_CLAZZ_URL = MOBILE_BASE + "/gas/clazz"
+PHONE_FINISHED_URL = MOBILE_BASE + "/api/phone/jobfinishedList"
+PHONE_UNFINISHED_URL = MOBILE_BASE + "/api/phone/jobunfinishedList"
 # gas/clazz 的 fields：移动端章节树一次返回每个节点按用户的完成计数。
 CHAPTER_FIELDS = (
     "id,name,state,isstart,isfiled,chatid,bbsid,studentcount,invitecode,"
@@ -410,11 +419,7 @@ class ChaoxingApi:
         params = {"id": course["clazzId"], "fields": CHAPTER_FIELDS, "view": "json"}
         if course.get("cpi"):
             params["personid"] = course["cpi"]
-        try:
-            payload = self._json(self._request("get", GAS_CLAZZ_URL, params=params))
-        except (ChaoxingError, PlatformUnavailable) as error:
-            logger.info("读取章节完成状态失败：%s", error)
-            return {}
+        payload = self._mobile_json("get", GAS_CLAZZ_URL, params=params)
         if not isinstance(payload, dict):
             return {}
         record = _gear_record(payload.get("data") or payload.get("msg")) or _gear_record(payload)
@@ -442,9 +447,8 @@ class ChaoxingApi:
         for page in range(1, 21):
             params = {"courseid": course["courseId"], "clazzid": course["clazzId"],
                       "knowledgeid": "", "jobid": "", "page": page, "pageSize": 20, "view": "json"}
-            try:
-                payload = self._json(self._request("get", url, params=params))
-            except (ChaoxingError, PlatformUnavailable):
+            payload = self._mobile_json("get", url, params=params)
+            if payload is None:
                 break
             found = _collect_job_ids(payload)
             new = found - ids
@@ -486,6 +490,23 @@ class ChaoxingApi:
         except ValueError:
             return None
 
+    def _mobile_json(self, method, url, *, params=None, data=None):
+        """移动端 API 请求：只带移动端 UA；401/403 等失败返回 None。
+
+        这些接口（gas/clazz、手机端作业列表、视频播放信息）都是优化/补全用的，
+        被 WAF 拒绝时不能当成“登录过期”把整个任务停掉，退回卡片状态即可。
+        """
+        try:
+            response = getattr(self.session, method)(url, params=params, data=data,
+                                                     headers=dict(MOBILE_HEADERS), timeout=(10, 30))
+        except requests.RequestException as error:
+            logger.info("移动端接口不可用：%s", error)
+            return None
+        if response.status_code != 200:
+            logger.info("移动端接口 %s 返回 HTTP %s", url.rsplit("/", 1)[-1], response.status_code)
+            return None
+        return self._json(response)
+
     def _video_throttle(self):
         """上报进度很容易触发 403：和源码一样每次先随机停 0–2 秒，再保证 2 秒间隔。"""
         self.sleep(random.uniform(0, 2))
@@ -526,22 +547,14 @@ class ChaoxingApi:
         knowledge = str((job_info or {}).get("knowledgeid") or job.get("knowledgeid") or "")
         blob = None
         if job.get("mid"):
-            try:
-                response = self._request("post", VIDEO_CUR_URL, data={
-                    "courseid": course["courseId"], "clazzid": course["clazzId"],
-                    "knowledgeid": knowledge, "cpi": course["cpi"], "mid": job["mid"]})
-                blob = self._video_object(self._json(response))
-            except (ChaoxingError, PlatformUnavailable):
-                blob = None
+            blob = self._video_object(self._mobile_json("post", VIDEO_CUR_URL, data={
+                "courseid": course["courseId"], "clazzid": course["clazzId"],
+                "knowledgeid": knowledge, "cpi": course["cpi"], "mid": job["mid"]}))
         if blob is None and job.get("aid"):
-            try:
-                response = self._request("get", VIDEO_NEXT_URL, params={
-                    "clazzId": course["clazzId"], "courseId": course["courseId"],
-                    "knowledgeId": knowledge, "cardId": str((job_info or {}).get("cardid") or ""),
-                    "cpi": course["cpi"], "attachmentId": str(job["aid"]), "isPhone": 1})
-                blob = self._video_object(self._json(response))
-            except (ChaoxingError, PlatformUnavailable):
-                blob = None
+            blob = self._video_object(self._mobile_json("get", VIDEO_NEXT_URL, params={
+                "clazzId": course["clazzId"], "courseId": course["courseId"],
+                "knowledgeId": knowledge, "cardId": str((job_info or {}).get("cardid") or ""),
+                "cpi": course["cpi"], "attachmentId": str(job["aid"]), "isPhone": 1}))
         if blob:
             info = self._normalize_video(blob, course, job)
             if info["duration"] > 0 and info["reportUrl"]:
