@@ -199,13 +199,16 @@ class CourseUnitsTests(unittest.TestCase):
         from AIMoocMain.main import course_units
         client = SimpleNamespace(
             study_record_list=lambda info, course: ['v1'],
-            study_design_list=lambda info, course: [{'id': 'c1', 'name': '第一章'}],
+            study_design_list=lambda info, course: [{'id': 'c1', 'name': '第一章'}, {'id': 'c2', 'name': '期末考试'}],
             get_cell_list=lambda info, course, parent: [
                 {'id': 'v1', 'name': '视频', 'fileType': 'video'},
                 {'id': 'f', 'name': '小节', 'children': [
                     {'id': 'w', 'name': '作业一', 'fileType': '作业'},
-                    {'id': 'p', 'name': '课件', 'fileType': 'ppt'}]}])
+                    {'id': 'd', 'name': '目录', 'fileType': '文件夹'},
+                    {'id': 'p', 'name': '课件', 'fileType': 'ppt'}]}] if parent == 'c1' else [
+                {'id': 'e', 'name': '期末考试', 'fileType': '考试'}])
         chapters = course_units(client, {'id': 'i', 'courseId': 'c'})
+        # Quizzes and exams are answered, not studied: no cells for them, and a chapter of only those is gone.
         self.assertEqual([c['name'] for c in chapters], ['第一章'])
         self.assertEqual([(u['id'], u['state']) for u in chapters[0]['units']],
-                         [('v1', 'done'), ('w', 'skipped'), ('p', 'queued')])
+                         [('v1', 'done'), ('d', 'skipped'), ('p', 'queued')])
