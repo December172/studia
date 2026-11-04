@@ -322,26 +322,24 @@ class LearningApiTest(unittest.TestCase):
         self.assertEqual(info["playTime"], 30)
         self.assertEqual(info["reportUrl"], VIDEO_BLOB["reportUrl"])
 
-    def test_fastforward_video_completes_with_one_complete_report(self):
+    def test_fastforward_video_drags_to_the_end_and_completes(self):
         reports = []
-        api = self.blob_client(VIDEO_BLOB, reports)
+        api = self.blob_client(VIDEO_BLOB, reports, passed=lambda count, params: params["isdrag"] == "4")
         self.assertEqual(api.study_video(COURSE, VIDEO_JOB, job_info=JOB_INFO), "success")
-        self.assertEqual(len(reports), 1)
-        report = reports[0]
-        self.assertEqual(report["isdrag"], "4")          # complete
-        self.assertEqual(report["playingTime"], "590")
-        self.assertEqual(report["clipTime"], "10_590")
-        self.assertEqual(report["rt"], "0.9")
-        self.assertEqual(report["view"], "pc")
-        self.assertEqual(report["enc"], video_enc(222, "work-v", "obj", 590, 600, "99", "10_590"))
+        self.assertEqual([report["isdrag"] for report in reports], ["3", "1", "4"])
+        drag, complete = reports[1], reports[2]
+        self.assertEqual(drag["playingTime"], "30-590")       # drag 是 from-to
+        self.assertEqual(complete["playingTime"], "590")
+        self.assertEqual(complete["clipTime"], "10_590")
+        self.assertEqual(complete["rt"], "0.9")
+        self.assertEqual(complete["view"], "pc")
+        self.assertEqual(complete["enc"], video_enc(222, "work-v", "obj", 590, 600, "99", "10_590"))
 
-    def test_rejected_completion_falls_back_to_drag_then_complete(self):
+    def test_drag_that_completes_stops_before_the_complete_report(self):
         reports = []
-        api = self.blob_client(VIDEO_BLOB, reports, passed=lambda count, params: count >= 3)
+        api = self.blob_client(VIDEO_BLOB, reports, passed=lambda count, params: params["isdrag"] == "1")
         self.assertEqual(api.study_video(COURSE, VIDEO_JOB, job_info=JOB_INFO), "success")
-        self.assertEqual([report["isdrag"] for report in reports], ["4", "1", "4"])
-        self.assertEqual(reports[1]["playingTime"], "30-590")  # drag 是 from-to
-        self.assertEqual(reports[2]["playingTime"], "590")
+        self.assertEqual([report["isdrag"] for report in reports], ["3", "1"])
 
     def test_video_without_fastforward_reports_start_playing_complete(self):
         blob = dict(VIDEO_BLOB, fastforward=False, playTime=600, vend=0, vbegin=0)

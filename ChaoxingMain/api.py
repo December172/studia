@@ -570,22 +570,22 @@ class ChaoxingApi:
         start = min(end, max(info["playTime"], info["vbegin"] if info["vbegin"] > 0 else 0))
         play_time = float(start)
         passed, state = False, 200
+        # 播放器打开视频时的第一条心跳是 start（isdrag=3）。
+        self.video_report(info, play_time, 3, kind=kind)
         if info["fastforward"]:
-            # 允许拖动：先直接“看到结尾”，不行再模拟一次拖动后收尾。
-            passed, state = self.video_report(info, end, 4, kind=kind)
-            if not passed:
+            # 允许拖动：像把进度条拖到结尾一样，drag(from-to) 之后补 complete。
+            if play_time < end:
                 passed, state = self.video_report(info, end, 1, drag_from=int(play_time), kind=kind)
-                if not passed:
-                    passed, state = self.video_report(info, end, 4, kind=kind)
+            if not passed:
+                passed, state = self.video_report(info, end, 4, kind=kind)
             if passed:
-                logger.info("%s：直接跳到结尾完成", name)
+                logger.info("%s：直接拖到结尾完成", name)
                 return "success"
-            logger.info("%s：平台没有接受直接跳到结尾，按真实时间播放", name)
+            logger.info("%s：平台没有接受拖动到结尾，按真实时间播放", name)
         else:
             logger.info("%s：视频不允许拖动（fastforward=false），按真实时间播放", name)
         if cancel_event is not None and cancel_event.is_set():
             return "cancelled"
-        self.video_report(info, play_time, 3, kind=kind)  # start
         last_log = play_time
         last_iter = time.time()
         interval = max(1, info["interval"])
