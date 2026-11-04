@@ -16,7 +16,7 @@ const store = {
 
 /* ---------------------------------------------------------------- icons */
 
-const COLOR = { mooc: "var(--mooc)", zyk: "var(--zyk)", zhs: "var(--zhs)" };
+const COLOR = { mooc: "var(--mooc)", cx: "var(--cx)", zyk: "var(--zyk)", zhs: "var(--zhs)" };
 function ring(percent, color = "var(--indigo)", size = 16) {
   const p = Math.max(0, Math.min(100, Number(percent) || 0));
   const r = size / 2 - 1.5, c = 2 * Math.PI * r, mid = size / 2;
@@ -85,7 +85,7 @@ async function api(path, { method = "GET", body } = {}) {
 
 const state = {
   platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {}, earned: {}, qaDraft: {}, qaPosts: {}, qaOpen: new Set(),
-  jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, lastDone: null,
+  jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, loginMode: {}, lastDone: null,
   current: store.get("studia-platform", ""), meOpen: false, adminTab: "people", logFilter: "all", editPassword: false, adminEdit: null, pausedOpen: new Set(),
 };
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
@@ -179,7 +179,9 @@ function toggleTheme() {
 
 /* ---------------------------------------------------------------- sidebar */
 
-const INITIAL = { mooc: "M", zyk: "资", zhs: "智" };
+const INITIAL = { mooc: "M", cx: "超", zyk: "资", zhs: "智" };
+// 登录页要说清楚扫哪个 App；平台简称不一定就是 App 名。
+const APP_NAME = { mooc: "职教云", cx: "学习通", zyk: "资源库", zhs: "智慧树" };
 function currentPlatform() {
   return platformOf(state.current) || state.platforms.find((p) => p.logged_in) || state.platforms[state.platforms.length - 1];
 }
@@ -730,19 +732,39 @@ const VIEWS = {
     if (!p) return setPage(`<div class="empty">不支持这个平台</div>`);
     if (p.logged_in) return go(homeOf(p));
     const head = `<div class="crumb"><span class="dot ${pid}"></span>${esc(p.name)}</div><h1 class="title">登录${/^[A-Za-z]/.test(p.short) ? " " : ""}${esc(p.short)}</h1>`;
-    if (p.login === "qr") {
-      setPage(`${head}<p class="sub">用智慧树 App 扫码</p>
+    const app = APP_NAME[p.id] || p.name;
+    // 扫码平台可以再提供账号密码作为备用入口（超星：二次验证或扫码不方便时用）。
+    const password = p.login === "password" || (p.password && state.loginMode[p.id] === "password");
+    const toggle = (p.login === "qr" && p.password)
+      ? `<p class="sub"><button class="link" ${password ? "data-login-qr" : "data-login-password"}>${
+          password ? `用${esc(app)} App 扫码登录` : "改用账号密码登录"}</button></p>`
+      : "";
+    if (p.login === "qr" && !password) {
+      setPage(`${head}<p class="sub">用${esc(app)} App 扫码</p>
         <div class="login_card"><div class="qr"><div class="qr_empty">正在获取二维码…</div></div>
           <div class="login_status"><div data-status><b>等待扫码</b><p>二维码过期会自动刷新</p></div>
-            <button class="btn" data-start-login>刷新二维码</button></div></div>`);
+            <button class="btn" data-start-login>刷新二维码</button></div></div>${toggle}`);
       $("[data-start-login]", page).onclick = () => qrLogin(pid);
       qrLogin(pid);
+    } else if (p.login === "password" || password) {
+      setPage(`${head}<p class="sub">用${esc(p.name)}账号登录</p>
+        <div class="login_card"><form class="auth_form" data-password-login>
+          <label class="auth_field"><span>手机号 / 账号</span><input name="username" autocomplete="username" required autofocus></label>
+          <label class="auth_field"><span>密码</span><input name="password" type="password" autocomplete="current-password" required></label>
+          <div class="login_status"><div data-status><b>账号密码只用于登录</b><p>登录成功后只保存平台下发的 Cookie，不保存密码</p></div></div>
+          <button class="btn primary" data-start-login>登录</button></form></div>${toggle}`);
+      const form = $("[data-password-login]", page);
+      form.onsubmit = (event) => { event.preventDefault(); passwordLogin(pid, form); };
     } else {
       setPage(`${head}<p class="sub">用职教云账号登录</p>
         <div class="login_card"><div class="login_status"><div data-status><b>在浏览器中登录</b><p>登录完成后自动继续</p></div>
           <button class="btn primary" data-start-login>打开登录页</button></div></div>`);
       $("[data-start-login]", page).onclick = () => browserLogin(pid);
     }
+    const toPassword = $("[data-login-password]", page);
+    if (toPassword) toPassword.onclick = () => { state.loginMode[p.id] = "password"; VIEWS.login(pid); };
+    const toQr = $("[data-login-qr]", page);
+    if (toQr) toQr.onclick = () => { state.loginMode[p.id] = "qr"; VIEWS.login(pid); };
   },
 
   course(pid, cid, tab) {
@@ -777,7 +799,7 @@ const VIEWS = {
         </div>` : "";
       setPage(`${head}${studia}<div class="section"><h3>平台账号</h3></div>
         <div class="models">${state.platforms.map((p) => `<div class="model"><span class="plat ${p.id}">${INITIAL[p.id]}</span>
-          <span class="m1"><b>${esc(p.name)}</b><small class="sans">${esc(platformStatus(p))} · ${p.login === "qr" ? "App 扫码登录" : "职教云浏览器授权"}</small></span><span></span>
+          <span class="m1"><b>${esc(p.name)}</b><small class="sans">${esc(platformStatus(p))} · ${p.login === "qr" ? `${APP_NAME[p.id] || "App"} 扫码登录${p.password ? " / 账号密码" : ""}` : p.login === "password" ? `${p.name}账号密码` : "职教云浏览器授权"}</small></span><span></span>
           <span class="row_btns">${p.logged_in ? `<button class="btn small danger" data-logout="${p.id}" data-confirm="确认退出">退出</button>` : `<button class="btn small primary" data-go="#/login/${p.id}">登录</button>`}</span></div>`).join("")}</div>`);
       page.querySelectorAll("[data-logout]").forEach((el) => (el.onclick = async () => {
         try { await api(`/api/platforms/${el.dataset.logout}/logout`, { method: "POST" }); } catch (e) { toast(e.message); return; }
@@ -952,12 +974,15 @@ function coverHtml(p, c) {
 function studyActions(p, c) {
   const f = c.features || {};
   const study = p.id === "zhs" ? (c.kind === "shared" ? "1.5 倍速看完剩下的视频，弹题自动答" : "完成文档、课件和视频")
-    : p.id === "mooc" ? "学完课件和视频，自动讨论和评价" : "学完资源库里的资源";
+    : p.id === "mooc" ? "学完课件和视频，自动讨论和评价"
+    : p.id === "cx" ? "视频、文档、阅读任务点：章节并行，视频先尝试直接完成"
+    : "学完资源库里的资源";
   return [["study", ICON.play, "自动学习", study],
     ...(f.review ? [["review", ICON.repeat, "每日复习", "重看 30 分钟攒习惯分，每天一次"]] : [])];
 }
 // "#/course/p/c/<tab>": the Q&A tab only exists on courses whose assessment counts it.
-const courseTab = (c, tab) => tab === "answer" ? "answer" : tab === "qa" && c.features?.qa ? "qa" : "study";
+const courseTab = (c, tab) => tab === "answer" ? "answer" : tab === "qa" && c.features?.qa ? "qa"
+  : c.features && c.features.study === false ? "answer" : "study";
 
 // Q&A tab. Where the interaction share stands, then two actions: answer a few questions now, or have
 // AI draft new ones that the person edits before they go out. Everything posted is listed below.
@@ -1076,11 +1101,11 @@ function renderCourse(p, c, tab, full = false) {
           ${c.progress == null ? '<span class="digits"><i>—</i></span>' : `<span class="digits">${[...String(c.progress)].map((d) => `<i>${esc(d)}</i>`).join("")}<small>%</small></span>`}
           <span class="hero_note score_note">${scoreNote(c, papers, state.earned[k])}</span></div>
         ${p.features.answer ? `<button class="hero_stat" data-go="#/course/${p.id}/${c.id}/answer"><span class="hero_label">可作答</span>
-          <span class="pen_num">${papers ? open : "—"}</span><span class="hero_note">份试卷 ›</span></button>` : ""}
+          <span class="pen_num">${papers ? open : "—"}</span><span class="hero_note">${p.id === "cx" ? "份作业" : "份试卷"} ›</span></button>` : ""}
       </div>
     </section>
     <div class="tabs seg" role="tablist">
-      <button class="tab" role="tab" aria-selected="${tab === "study"}" data-go="#/course/${p.id}/${c.id}">学习</button>
+      ${p.features.study ? `<button class="tab" role="tab" aria-selected="${tab === "study"}" data-go="#/course/${p.id}/${c.id}">学习</button>` : ""}
       <button class="tab" role="tab" aria-selected="${tab === "answer"}" data-go="#/course/${p.id}/${c.id}/answer">答题${open ? `<span class="n">${open}</span>` : ""}</button>
       ${c.features?.qa ? `<button class="tab" role="tab" aria-selected="${tab === "qa"}" data-go="#/course/${p.id}/${c.id}/qa">问答区</button>` : ""}
     </div>`;
@@ -1122,16 +1147,17 @@ function renderCourse(p, c, tab, full = false) {
     const rank = (label) => (order.includes(label) ? order.indexOf(label) : order.length);
     const categories = [...new Set(papers.map((x) => x.category))].sort((a, b) => rank(a) - rank(b));
     const n = selected.size;
-    body = categories.map((label) => {
+    const cxNote = p.id === "cx" ? '<div class="notice">超星不提供章节作业的提交状态，请到平台确认哪些还没做，只勾选要作答的。</div>' : "";
+    body = cxNote + (categories.map((label) => {
       const list = papers.filter((x) => x.category === label), open = list.filter((x) => x.available);
       const all = open.length && open.every((x) => selected.has(x.id));
       return `<div class="section"><h3>${esc(label)}</h3><span class="aside">${open.length} / ${list.length} 份可选</span>
           ${open.length > 1 ? `<button class="link" data-pick-all="${esc(label)}">${all ? "取消全选" : "全选"}</button>` : ""}</div>
         <div class="papers">${list.map(row).join("")}</div>`;
-    }).join("") || `<div class="empty">这门课没有作业、测验或考试</div>`;
+    }).join("") || `<div class="empty">这门课没有作业、测验或考试</div>`);
     if (categories.length) body += `<div class="dock"><span class="info">${answerBlock ? esc(answerBlock) : n ? `已选 <b>${n}</b> 份 · 交卷前会再确认一次` : "勾选要作答的试卷"}</span>
-      <button class="btn" data-save ${n && !answerBlock ? "" : "disabled"}>仅生成答案</button>
-      <button class="btn primary" data-submit data-confirm="再按一次，交 ${n} 份卷" ${n && !answerBlock ? "" : "disabled"}>AI 作答并交卷</button></div>`;
+      <button class="btn" data-save ${n && !answerBlock ? "" : "disabled"}>${p.id === "cx" ? "保存答案（不交卷）" : "仅生成答案"}</button>
+      <button class="btn primary" data-submit data-confirm="再按一次，交 ${n} ${p.id === "cx" ? "份作业" : "份卷"}" ${n && !answerBlock ? "" : "disabled"}>AI 作答并交卷</button></div>`;
   }
   page.style.setProperty("--c", inkOf(c));
   if (full) setPage(head + body); else { quiet = true; setPage(head + body); quiet = false; }
@@ -1491,6 +1517,23 @@ async function qrLogin(pid) {
   }
 }
 
+async function passwordLogin(pid, form) {
+  const status = $("[data-status]", form), button = $("[data-start-login]", form);
+  const say = (title, text) => { status.innerHTML = `<b>${esc(title)}</b><p>${esc(text)}</p>`; };
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "登录中…";
+  try {
+    // The server signs in with the platform's own form; the password is not kept.
+    await api(`/api/platforms/${pid}/login`, { method: "POST", body: { username: form.username.value.trim(), password: form.password.value } });
+    await afterLogin(pid);
+  } catch (error) {
+    say("登录失败", error.message);
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
 async function browserLogin(pid) {
   state.loginToken.cancelled = true;
   const token = (state.loginToken = { cancelled: false });
@@ -1541,8 +1584,10 @@ async function readCourses(pid) {
   const p = platformOf(pid);
   // Warm every course's papers and units so a later click finds them ready.
   for (const c of state.courses[pid] || []) {
-    if (p?.features.answer) inBackground(() => (state.papers[key(pid, c.id)] ? null : loadPapers(p, c)));
-    inBackground(() => loadUnits(pid, c.id));
+    // 超星的作业目录要逐个章节请求任务点，等打开答题页再读，登录后不要一次打满接口。
+    if (p?.features.answer && p.id !== "cx") inBackground(() => (state.papers[key(pid, c.id)] ? null : loadPapers(p, c)));
+    // 超星的单元要逐章节请求任务点，等打开课程页再读。
+    if (p?.features.study !== false && p.id !== "cx") inBackground(() => loadUnits(pid, c.id));
   }
 }
 

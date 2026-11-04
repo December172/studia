@@ -7,6 +7,7 @@ requires-python = ">=3.9"
 dependencies = [
     "rich>=13.9,<15",
     "prompt_toolkit>=3.0.48,<4",
+    "fonttools>=4.47",
     "lxml==6.1.0",
     "pycryptodome~=3.18.0",
     "requests==2.31.0",
