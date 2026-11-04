@@ -3,7 +3,8 @@
     python -m ChaoxingMain --list
     python -m ChaoxingMain --course 246831735 --study
     python -m ChaoxingMain --course 246831735 --answer --submit
-    python -m ChaoxingMain --course 246831735            # 学习和答题都做
+    python -m ChaoxingMain --course 246831735            # 只列出任务
+    python -m ChaoxingMain --course 246831735 --study --answer  # 学习和答题都做
 
 账号也可以放在 CHAOXING_USERNAME / CHAOXING_PASSWORD 里。AI 模型使用 studia 设置里
 当前启用的那个，和网页版、终端版共用一份配置。
@@ -29,8 +30,8 @@ def parse_args(argv=None):
     parser.add_argument("--password", default=os.environ.get("CHAOXING_PASSWORD", ""), help="超星密码")
     parser.add_argument("--course", action="append", default=[], metavar="ID", help="只处理这些课程 ID，可重复")
     parser.add_argument("--skip", action="append", default=[], metavar="词", help="课程名包含该词就跳过，可重复")
-    parser.add_argument("--study", action="store_true", help="自动学习（视频、文档、阅读）；默认和答题一起做")
-    parser.add_argument("--answer", action="store_true", help="章节作业 AI 答题；默认和学习一起做")
+    parser.add_argument("--study", action="store_true", help="自动学习（视频、文档、阅读）")
+    parser.add_argument("--answer", action="store_true", help="章节作业 AI 答题；必须明确指定才会打开作业并保存答案")
     parser.add_argument("--submit", action="store_true", help="作业答题：覆盖率达到阈值时自动交卷")
     parser.add_argument("--cover-rate", type=float, default=0.8, help="交卷所需最低覆盖率，默认 0.8")
     parser.add_argument("--delay", type=float, default=0.0, help="答题时两道题之间等待的秒数，默认 0")
@@ -39,7 +40,10 @@ def parse_args(argv=None):
     parser.add_argument("--notopen", choices=("retry", "continue"), default="retry",
                         help="遇到未开放章节：retry 重试（默认），continue 跳过")
     parser.add_argument("--list", action="store_true", help="只列出课程、章节和任务点，不学习也不答题")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.submit and not args.answer:
+        parser.error("--submit 需要同时指定 --answer")
+    return args
 
 
 def report(event):
@@ -85,13 +89,11 @@ def main(argv=None):
         print("--jobs 只支持 1–8")
         return 2
     args.speed = min(2.0, max(1.0, args.speed))
-    if not args.study and not args.answer:
-        args.study = args.answer = True
 
     client = ChaoxingApi(args.username, args.password)
     ai = None
     try:
-        if args.list:
+        if args.list or not (args.study or args.answer):
             list_courses(client, args)
             return 0
         courses = filter_courses(client.course_list(), args)

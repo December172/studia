@@ -326,15 +326,18 @@ class ChaoxingApi:
 
     # ------------------------------------------------------------------ 请求
 
-    def _request(self, method, url, *, params=None, data=None, headers=None):
+    def _request(self, method, url, *, params=None, data=None, headers=None, check_login=True):
         merged = dict(HEADERS)
         merged.update(headers or {})
         try:
             response = getattr(self.session, method)(url, params=params, data=data, headers=merged, timeout=(10, 30))
         except requests.RequestException as error:
             raise PlatformUnavailable("暂时无法连接超星平台：%s" % error) from None
-        if response.status_code in (401, 403):
-            raise AuthenticationExpired("超星登录已过期或无权访问")
+        if response.status_code == 401:
+            raise AuthenticationExpired("超星登录已过期，请重新登录")
+        if response.status_code == 403 and check_login:
+            # 业务接口可能被 WAF 拒绝；只读确认登录，不重发原请求（它可能是写操作）。
+            self.signed_in()
         if response.status_code != 200:
             raise ChaoxingError("超星平台返回 HTTP %s" % response.status_code)
         # 被重定向到登录页说明 cookie 已经失效，不能把登录页当成数据页解析。
@@ -350,7 +353,7 @@ class ChaoxingApi:
         """
         self._request("post", MOOC2_URL + "/visit/courselistdata",
                       data={"courseType": 1, "courseFolderId": 0, "query": "", "superstarClass": 0},
-                      headers=COURSE_LIST_HEADERS)
+                      headers=COURSE_LIST_HEADERS, check_login=False)
         return True
 
     # ------------------------------------------------------------------ 目录
@@ -382,7 +385,7 @@ class ChaoxingApi:
         也带回来（网页课程页要显示 1/1，而不是把已学卡片过滤掉变成 0/0）。
         """
         self.sleep(0.5)
-        jobs, job_info = [], {}
+        jobs, job_info, seen, cards = [], {}, set(), set()
         params = {
             "clazzid": course["clazzId"],
             "courseid": course["courseId"],
@@ -395,19 +398,21 @@ class ChaoxingApi:
         for number in "0123456789":
             params["num"] = number
             page = self._request("get", BASE_URL + "/mooc-ans/knowledge/cards", params=params)
-            found, found_info = decode_jobs(page.text, include_finished=include_finished)
+            # 分页结束与任务是否已完成/受支持无关，使用原始附件的签名判断。
+            found, found_info = decode_jobs(page.text, include_finished=True)
             if found_info.get("notOpen"):
                 return [], found_info
-            jobs += found
+            card = found_info.pop("card_signature", "")
+            if not card or card in cards:
+                break
+            cards.add(card)
             job_info.update(found_info)
-        # 不同 num 可能返回同一张卡片；按 jobid 去重，避免同一份作业被提交两次。
-        unique, seen = [], set()
-        for job in jobs:
-            if job["jobid"] in seen:
-                continue
-            seen.add(job["jobid"])
-            unique.append(job)
-        return unique, job_info
+            for job in found:
+                if job["jobid"] not in seen:
+                    seen.add(job["jobid"])
+                    if include_finished or not job["is_passed"]:
+                        jobs.append(job)
+        return jobs, job_info
 
     def course_nodes(self, course):
         """整门课的知识点完成计数（移动端 ``gas/clazz``，一次请求）。
@@ -592,6 +597,8 @@ class ChaoxingApi:
             "vbegin": vbegin,
             "vend": vend,
             "clip_time": clip_time,
+            # getknowledgecurvideo 返回秒，卡片返回毫秒；2026-11-04 真实账号
+            # 同一视频分别为 1176 / 1176000，不能在这里再除以 1000。
             "playTime": number("playTime"),
             "reportUrl": str(blob.get("reportUrl") or ""),
             "fastforward": _flag_value(blob.get("fastforward")),

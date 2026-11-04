@@ -85,6 +85,20 @@ class CatalogTest(unittest.TestCase):
             {"name": "1.1 函数", "units": [
                 {"id": "work-abc", "name": "1.1 章节测验", "kind": "work", "state": "queued"}]}])
 
+    def test_completed_chapter_confirms_documents_when_mobile_status_is_unavailable(self):
+        # 真实复测：文档上报成功后，章节已完成，但卡片仍是 isPassed=false。
+        client = FakeClient(points=[dict(POINT, has_finished=True)], jobs=[
+            {"type": "document", "jobid": "d1", "name": "讲义.ppt", "is_passed": False},
+            {"type": "document", "jobid": "d2", "name": "讲义.pdf", "is_passed": False}])
+        units = course_units(client, COURSE)[0]["units"]
+        self.assertEqual([unit["state"] for unit in units], ["done", "done"])
+
+    def test_current_node_counts_override_a_stale_completed_chapter(self):
+        client = FakeClient(points=[dict(POINT, has_finished=True)], jobs=[
+            {"type": "document", "jobid": "d1", "name": "讲义", "is_passed": False}],
+            nodes={"123": {"finish": 0, "unfinish": 1}})
+        self.assertEqual(course_units(client, COURSE)[0]["units"][0]["state"], "queued")
+
     def test_units_keep_learned_cards_and_use_platform_counts(self):
         jobs = [
             {"type": "video", "jobid": "v1", "name": "视频", "is_passed": True},

@@ -7,7 +7,7 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 from requests.cookies import RequestsCookieJar
 
-from base.auth import AuthenticationExpired
+from base.auth import AuthenticationExpired, PlatformUnavailable
 from ChaoxingMain.api import (AES_KEY, ChaoxingApi, ChaoxingError, LoginError, WorkUnavailable,
                               encrypt, video_enc)
 
@@ -229,6 +229,46 @@ class RequestTest(unittest.TestCase):
         with self.assertRaises(ChaoxingError):
             self.client(FakeResponse(status_code=500))._request("get", "https://x/")
 
+    def test_forbidden_checks_login_without_repeating_the_business_request(self):
+        session = FakeSession(lambda method, url, kwargs: FakeResponse(
+            status_code=200 if url.endswith("/visit/courselistdata") else 403))
+        api = ChaoxingApi(cookies={"UID": "1"}, session=session)
+        with self.assertRaisesRegex(ChaoxingError, "HTTP 403"):
+            api._request("post", "https://mooc1.chaoxing.com/write", data={"answer": "A"})
+        self.assertEqual(len(session.calls), 2)
+        self.assertTrue(session.calls[-1][1].endswith("/visit/courselistdata"))
+        self.assertTrue(api.logged_in)
+
+    def test_forbidden_with_an_expired_login_propagates_expiry(self):
+        for response in (FakeResponse(status_code=401),
+                         FakeResponse(url="https://passport2.chaoxing.com/login")):
+            with self.subTest(response=response):
+                session = FakeSession(lambda method, url, kwargs: response
+                                      if url.endswith("/visit/courselistdata") else FakeResponse(status_code=403))
+                api = ChaoxingApi(cookies={"UID": "1"}, session=session)
+                with self.assertRaises(AuthenticationExpired):
+                    api._request("get", "https://mooc1.chaoxing.com/page")
+                self.assertEqual(len(session.calls), 2)
+
+    def test_forbidden_login_probe_does_not_recurse_or_claim_expiry(self):
+        api = self.client(FakeResponse(status_code=403))
+        with self.assertRaisesRegex(ChaoxingError, "HTTP 403"):
+            api._request("get", "https://mooc1.chaoxing.com/page")
+        self.assertEqual(len(api.session.calls), 2)
+
+    def test_failed_login_probe_preserves_the_login(self):
+        import requests
+
+        def handler(method, url, kwargs):
+            if url.endswith("/visit/courselistdata"):
+                raise requests.Timeout()
+            return FakeResponse(status_code=403)
+
+        api = ChaoxingApi(cookies={"UID": "1"}, session=FakeSession(handler))
+        with self.assertRaises(PlatformUnavailable):
+            api._request("get", "https://mooc1.chaoxing.com/page")
+        self.assertTrue(api.logged_in)
+
 
 class CatalogTest(unittest.TestCase):
     def test_course_list_includes_custom_folders(self):
@@ -245,7 +285,7 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual([course["title"] for course in courses], ["高等数学", "选修课"])
         self.assertEqual([course["courseId"] for course in courses], ["111", "222"])
 
-    def test_job_list_tries_every_card_page(self):
+    def test_job_list_stops_at_a_repeated_card(self):
         numbers, knowledge_ids = [], []
 
         def handler(method, url, kwargs):
@@ -258,8 +298,46 @@ class CatalogTest(unittest.TestCase):
         # 每个 num 都返回同一张卡片时只保留一份，避免重复提交。
         self.assertEqual([job["jobid"] for job in jobs], ["work-abc"])
         self.assertEqual(info["knowledgeid"], "123")
-        self.assertEqual(numbers, list("0123456789"))
+        self.assertEqual(numbers, ["0", "1"])
         self.assertEqual(set(knowledge_ids), {"123"})
+
+    def test_job_list_stops_at_an_empty_card(self):
+        for empty in ("<html></html>", 'mArg={"defaults":{},"attachments":[]};'):
+            with self.subTest(empty=empty):
+                session = FakeSession(lambda method, url, kwargs: FakeResponse(
+                    CARDS if kwargs["params"]["num"] == "0" else empty))
+                api = ChaoxingApi(cookies={"UID": "1"}, session=session, sleep=lambda _: None)
+                jobs, info = api.job_list(COURSE, POINT)
+                self.assertEqual([job["jobid"] for job in jobs], ["work-abc"])
+                self.assertEqual(info["knowledgeid"], "123")
+                self.assertEqual(len(session.calls), 2)
+
+    def test_completed_and_unsupported_cards_do_not_hide_later_work(self):
+        for first in ({"type": "video", "jobid": "v1", "objectId": "o", "isPassed": True},
+                      {"type": "live", "jobid": "l1"},
+                      {"type": "video", "objectId": "non-task"}):
+            for include_finished in (False, True):
+                with self.subTest(first=first, include_finished=include_finished):
+                    pages = ['mArg=%s;' % json.dumps({"attachments": [first]}), CARDS, ""]
+                    session = FakeSession(lambda method, url, kwargs: FakeResponse(
+                        pages[int(kwargs["params"]["num"])]))
+                    api = ChaoxingApi(cookies={"UID": "1"}, session=session, sleep=lambda _: None)
+                    jobs, _ = api.job_list(COURSE, POINT, include_finished=include_finished)
+                    ids = [job["jobid"] for job in jobs]
+                    self.assertIn("work-abc", ids)
+                    self.assertEqual("v1" in ids, include_finished and first.get("jobid") == "v1")
+                    self.assertEqual(len(session.calls), 3)
+
+    def test_card_scan_is_bounded_and_deduplicates_overlapping_jobs(self):
+        def handler(method, url, kwargs):
+            number = kwargs["params"]["num"]
+            return FakeResponse(CARDS.replace('"attachments":[', '"attachments":[{"type":"workid","jobid":"w%s"},' % number))
+
+        session = FakeSession(handler)
+        api = ChaoxingApi(cookies={"UID": "1"}, session=session, sleep=lambda _: None)
+        jobs, _ = api.job_list(COURSE, POINT)
+        self.assertEqual(len(session.calls), 10)
+        self.assertEqual(len(jobs), 11)
 
     def test_job_list_includes_learning_tasks(self):
         from tests.test_chaoxing_decode import ALL_CARDS
@@ -323,6 +401,17 @@ class LearningApiTest(unittest.TestCase):
         self.assertEqual(info["interval"], 15)
         self.assertEqual(info["playTime"], 30)
         self.assertEqual(info["reportUrl"], VIDEO_BLOB["reportUrl"])
+
+    def test_live_player_seconds_match_card_milliseconds(self):
+        # 2026-11-04 同一个已观看视频的只读接口采样；不含账号和签名信息。
+        blob = dict(VIDEO_BLOB, duration="1315", playTime=1176)
+        api = self.blob_client(blob, [])
+        player = api.video_info(COURSE, VIDEO_JOB, JOB_INFO)
+        fallback = self.client(lambda *args: FakeResponse(json_body={
+            "status": "success", "duration": 1315, "dtoken": "dt"}))
+        card = fallback._video_info_from_status(COURSE, dict(VIDEO_JOB, playTime=1176000))
+        self.assertEqual(player["playTime"], 1176)
+        self.assertEqual(player["playTime"], card["playTime"])
 
     def test_fastforward_video_drags_to_the_end_and_completes(self):
         reports = []

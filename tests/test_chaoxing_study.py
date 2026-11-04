@@ -4,7 +4,7 @@ import unittest
 
 from base.auth import AuthenticationExpired
 from ChaoxingMain.api import ChaoxingError
-from ChaoxingMain.study import ChaoxingStudyHandler
+from ChaoxingMain.study import ChaoxingStudyHandler, RETRY_DELAY
 
 COURSE = {"title": "高等数学", "courseId": "111", "clazzId": "222", "cpi": "333"}
 
@@ -96,11 +96,12 @@ class FakeClient:
         return "success"
 
 
-def run(chapters, jobs=None, *, max_workers=1, client=None, notopen_action="retry", **kwargs):
+def run(chapters, jobs=None, *, max_workers=1, client=None, notopen_action="retry",
+        sleep=lambda _: None, cancel_event=None, **kwargs):
     events = []
     fake = client or FakeClient(chapters, jobs, **kwargs)
     handler = ChaoxingStudyHandler(client=fake, course_rows=[COURSE], on_progress=events.append,
-                                   max_workers=max_workers, sleep=lambda _: None,
+                                   max_workers=max_workers, sleep=sleep, cancel_event=cancel_event,
                                    notopen_action=notopen_action)
     return fake, handler, events
 
@@ -141,8 +142,21 @@ class RetryTest(unittest.TestCase):
         self.assertEqual([event.status for event in events if event.kind == "result"], ["skipped"])
 
     def test_not_open_is_retried_by_default(self):
-        fake, _, _ = run([point("1")], not_open=True)
+        delays = []
+        fake, _, _ = run([point("1")], not_open=True, sleep=delays.append)
         self.assertEqual(len(fake.job_calls), 5)  # MAX_TRIES
+        self.assertEqual(delays, [RETRY_DELAY] * 4)
+
+    def test_cancellation_during_retry_wait_stops_further_requests(self):
+        cancel = threading.Event()
+        fake, _, events = run([point("1")], not_open=True, cancel_event=cancel,
+                              sleep=lambda _: cancel.set())
+        self.assertEqual(fake.job_calls, ["1"])
+        self.assertEqual([event.status for event in events if event.kind == "result"], ["cancelled"])
+
+    def test_pending_chapters_are_tried_before_a_retry(self):
+        fake, _, _ = run([point("1"), point("2")], not_open=True)
+        self.assertEqual(fake.job_calls[:2], ["1", "2"])
 
     def test_authentication_error_propagates(self):
         def job_error(point_info):

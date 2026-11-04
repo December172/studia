@@ -159,7 +159,7 @@ def decode_jobs(html_text, include_finished=False):
     ``include_finished=True`` 时保留它们（网页课程页展示 1/1 用）；作业卡片的
     isPassed 不可靠所以始终保留。``otherInfo`` 只取第一段；没有 mid 但有 objectId
     的 mp4 仍可处理；pdf/ppt 等文档类型统一归到 document。``notOpen`` 表示这一章
-    还没开放。
+    还没开放。公共参数里的 ``card_signature`` 用于识别空页/重复附件，结束分页。
     """
     if "章节未开放" in (html_text or ""):
         return [], {"notOpen": True}
@@ -179,7 +179,10 @@ def decode_jobs(html_text, include_finished=False):
         job = _card_job(card, include_finished=include_finished)
         if job is not None:
             jobs.append(job)
-    return jobs, _job_info(data)
+    info = _job_info(data)
+    # 包括非任务点和不支持的附件，避免分页在已完成/不可处理的卡片处提前结束。
+    info["card_signature"] = json.dumps(cards, sort_keys=True) if cards else ""
+    return jobs, info
 
 
 # 任务点类型别名：平台/不同课程可能把文档叫 document，也可能直接给 pdf/ppt，

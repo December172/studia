@@ -570,6 +570,8 @@ class Studia:
             raise self.expire(platform)
         except CaptchaRequired as exc:
             raise HttpError(409, str(exc))
+        except ChaoxingError as exc:
+            raise HttpError(502, str(exc) or "学习单元读取失败") from None
 
     # ------------------------------------------------------------ jobs
 

@@ -126,7 +126,7 @@ MOOC / AI 优课在资源处理完成后，还会处理课程活动：
 
 支持**自动学习**（视频、文档、阅读任务点）和**章节作业 / 章节测验的 AI 作答**，网页版、终端版都能用；另外提供命令行入口，适合服务器或脚本。
 
-- **自动学习**：同一门课最多 8 个章节同时处理（网页/终端的并发设置），章节内的任务点再并行完成；已完成章节直接跳过，没有任务点的空章节点一下完成，未开放章节默认重试（最多 5 次）。视频按网页播放器的协议上报：`fastforward` 允许拖动时，像拖动进度条一样用 `drag(from-to)` 跳到结尾、再补 `complete`（老师截取的片段以 `vend` 为结尾，`enc` 用真实 `clipTime`）；不允许拖动时按真实时间播放到结尾（倍速 1.0–2.0，命令行 `--speed` 可调）。连续 403 会刷新状态重试，仍失败则跳过该任务并重试整个章节。**PPT / PDF 等文档任务点**通过 `mooc-ans/job/document` 一次性标记完成，不占播放时长。不是任务点的视频（播放信息里没有 jobid）直接跳过。开跑前会先用平台的两份状态做预检：`gas/clazz` 的节点完成计数（整章 `unfinishcount=0` 直接跳过）和手机端 `jobfinishedList`（已完成的任务点不再重复上报）；所以网页课程页上已学完的章节和任务点会显示成 n/n，作业/考试以外的完成状态以平台计数为准，不再依赖经常不更新的卡片 `isPassed`（PDF/PPT 尤其明显）。直播任务不在范围内。
+- **自动学习**：同一门课最多 8 个章节同时处理（网页/终端的并发设置），章节内的任务点再并行完成；已完成章节直接跳过，没有任务点的空章节点一下完成，未开放章节默认重试（最多尝试 5 次，每次重试前等待 30 秒，可随时取消）。视频按网页播放器的协议上报：`fastforward` 允许拖动时，像拖动进度条一样用 `drag(from-to)` 跳到结尾、再补 `complete`（老师截取的片段以 `vend` 为结尾，`enc` 用真实 `clipTime`）；不允许拖动时按真实时间播放到结尾（倍速 1.0–2.0，命令行 `--speed` 可调）。连续 403 会刷新状态重试，仍失败则跳过该任务并重试整个章节。**PPT / PDF 等文档任务点**通过 `mooc-ans/job/document` 一次性标记完成，不占播放时长。不是任务点的视频（播放信息里没有 jobid）直接跳过。开跑前会先用平台的两份状态做预检：`gas/clazz` 的节点完成计数（整章 `unfinishcount=0` 直接跳过）和手机端 `jobfinishedList`（已完成的任务点不再重复上报）；所以网页课程页上已学完的章节和任务点会显示成 n/n，作业/考试以外的完成状态以平台计数为准，不再依赖经常不更新的卡片 `isPassed`（PDF/PPT 尤其明显）。移动状态接口不可用时，先用章节页的「已完成」标志判断整章完成，再用卡片状态兜底。直播任务不在范围内。
 
 - **登录**：默认用学习通 App 扫码（网页版直接在登录页显示二维码；终端版会打开一个本地二维码页面）。扫码不方便、账号需要手机二次验证或没有浏览器时，可以在同一页/同一菜单改用账号密码。登录成功后只保存平台下发的 Cookie，不保存密码。网页版在「设置 → 账号」退出登录，终端版在课程列表按 `s → 退出超星登录`。
 - **任务列表**：「答题」标签列出这门课各章节里的作业，勾选后选「仅生成答案」或「AI 作答并交卷」。
@@ -143,11 +143,12 @@ python -m ChaoxingMain --list                          # 只看课程、章节�
 python -m ChaoxingMain --course 246831735 --study      # 只自动学习
 python -m ChaoxingMain --course 246831735 --answer     # 只做作业答题（默认只保存）
 python -m ChaoxingMain --course 246831735 --answer --submit   # 覆盖率达标时自动交卷
-python -m ChaoxingMain --course 246831735              # 学习和答题都做
-python -m ChaoxingMain --course 246831735 --speed 1.5 --jobs 4 --notopen continue
+python -m ChaoxingMain --course 246831735              # 默认只列出任务
+python -m ChaoxingMain --course 246831735 --study --answer  # 学习和答题都做
+python -m ChaoxingMain --course 246831735 --study --speed 1.5 --jobs 4 --notopen continue
 ```
 
-命令行没有二维码页面，只能用 `--username` / `--password`，或环境变量 `CHAOXING_USERNAME` / `CHAOXING_PASSWORD`。`--jobs` 是同时处理的章节数（1–8）。
+命令行没有二维码页面，只能用 `--username` / `--password`，或环境变量 `CHAOXING_USERNAME` / `CHAOXING_PASSWORD`。`--jobs` 是同时处理的章节数（1–8）。默认只列出任务；明确传 `--answer` 才打开作业并保存答案，`--submit` 需同时传 `--answer`。平台可能在打开作业时创建草稿，请只对需要作答的课程启用答题。
 
 ## AI 答题
 
