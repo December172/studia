@@ -19,6 +19,38 @@ DONE = ("submitted", "saved")
 UNIT_STATE = {"skipped": "skipped"}
 
 
+def catalog(client, course):
+    """这门课所有章节里的作业，给终端 / 网页的任务列表用。
+
+    每条是 ``(course, item, category)``；item 除了任务本身，还带上作答要用的
+    ``_point`` 和 ``_job_info``，这样选中的作业可以单独交给 runner.run()。
+    平台不提供作业的提交状态（workid 卡片的 isPassed 不可靠），所以如实标成未知。
+    """
+    entries = []
+    for point in client.course_points(course)["points"]:
+        jobs, job_info = client.job_list(course, point)
+        for job in jobs:
+            if job["type"] != "workid":
+                continue
+            name = job.get("name") or point.get("title") or "章节作业"
+            entries.append((course, dict(
+                job, id=job["jobid"], name=name, _point=point, _job_info=job_info,
+                _completion_status="unknown",
+                _hint="平台不提供这份作业的提交状态；已完成的作业请不要再勾选"), 1))
+    return entries
+
+
+def course_units(client, course):
+    """章节和其中的作业，给网页课程页的单元格子用（只读）。"""
+    chapters = []
+    for point in client.course_points(course)["points"]:
+        jobs, _ = client.job_list(course, point)
+        chapters.append({"name": point.get("title") or "未命名章节", "units": [
+            {"id": job["jobid"], "name": job.get("name") or "章节作业", "kind": "work", "state": "queued"}
+            for job in jobs if job["type"] == "workid"]})
+    return chapters
+
+
 class ChaoxingHandler:
     def __init__(self, username="", password="", *, client=None, ai_client=None, courses=None,
                  course_ids=None, skip=None, auto_submit=False, cover_rate=0.8, delay=0.0,

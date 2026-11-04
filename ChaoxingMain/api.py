@@ -76,7 +76,11 @@ class ChaoxingApi:
                 self.session.cookies.set(name, value)
             self.logged_in = True
         elif username and password:
-            self.login(username, password)
+            try:
+                self.login(username, password)
+            except BaseException:
+                self.session.close()
+                raise
 
     def close(self):
         self.session.close()
@@ -128,6 +132,16 @@ class ChaoxingApi:
         if str(response.url).startswith(PASSPORT_URL):
             raise AuthenticationExpired("超星登录已过期，请重新登录")
         return response
+
+    def signed_in(self):
+        """只读地确认 cookie 还被平台接受；失效时抛 AuthenticationExpired。
+
+        网页版用它区分「真的掉线」和「某次业务请求被限流/拒绝」，避免误删登录。
+        """
+        self._request("post", MOOC2_URL + "/visit/courselistdata",
+                      data={"courseType": 1, "courseFolderId": 0, "query": "", "superstarClass": 0},
+                      headers=COURSE_LIST_HEADERS)
+        return True
 
     # ------------------------------------------------------------------ 目录
 

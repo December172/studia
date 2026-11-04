@@ -3,7 +3,7 @@ import unittest
 from ai.client import AIResponseError, AIServiceError
 from base.auth import AuthenticationExpired, PlatformUnavailable
 from ChaoxingMain.api import WorkUnavailable
-from ChaoxingMain.main import ChaoxingHandler
+from ChaoxingMain.main import ChaoxingHandler, catalog, course_units
 
 COURSE = {"title": "高等数学", "courseId": "111", "clazzId": "222", "cpi": "333"}
 OTHER = {"title": "大学物理", "courseId": "999", "clazzId": "888", "cpi": "777"}
@@ -55,6 +55,26 @@ class FakeClient:
 
     def close(self):
         self.closed = True
+
+
+class CatalogTest(unittest.TestCase):
+    def test_catalog_carries_what_the_runner_needs(self):
+        entries = catalog(FakeClient(), COURSE)
+        self.assertEqual(len(entries), 1)
+        course, item, category = entries[0]
+        self.assertIs(course, COURSE)
+        self.assertEqual(item["jobid"], "work-abc")
+        self.assertEqual(item["id"], "work-abc")
+        self.assertEqual(item["name"], "1.1 章节测验")
+        self.assertEqual(item["_point"], POINT)
+        self.assertEqual(item["_job_info"]["knowledgeid"], "123")
+        self.assertEqual(item["_completion_status"], "unknown")
+        self.assertEqual(category, 1)
+
+    def test_units_list_chapter_works(self):
+        self.assertEqual(course_units(FakeClient(), COURSE), [
+            {"name": "1.1 函数", "units": [
+                {"id": "work-abc", "name": "1.1 章节测验", "kind": "work", "state": "queued"}]}])
 
 
 class HandlerTest(unittest.TestCase):

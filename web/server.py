@@ -26,10 +26,13 @@ from AIMoocMain.api import AIMoocApi
 from AIMoocMain.exam_api import ExamAPI, ExamError, ExamServiceError, TaskUnavailableError
 from AIMoocMain.export_questions import paper_display_name, paper_exam_id
 from AIMoocMain.main import AIMoocHandler, course_units as mooc_units
-from ai.client import AIClient, AIConfig, AIError
+from ai.client import AIClient, AIConfig, AIError, AIServiceError
 from ai.runner import AnswerRunner
 from base.concurrency import INTERACTIVE_WORKERS
 from base.auth import AuthenticationExpired, PlatformUnavailable
+from ChaoxingMain.api import ChaoxingApi, ChaoxingError, LoginError, WorkUnavailable
+from ChaoxingMain.exercise import ChaoxingExerciseRunner
+from ChaoxingMain.main import catalog as cx_catalog, course_units as cx_units
 from NewMoocMain.oauth_login import oauth_login
 from settings import DEFAULT_PROFILE_ID, SettingsError, SettingsStore
 from task_capabilities import task_availability, task_type_label
@@ -91,6 +94,9 @@ PLATFORMS = {
              "handler": AIMoocHandler, "units": mooc_units, "answer": True, "review": False, "needs_ai": True},
     "zyk": {"name": "资源库", "short": "资源库", "login": "browser", "api": ZYKMoocApi,
             "handler": ZYKMoocHandler, "units": None, "answer": False, "review": False, "needs_ai": False, "hidden": True},
+    "cx": {"name": "超星", "short": "超星", "login": "password", "api": ChaoxingApi,
+           "handler": None, "units": cx_units, "answer": True, "review": False, "study": False,
+           "needs_ai": True},
     "zhs": {"name": "智慧树", "short": "智慧树", "login": "qr", "api": ZHSApi,
             "handler": ZHSHandler, "units": zhs_units, "answer": True, "review": True, "qa": True, "needs_ai": False},
 }
@@ -127,7 +133,9 @@ class Platform:
     def public(self, logged_in):
         spec = self.spec
         return {"id": self.id, "name": spec["name"], "short": spec["short"], "login": spec["login"],
-                "logged_in": logged_in, "features": {"answer": spec["answer"], "review": spec["review"], "qa": bool(spec.get("qa"))}}
+                "logged_in": logged_in,
+                "features": {"study": spec.get("study", True), "answer": spec["answer"],
+                             "review": spec["review"], "qa": bool(spec.get("qa"))}}
 
 
 class Studia:
@@ -207,7 +215,10 @@ class Studia:
                 saved = self.store.session(platform.id)
                 if not saved:
                     raise HttpError(401, "请先登录%s" % platform.spec["name"])
-                platform.client = platform.spec["api"](access_token=saved["access_token"])
+                if "cookies" in saved:
+                    platform.client = platform.spec["api"](cookies=saved["cookies"])
+                else:
+                    platform.client = platform.spec["api"](access_token=saved["access_token"])
             return platform.client
 
     def drop(self, platform):
@@ -252,8 +263,10 @@ class Studia:
 
     # ------------------------------------------------------------ login
 
-    def login_start(self, pid):
+    def login_start(self, pid, body=None):
         platform = self.platform(pid)
+        if platform.spec["login"] == "password":
+            return self.password_login(platform, body or {})
         with self.lock:
             if platform.spec["login"] == "qr":
                 client = ZHSApi()
@@ -272,6 +285,42 @@ class Studia:
             platform.login = {"status": "waiting", "message": "已在浏览器打开职教云登录页，登录完成后会自动回到这里"}
             threading.Thread(target=self._browser_login, args=(platform,), daemon=True).start()
             return {"status": "waiting", "message": platform.login["message"]}
+
+    def password_login(self, platform, body):
+        """Sign in with the platform's own account form and keep the cookie jar.
+
+        The password is never stored: only the cookie the platform hands back is saved, so a
+        later request can restore the session without asking again.
+        """
+        username = str(body.get("username") or "").strip()
+        password = str(body.get("password") or "")
+        if not username or not password:
+            raise HttpError(400, "请输入%s账号和密码" % platform.spec["name"])
+        try:
+            client = platform.spec["api"](username, password)
+        except LoginError as exc:
+            raise HttpError(401, str(exc) or "账号或密码不正确")
+        except (AuthenticationExpired, PlatformUnavailable, ChaoxingError) as exc:
+            raise HttpError(502, str(exc) or "登录失败，请稍后重试")
+        try:
+            rows = client.course_list()
+        except AuthenticationExpired:
+            client.close()
+            raise HttpError(401, "%s登录已过期，请重新登录" % platform.spec["name"])
+        except (PlatformUnavailable, ChaoxingError) as exc:
+            client.close()
+            raise HttpError(502, str(exc) or "课程列表读取失败")
+        with self.lock:
+            self.drop(platform)
+            platform.client, platform.rows = client, rows
+            try:
+                self.store.save_session(platform.id, client)
+            except SettingsError:
+                # A failed write must not throw away a login that already works this session.
+                logger.warning("保存%s登录状态失败，本次登录仍可使用", platform.spec["name"], exc_info=True)
+        logger.info("%s%s 登录成功", self.who(), platform.spec["name"])
+        self.publish({"type": "account"})
+        return {"status": "done", "message": "登录成功"}
 
     def _browser_login(self, platform):
         token = self.oauth(timeout=300)
@@ -372,10 +421,15 @@ class Studia:
         platform = self.platform(pid)
         client = self.client(platform)
         try:
-            result = client.my_course_list(page_size=9999, strict=True) if pid != "zhs" else client.my_course_list()
+            if pid == "cx":
+                rows = client.course_list()
+            else:
+                result = client.my_course_list(page_size=9999, strict=True) if pid != "zhs" else client.my_course_list()
+                rows = result.get("rows") if isinstance(result, dict) else None
         except AuthenticationExpired:
             raise self.expire(platform)
-        rows = result.get("rows") if isinstance(result, dict) else None
+        except ChaoxingError as exc:
+            raise HttpError(502, str(exc) or "课程列表读取失败")
         if not isinstance(rows, list):
             raise PlatformUnavailable("课程列表读取失败，请稍后重试")
         shares = self._score_shares(platform, client, rows)
@@ -449,11 +503,18 @@ class Studia:
         pid = platform.id
         client = self.client(platform)
         try:
-            entries = catalog(client, row) if pid == "zhs" else _mooc_catalog(client, row)
+            if pid == "cx":
+                entries = cx_catalog(client, row)
+            elif pid == "zhs":
+                entries = catalog(client, row)
+            else:
+                entries = _mooc_catalog(client, row)
         except AuthenticationExpired:
             raise self.expire(platform)
         except CaptchaRequired as exc:
             raise HttpError(409, str(exc))
+        except ChaoxingError as exc:
+            raise HttpError(502, str(exc) or "作业列表读取失败")
         except ExamError as exc:
             raise HttpError(502, str(exc) or "试卷列表读取失败")
         listed = {}
@@ -471,7 +532,7 @@ class Studia:
                 score = None if score in ("?", "--") else score
             result.append({
                 "id": task_id,
-                "name": (item.get("name") if pid == "zhs" else paper_display_name(item)) or "未命名试卷",
+                "name": (item.get("name") if pid in ("zhs", "cx") else paper_display_name(item)) or "未命名试卷",
                 "category": "作业" if pid == "zhs" and category == 1 else "考试" if pid == "zhs" else task_type_label(item, category),
                 "status": availability.label or STATUS_LABEL.get(item.get("_completion_status"), "未作答"),
                 "score": score,
@@ -504,7 +565,10 @@ class Studia:
         platform = self.platform(str(body.get("platform", "")))
         kind = body.get("type")
         course_id = str(body.get("course", ""))
-        allowed = {"study"} | ({"review"} if platform.spec["review"] else set()) | ({"answer"} if platform.spec["answer"] else set()) | ({"qa", "ask"} if platform.spec.get("qa") else set())
+        allowed = ({"study"} if platform.spec.get("study", True) else set()) | \
+                  ({"review"} if platform.spec["review"] else set()) | \
+                  ({"answer"} if platform.spec["answer"] else set()) | \
+                  ({"qa", "ask"} if platform.spec.get("qa") else set())
         if kind not in allowed:
             raise HttpError(400, "这个平台暂不支持该操作")
         row = self.find_row(platform, course_id)
@@ -516,7 +580,8 @@ class Studia:
         with self.lock:
             self._check_conflicts(platform.id, course_id, kind)
             job = {"id": secrets.token_hex(4), "kind": kind, "title": LABEL[kind], "course": course_id,
-                   "platform": platform.id, "course_name": row.get("courseName") or "课程", "cancel": threading.Event(),
+                   "platform": platform.id, "course_name": row.get("courseName") or row.get("title") or "课程",
+                   "cancel": threading.Event(),
                    "state": "queued", "summary": "", "started": time.time(), "ended": None, "lines": [], "progress": {},
                    "resumes": resumes}
             if resumes:
@@ -681,7 +746,8 @@ class Studia:
                 if client is None:
                     continue
                 try:
-                    if client.access_token:
+                    # Token platforms save the access token; 超星 has none and saves its cookie jar.
+                    if getattr(client, "access_token", None) or getattr(client, "session", None) is not None:
                         self.store.save_session(platform.id, client)
                 except Exception:  # a cookie jar changing under us, a full disk: keep the older copy
                     logger.warning("保存%s登录状态失败", platform.spec["name"], exc_info=True)
@@ -791,29 +857,43 @@ class Studia:
         ai = self._ai("请先在设置里添加 AI 模型")
         try:
             workers = self.store.concurrency()["ai"]
-            if platform.id == "zhs":
+            if platform.id == "cx":
+                runner = ChaoxingExerciseRunner(self.client(platform), ai, auto_submit=auto_submit,
+                                                on_progress=on_progress, cancel_event=cancel)
+                unit = "份作业"
+
+                def run_paper(course, item, category):
+                    return runner.run(course, item["_point"], item, item["_job_info"])
+            elif platform.id == "zhs":
                 runner = ZHSAnswerRunner(
                     self.client(platform), ai, auto_submit=auto_submit, on_progress=on_progress,
                     cancel_event=cancel, max_workers=workers,
                     memory=self.memory or AnswerMemory(Path(self.store.path).parent / "zhs-answers.json"))
+                run_paper, unit = runner.run_paper, "份试卷"
             else:
                 # No manual-answer or confirm callbacks: unanswerable papers stay unsubmitted.
                 runner = AnswerRunner(ExamAPI(self.client(platform)), ai, output_dir=self.reports_dir,
                                       auto_submit=auto_submit, on_progress=on_progress, max_workers=workers,
                                       memory=self.mooc_memory or MoocAnswerMemory(Path(self.store.path).parent / "mooc-answers.json"))
-            self.progress_event(job, "begin", "AI 答题", total=len(selected), unit="份试卷")
+                run_paper, unit = runner.run_paper, "份试卷"
+            self.progress_event(job, "begin", "AI 答题", total=len(selected), unit=unit)
             done = 0
             for course, item, category in selected:
                 if cancel.is_set():
                     break
-                name = (item.get("name") if platform.id == "zhs" else paper_display_name(item)) or "试卷"
+                name = (item.get("name") if platform.id in ("zhs", "cx") else paper_display_name(item)) \
+                    or ("作业" if platform.id == "cx" else "试卷")
                 try:
-                    result = runner.run_paper(course, item, category)
+                    result = run_paper(course, item, category)
                 except (CaptchaRequired, StudyTimeLimit):
                     self.progress_event(job, "result", name, status="waiting")
                     raise
-                except TaskUnavailableError as exc:
+                except (TaskUnavailableError, WorkUnavailable) as exc:
                     result = {"status": "skipped", "message": str(exc)}
+                except AIServiceError as exc:
+                    result = {"status": "ai_error", "message": str(exc), "stop_queue": True}
+                except ChaoxingError as exc:
+                    result = {"status": "error", "message": str(exc)}
                 except ExamError as exc:
                     result = {"status": "error", "message": str(exc), "stop_queue": isinstance(exc, ExamServiceError)}
                 status = result["status"]
@@ -826,7 +906,7 @@ class Studia:
                 done += status in ("submitted", "saved", "preview")
                 if result.get("stop_queue") or status in ("ai_error", "submission_unknown", "submitting", "paused"):
                     break
-            return f"处理完成 {done}/{len(selected)} 份试卷"
+            return "处理完成 %d/%d %s" % (done, len(selected), unit)
         finally:
             ai.session.close()
 
@@ -1047,6 +1127,9 @@ STATUS_LABEL = {"submitted": "已提交", "draft": "未提交", "not_started": "
 
 
 def _task_id(pid, item, category):
+    if pid == "cx":
+        # 超星的作业 id 就是 jobid（work-<hash>），同一门课里唯一，跨章节也不会重复。
+        return re.sub(r"[^\w-]", "_", str(item.get("jobid") or item.get("id")))
     if pid == "zhs":
         return str(item["id"])
     return "%s-%s" % (category, re.sub(r"[^\w-]", "_", paper_exam_id(item)))
@@ -1195,6 +1278,9 @@ def _data_url(image):
 
 
 def _course_id(pid, row):
+    if pid == "cx":
+        # 同一门课可以在多个班级里，courseId + clazzId 才是唯一的。
+        return re.sub(r"[^\w-]", "_", "%s-%s" % (row.get("courseId"), row.get("clazzId")))
     if pid == "zhs":
         z = row.get("zhs") or {}
         return "%s-%s" % (z.get("kind"), z.get("courseId") or z.get("secret"))
@@ -1209,7 +1295,8 @@ def course_features(pid, row, shares=None):
     (ZHSMain.api.course_offers, shared with the terminal menu)."""
     spec = PLATFORMS[pid]
     offers = course_offers(row, shares) if pid == "zhs" else {"review": False, "qa": False}
-    return {"answer": bool(spec["answer"]),
+    return {"study": bool(spec.get("study", True)),
+            "answer": bool(spec["answer"]),
             "review": bool(spec["review"]) and offers["review"],
             "qa": bool(spec.get("qa")) and offers["qa"]}
 
@@ -1221,14 +1308,16 @@ def _course(pid, row, shares=None):
         progress = round(float(progress))
     except (TypeError, ValueError):
         progress = None
-    return {"id": _course_id(pid, row), "platform": pid, "name": row.get("courseName") or "未命名课程",
-            "type": row.get("courseInfoName") or "", "kind": z.get("kind") or pid, "progress": progress,
+    return {"id": _course_id(pid, row), "platform": pid,
+            "name": row.get("courseName") or row.get("title") or "未命名课程",
+            "type": row.get("courseInfoName") or row.get("teacher") or "",
+            "kind": z.get("kind") or pid, "progress": progress,
             "features": course_features(pid, row, shares), "shares": shares}
 
 
 ROUTES = [
     ("GET", r"/api/state", lambda app, m, q, b: app.state()),
-    ("POST", r"/api/platforms/(\w+)/login", lambda app, m, q, b: app.login_start(m[1])),
+    ("POST", r"/api/platforms/(\w+)/login", lambda app, m, q, b: app.login_start(m[1], b)),
     ("GET", r"/api/platforms/(\w+)/login", lambda app, m, q, b: app.login_status(m[1], (q.get("id") or [""])[0])),
     ("POST", r"/api/platforms/(\w+)/logout", lambda app, m, q, b: app.logout(m[1])),
     ("GET", r"/api/platforms/(\w+)/courses", lambda app, m, q, b: app.courses(m[1])),
