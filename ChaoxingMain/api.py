@@ -60,6 +60,16 @@ VIDEO_STATUS_URL = BASE_URL + "/ananas/status/%s"
 VIDEO_LOG_URL = BASE_URL + "/mooc-ans/multimedia/log/a/%s/%s"
 VIDEO_CUR_URL = BASE_URL + "/knowledge/getknowledgecurvideo"
 VIDEO_NEXT_URL = BASE_URL + "/knowledge/getnextknowledgevideo"
+GAS_CLAZZ_URL = BASE_URL + "/gas/clazz"
+PHONE_FINISHED_URL = BASE_URL + "/api/phone/jobfinishedList"
+PHONE_UNFINISHED_URL = BASE_URL + "/api/phone/jobunfinishedList"
+# gas/clazz 的 fields：移动端章节树一次返回每个节点按用户的完成计数。
+CHAPTER_FIELDS = (
+    "id,name,state,isstart,isfiled,chatid,bbsid,studentcount,invitecode,"
+    "course.fields(id,name,bbsid,imageurl,teacherfactor,mappingcourseid,bulletformat,"
+    "knowledge.fields(id,name,indexOrder,optype,parentnodeid,label,layer,status,begintime,"
+    "endtime,clickcount,finishcount,openlock,unfinishcount,newchapterrule).type(video))"
+)
 DOCUMENT_URL = BASE_URL + "/mooc-ans/job/document"
 READ_URL = BASE_URL + "/ananas/job/readv2"
 EMPTY_PAGE_URL = BASE_URL + "/mooc-ans/mycourse/studentstudyAjax"
@@ -82,6 +92,54 @@ def video_enc(clazz_id, jobid, objectid, playing_time, duration, userid, clip_ti
         clazz_id, userid, jobid, objectid, int(playing_time) * 1000,
         VIDEO_ENC_SALT, int(duration) * 1000, clip)
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def _number(value):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _gear_record(value):
+    """超星 gear 响应有时包一层 data、有时是单元素列表。"""
+    if isinstance(value, list):
+        for item in value:
+            record = _gear_record(item)
+            if record:
+                return record
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    if len(value) == 1 and "data" in value:
+        return _gear_record(value["data"]) or value
+    return value
+
+
+def _node_list(value):
+    while isinstance(value, dict):
+        value = value.get("data")
+    return value if isinstance(value, list) else []
+
+
+def _collect_job_ids(payload):
+    """从手机端 job finished/unfinished 响应里找出所有 jobid（结构不固定）。"""
+    ids = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            job_id = node.get("jobid") if "jobid" in node else node.get("jobId")
+            if job_id not in (None, ""):
+                ids.add(str(job_id))
+            for child in node.values():
+                if isinstance(child, (dict, list)):
+                    walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    walk(payload)
+    return ids
 
 
 def _flag_value(value):
@@ -307,11 +365,12 @@ class ChaoxingApi:
         params = {"courseid": course["courseId"], "clazzid": course["clazzId"], "cpi": course["cpi"], "ut": "s"}
         return decode_course_point(self._request("get", MOOC2_URL + "/mycourse/studentcourse", params=params).text)
 
-    def job_list(self, course, point):
+    def job_list(self, course, point, include_finished=False):
         """章节里的任务点（视频/文档/阅读/作业）和这一章的公共参数。
 
         页面用 num=0..9 分批返回任务卡片，数量事先不知道，所以和源码一样逐个请求，
-        直到没有新卡片；这一步是纯读取。
+        直到没有新卡片；这一步是纯读取。``include_finished=True`` 时把已完成的任务点
+        也带回来（网页课程页要显示 1/1，而不是把已学卡片过滤掉变成 0/0）。
         """
         self.sleep(0.5)
         jobs, job_info = [], {}
@@ -327,7 +386,7 @@ class ChaoxingApi:
         for number in "0123456789":
             params["num"] = number
             page = self._request("get", BASE_URL + "/mooc-ans/knowledge/cards", params=params)
-            found, found_info = decode_jobs(page.text)
+            found, found_info = decode_jobs(page.text, include_finished=include_finished)
             if found_info.get("notOpen"):
                 return [], found_info
             jobs += found
@@ -340,6 +399,69 @@ class ChaoxingApi:
             seen.add(job["jobid"])
             unique.append(job)
         return unique, job_info
+
+    def course_nodes(self, course):
+        """整门课的知识点完成计数（移动端 ``gas/clazz``，一次请求）。
+
+        返回 ``{knodeid: {"finish": n, "unfinish": m, "click": c, "name": ...}}``；
+        ``unfinish == 0`` 表示这个节点下所有任务点都学完了。取不到时返回空字典，
+        调用方退回卡片里的 isPassed。
+        """
+        params = {"id": course["clazzId"], "fields": CHAPTER_FIELDS, "view": "json"}
+        if course.get("cpi"):
+            params["personid"] = course["cpi"]
+        try:
+            payload = self._json(self._request("get", GAS_CLAZZ_URL, params=params))
+        except (ChaoxingError, PlatformUnavailable) as error:
+            logger.info("读取章节完成状态失败：%s", error)
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        record = _gear_record(payload.get("data") or payload.get("msg")) or _gear_record(payload)
+        course_record = _gear_record(record.get("course")) or record
+        nodes = _node_list(course_record.get("knowledge") or record.get("knowledge"))
+        result = {}
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            node_id = str(node.get("id") or "")
+            if not node_id:
+                continue
+            result[node_id] = {
+                "name": str(node.get("name") or ""),
+                "finish": _number(node.get("finishcount", node.get("jobFinishedCount"))),
+                "unfinish": _number(node.get("unfinishcount", node.get("jobUnfinishedCount"))),
+                "click": _number(node.get("clickcount")),
+            }
+        return result
+
+    def _job_ids(self, course, finished):
+        """手机端已完成/未完成任务点 id；分页读，最多 20 页，失败就停。"""
+        url = PHONE_FINISHED_URL if finished else PHONE_UNFINISHED_URL
+        ids = set()
+        for page in range(1, 21):
+            params = {"courseid": course["courseId"], "clazzid": course["clazzId"],
+                      "knowledgeid": "", "jobid": "", "page": page, "pageSize": 20, "view": "json"}
+            try:
+                payload = self._json(self._request("get", url, params=params))
+            except (ChaoxingError, PlatformUnavailable):
+                break
+            found = _collect_job_ids(payload)
+            new = found - ids
+            ids |= found
+            if not found or not new or len(found) < 20:
+                break
+        return ids
+
+    def finished_job_ids(self, course):
+        return self._job_ids(course, finished=True)
+
+    def unfinished_job_ids(self, course):
+        return self._job_ids(course, finished=False)
+
+    def job_status_ids(self, course):
+        """(已完成, 未完成) 的 jobid 集合；给网页任务卡片展示用。"""
+        return self.finished_job_ids(course), self.unfinished_job_ids(course)
 
     # ------------------------------------------------------------------ 学习
 

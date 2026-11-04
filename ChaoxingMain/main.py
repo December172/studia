@@ -43,16 +43,40 @@ def catalog(client, course):
 def course_units(client, course):
     """章节和其中的任务点，给网页课程页的单元格子用（只读）。
 
-    非作业任务点的完成状态来自平台卡片；作业的 isPassed 不可靠，统一显示未完成。
+    已完成的卡片也会带回来，所以整章学完时显示的是 n/n 而不是 0/0；完成状态优先
+    相信平台的两份状态（gas/clazz 的节点计数、手机端 finished/unfinished 列表），
+    卡片上的 isPassed 只作兜底——文档/PPT 的卡片标志经常不更新。
     """
+    def status(name):
+        method = getattr(client, name, None)
+        if not callable(method):
+            return None
+        try:
+            return method(course)
+        except Exception:  # 状态接口失败不能拖垮课程页
+            logger.debug("读取课程状态失败：%s", name, exc_info=True)
+            return None
+
+    nodes = status("course_nodes") or {}
+    job_status = status("job_status_ids")
+    finished, unfinished = job_status if job_status else (set(), set())
     chapters = []
     for point in client.course_points(course)["points"]:
-        jobs, _ = client.job_list(course, point)
-        chapters.append({"name": point.get("title") or "未命名章节", "units": [
-            {"id": job["jobid"], "name": job.get("name") or job["type"],
-             "kind": "work" if job["type"] == "workid" else job["type"],
-             "state": "done" if job.get("is_passed") and job["type"] != "workid" else "queued"}
-            for job in jobs]})
+        jobs, _ = client.job_list(course, point, include_finished=True)
+        counts = nodes.get(str(point.get("id"))) if isinstance(nodes, dict) else None
+        all_done = bool(counts) and counts.get("unfinish", 0) == 0 and counts.get("finish", 0) > 0
+        units = []
+        for job in jobs:
+            work = job["type"] == "workid"
+            done = not work and (bool(job.get("is_passed")) or job["jobid"] in finished)
+            if job["jobid"] in unfinished:
+                done = False
+            if all_done:
+                done = True
+            units.append({"id": job["jobid"], "name": job.get("name") or job["type"],
+                          "kind": "work" if work else job["type"],
+                          "state": "done" if done else "queued"})
+        chapters.append({"name": point.get("title") or "未命名章节", "units": units})
     return chapters
 
 
