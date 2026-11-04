@@ -226,19 +226,16 @@ class ReuseFlowTest(unittest.TestCase):
         self.assertEqual(result["status"], "submitted", result)
         self.assertIn("以下答案已被平台判定为错误，不要再选：A", ai.asked[0]["context"])
 
-    def test_ai_repeating_known_wrong_answer_stops_paper(self):
+    def test_ai_repeating_known_wrong_answer_falls_back_to_an_untried_option(self):
         memory = in_course(AnswerMemory(self.path))
         options = [{"id": 1, "content": "甲"}, {"id": 2, "content": "乙"},
                    {"id": 3, "content": "丙"}]
         memory.remember(prepared(1, options=options), ["甲"], False)
         ai = FakeAI(["A", "A", "A"])
         client = FakeClient({1: raw_question(1, options=options)})
-        result = runner(client, ai, memory).run_paper(COURSE, HOME, 1)
-        self.assertEqual(result["status"], "error")
-        self.assertIn("格式不符", result["message"])
+        runner(client, ai, memory, auto_submit=False).run_paper(COURSE, HOME, 1)
         self.assertEqual(len(ai.asked), 3)
-        self.assertEqual(client.call("exam_save_answer"), [])
-        self.assertNotIn("exam_submit", client.names())
+        self.assertIn(client.call("exam_save_answer")[0]["answer"], {"2", "3"})
 
     def test_ai_retried_after_repeating_known_wrong_answer(self):
         memory = in_course(AnswerMemory(self.path))

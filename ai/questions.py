@@ -30,12 +30,12 @@ def prepare_question(raw, number, parent=None, child_number=None):
     kind = int(raw.get("typeId", 0))
     if kind not in TYPES:
         raise ValueError("暂不支持题型 %s" % kind)
-    if contains_media(raw) or (parent and contains_media(parent)):
-        raise ValueError("包含图片、音频、附件或公式，需要人工处理")
+    # 有图片、音频、公式的题也照做：把看得到的文字交给 AI，并告诉它有部分看不到、按文字推测。
+    media = contains_media(raw) or bool(parent and contains_media(parent))
     paper_id = (parent or raw).get("id")
     if not paper_id or (parent and not raw.get("id")):
         raise ValueError("缺少平台试题 ID")
-    title = clean_html_text(raw.get("title") or raw.get("content") or "")
+    title = clean_html_text(raw.get("title") or raw.get("content") or "") or ("（题干是图片或音频）" if media else "")
     if not title:
         raise ValueError("题干为空")
     arr = data_array(raw)
@@ -51,7 +51,7 @@ def prepare_question(raw, number, parent=None, child_number=None):
             if not re.fullmatch(r"\d+", value) or value in seen:
                 raise ValueError("选项 SortOrder 无效或重复")
             seen.add(value)
-            text = clean_html_text(item.get("Content", ""))
+            text = clean_html_text(item.get("Content", "")) or ("（图片选项）" if media else "")
             if not text:
                 raise ValueError("选项内容为空")
             options.append({"label": chr(65 + idx), "text": text, "value": value})
@@ -62,7 +62,8 @@ def prepare_question(raw, number, parent=None, child_number=None):
             raise ValueError("无法确定填空数量")
     return {
         "type_id": kind, "type": TYPES[kind], "title": title,
-        "context": clean_html_text(parent.get("title", "")) if parent else "",
+        "context": "；".join(filter(None, [clean_html_text(parent.get("title", "")) if parent else "",
+                                           "这道题有图片、音频或公式没法给你看，请按能看到的文字推测最可能的答案" if media else ""])),
         "options": options, "blank_count": blanks,
         "paper_id": str(paper_id), "paper_sub_id": str(raw["id"]) if parent else None,
         "number": number, "child_number": child_number, "raw_options": arr,

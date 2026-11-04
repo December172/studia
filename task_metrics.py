@@ -38,9 +38,9 @@ def completion_with_score(item, status):
 
 
 def attempts_text(item, category=None):
-    # The live homework catalog uses -1 when there is no retry opportunity.
+    # The live catalog uses -1 when there is no retry opportunity, for exams and quizzes too.
     homework = category == 1
-    if homework and str(item.get("answerCount")) == "-1":
+    if str(item.get("answerCount")) == "-1":
         return "x"
     # The official list displays answerCount/frequency as remaining/total.
     # answerCount is NOT the number already attempted; do not subtract it.

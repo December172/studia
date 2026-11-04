@@ -34,6 +34,8 @@ class RunnerMixin:
         self.ai = Mock()
         self.ai.config.model = "model"
         self.ai.answer.return_value = {"answer": "A", "confidence": .9, "explanation": "ok"}
+        # Asked for a best guess, this model still has nothing: the paper then waits for a person.
+        self.ai.guess.return_value = {"answer": None, "confidence": .1, "explanation": "缺少材料"}
         sleep = patch("ai.runner.time.sleep")
         sleep.start()
         self.addCleanup(sleep.stop)
@@ -67,6 +69,22 @@ class RunnerMixin:
         else:
             item["record"]["paperId"] = str(position)
         return item
+
+
+class GuessTests(RunnerMixin, unittest.TestCase):
+    """One blank question used to hold back the whole paper; now the model is pushed for its best answer."""
+
+    def test_unsure_or_malformed_answers_are_asked_again_for_a_best_guess(self):
+        self.paper = [self.q(i) for i in range(3)]
+        self.api.paper.return_value["questions"] = self.paper
+        self.ai.answer.side_effect = [{"answer": "A", "confidence": .9, "explanation": ""},
+                                      {"answer": None, "confidence": .2, "explanation": "学校规定，查不到"},
+                                      {"answer": "Z", "confidence": .5, "explanation": ""}]
+        self.ai.guess.return_value = {"answer": "B", "confidence": .3, "explanation": "推测"}
+        report = self.run_paper(confirm_submit=lambda *args: True)
+        self.assertEqual(self.ai.guess.call_count, 2)
+        self.api.submit.assert_called_once()
+        self.assertEqual([row.get("guessed", False) for row in report["answers"]], [False, True, True])
 
 
 class ReuseTests(RunnerMixin, unittest.TestCase):
@@ -465,6 +483,7 @@ class ConfirmCancelTests(unittest.TestCase):
         self.api = Mock(user_id="user")
         self.ai = Mock()
         self.ai.config.model = "model"
+        self.ai.guess.return_value = {"answer": None, "confidence": .1, "explanation": "缺少材料"}
         sleep = patch("ai.runner.time.sleep")
         sleep.start()
         self.addCleanup(sleep.stop)

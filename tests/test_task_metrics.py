@@ -4,22 +4,26 @@ import unittest
 from unittest.mock import Mock, patch
 from rich.console import Console
 import theme
-from ui import TerminalUI
+from ui import Back, TerminalUI
 
 
 class TaskMetricsTests(unittest.TestCase):
     def render(self, item, native=False, category=1, status='submitted'):
         row = ({'id': 'c', 'courseName': '课程'}, dict(id='a', name='作业一', _completion_status=status, **item), category)
         out = io.StringIO()
+        answers = iter(['1', '\x1b'])  # pick the paper; Esc if it cannot be picked (no attempts left)
         ui = TerminalUI(console=Console(file=out, width=120, height=30, theme=theme.THEME,
-                                        force_terminal=native), input_fn=None if native else lambda: '1')
+                                        force_terminal=native), input_fn=None if native else lambda: next(answers))
         if native:
             from checklist import Selection
             with patch('sys.stdin.isatty', return_value=True), \
                  patch('checklist.choose_many', return_value=Selection([0], 1)) as choose:
                 ui.papers([row])
             return choose.call_args.args[1][0][3:]
-        ui.papers([row])
+        try:
+            ui.papers([row])
+        except Back:
+            pass
         return out.getvalue()
 
     def metrics(self, text):
