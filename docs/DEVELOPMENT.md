@@ -26,6 +26,10 @@
 | `ZYKMoocMain/` | 资源库平台接口与学习管理 |
 | `ZHSMain/` | 智慧树：扫码登录、接口加密、共享课/智慧课程学习、AI 答题与按课程的答案记忆 |
 | `ZHSMain/qa.py` | 智慧树问答区（qah5）：用 Playwright 复用已登录 Cookie，页面内签名取题、提问与发布回答；终端「问答区答题」「问答区提问」和网页任务类型 `qa` 共用取题/发布逻辑，答题按 `max_answers` 过滤题目。Playwright 同步 API 会在调用线程上占住一个事件循环，而 `__enter__` 失败时 `with` 不会调用 `__exit__`，失败路径必须自己 `close()`，否则同线程后续的 `asyncio.run()`（prompt_toolkit 界面）会直接抛错 |
+| `ChaoxingMain/` | 超星学习通：passport2 登录（学习通 App 扫码为主，账号密码兜底）、课程/章节/作业读取、加密字体解码与章节作业 AI 作答。网页版（`web/server.py` 平台 `cx`，`login: "qr"` + `password: true`）、终端版和 `python -m ChaoxingMain` 共用 `exercise.py` 的覆盖率/提交策略与 `decode.py` 的页面解析（来自 chaoxing 项目）；`main.py::catalog` 产出网页/终端共用的任务列表 |
+| `ChaoxingMain/study.py` | 超星自动学习：章节并行（并发数来自网页/终端设置，1–8），章节内任务点再并行（最多 5 个，和 chaoxing 源码一致）；章节最多尝试 5 次（重试间隔 30 秒，取消可打断等待）、未开放章节按 `notopen_action` 处理、空章节点一下完成。视频/文档/阅读的接口在 `api.py`，任务点卡片解析在 `decode.py`。`api.course_nodes`（`mooc1-api.chaoxing.com/gas/clazz`，移动端 UA）拿整门课的节点完成计数、`api.job_status_ids`（手机端 `jobfinishedList`/`jobunfinishedList`）拿已完成/未完成 jobid，学习预检和网页单元状态都优先用这两份平台状态，移动接口不可用时回退到章节完成标志，再用卡片 `isPassed` 兜底 |
+| `ChaoxingMain/login.py` | 终端版学习通扫码：把二维码写成本地 HTML 打开，轮询 `getauthstatus/v2`，过期用 `/refreshQRCode` 换码。网页版复用同一组客户端方法（`login_qr` / `login_qr_status` / `refresh_login_qr` / `finish_qr_login`），只是二维码由前端展示 |
+| `ChaoxingMain/font.py` | 超星加密字体解码：按下发字体逐字算字形哈希，对回 `resource/font_map_table.json` 里的 Unicode 名称，再按康熙部首表还原。映射表读入失败或字体不是 TrueType 时抛 `FontDecodeError`，调用方必须放弃这份作业而不是拿乱码问 AI |
 | `web/server.py` | 网页版后端：本机模式的 HTTP 接口、任务队列、SSE 事件推送 |
 | `web/hosting.py` | 服务器模式：多用户会话、CSRF、加密配置存储、审计日志、管理接口 |
 | `web/accounts.py` | 服务器模式的账号、邀请码、登录会话（SQLite：`数据目录/studia.db`）与登录限流 |
@@ -71,7 +75,7 @@ python -m tools.ui_demo --native
 新增终端显示与输入：业务适配与 Rich 运行画面放在 `ui.py`，Rich 运行样式（颜色、图标、边框、刷新频率）放在 `theme.py`；原生键盘页面（选项菜单、选择器、确认、摘要/结果动作页、多选、模型/并发表单）由 `native_ui.py`、`checklist.py`、`model_ui.py`、`concurrency_ui.py` 等原生模块拥有，共享调色板、按钮行和页面框架由 `terminal_widgets.py` 提供。`ui.py` 不再承载键盘控件的键位与布局，只把业务值（含 `0`/`False`、动作字符串、`Back`/`Cancelled` 语义）在原生返回值与既有流程之间转换；原生控件只返回值，绝不直接执行业务。业务模块不直接调用 `print` / `input`。`TerminalUI.session()` 管理日志订阅，`activity()` 管理可清除的动态区域。主流程在动态区域之外提问；旧脚本输入适配器会暂停动态显示再读取输入。文件日志独立保留。
 
 `Application` 可注入 `SettingsStore`，测试使用临时目录或 Mock，不能触碰真实用户配置。平台客户端接收关键字参数 `access_token` 时只验证账号，不再兑换 SSO 令牌；主流程使用严格模式读取课程。只有明确的认证过期会触发重新登录，恢复逻辑只覆盖执行任务前的只读操作，不重试答题或提交。
-登录与会话一律复用各平台已有的入口：智慧职教走 `NewMoocMain` 的浏览器 OAuth，智慧树走 `ZHSMain/login.py` 的扫码登录并把 `ZHSApi` 会话存进 `SettingsStore`。新功能（含问答区）只读 `store.session(platform)` 并复用对应客户端，不要另起浏览器抓 Cookie、自己拼 SSO 或重写登录轮询；只有平台确实没有可复用的登录流程时才新增，并放在该平台目录内。
+登录与会话一律复用各平台已有的入口：智慧职教走 `NewMoocMain` 的浏览器 OAuth，智慧树走 `ZHSMain/login.py` 的扫码登录并把 `ZHSApi` 会话存进 `SettingsStore`，超星用平台自己的账号密码表单登录、只把 Cookie 存进 `SettingsStore`（`session_*` 现在是「access_token 或 cookies」二选一，见 `settings.py::save_session`）。新功能（含问答区）只读 `store.session(platform)` 并复用对应客户端，不要另起浏览器抓 Cookie、自己拼 SSO 或重写登录轮询；只有平台确实没有可复用的登录流程时才新增，并放在该平台目录内。
 
 `AIConfig.api_format` 取 `auto`（新建默认）、`chat_completions` 或 `responses`，作为末尾可选字段保留原位置参数兼容性；旧配置缺少该字段时按 Chat Completions 读取，内置默认供应商明确使用此格式。界面只收集供应商名称、URL、模型和 Key。`auto` 配合完整 `/chat/completions` 或 `/responses` URL 时直接推断对应格式；基础 URL 等待连接测试识别。旧配置的显式格式继续接受，显式格式与完整端点冲突时拒绝保存。仅修改显示名称保留格式和健康记录；规范化后的 URL、模型或 Key 变化会重置为 `auto`（完整 URL 则直接推断）。
 

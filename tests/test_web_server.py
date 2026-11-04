@@ -47,7 +47,7 @@ class WebServerTest(unittest.TestCase):
         status, body = self.request("GET", "/api/state")
         self.assertEqual(status, 200)
         state = json.loads(body)
-        self.assertEqual([p["id"] for p in state["platforms"]], ["mooc", "zhs"])
+        self.assertEqual([p["id"] for p in state["platforms"]], ["mooc", "zhs", "cx"])
         self.assertFalse(any(p["logged_in"] for p in state["platforms"]))
         self.assertEqual(state["jobs"], [])
 
@@ -220,9 +220,45 @@ class WebServerTest(unittest.TestCase):
                "zhs": {"kind": "shared", "courseId": 7}}
         self.assertEqual(_course("zhs", row), {"id": "shared-7", "platform": "zhs", "name": "导论", "type": "共享课",
                                                "kind": "shared", "progress": 100,
-                                               "features": {"answer": True, "review": True, "qa": True}, "shares": None})
+                                               "features": {"study": True, "answer": True, "review": True, "qa": True}, "shares": None})
         self.assertEqual(_course("mooc", {"courseName": "高数", "courseId": "a/b"})["id"], "a_b")
         self.assertIsNone(_course("zhs", {"zhs": {"kind": "ai", "courseId": 8}})["progress"])
+
+    def test_chaoxing_password_login_saves_a_cookie_session(self):
+        from ChaoxingMain.api import LoginError
+        from web.server import PLATFORMS
+
+        class FakeChaoxing:
+            def __init__(self, username=None, password=None, cookies=None):
+                self.username, self.password, self.cookies = username, password, cookies
+                self.session = Mock()
+                self.session.cookies.get_dict.return_value = {"UID": "1"}
+
+            def course_list(self):
+                return [{"id": "course_1", "courseId": "111", "clazzId": "222", "cpi": "3", "title": "高等数学"}]
+
+            def close(self):
+                pass
+
+        original = PLATFORMS["cx"]["api"]
+        PLATFORMS["cx"]["api"] = FakeChaoxing
+        self.addCleanup(lambda: PLATFORMS["cx"].__setitem__("api", original))
+        status, _ = self.request("POST", "/api/platforms/cx/login", body={"username": "u", "password": "p"})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.app.store.session("cx"), {"cookies": {"UID": "1"}})
+        state = json.loads(self.request("GET", "/api/state")[1])
+        cx = next(platform for platform in state["platforms"] if platform["id"] == "cx")
+        self.assertTrue(cx["logged_in"])
+        self.assertTrue(cx["features"]["study"])
+
+        class WrongPassword:
+            def __init__(self, *args, **kwargs):
+                raise LoginError("超星登录失败：账号或密码不正确")
+
+        PLATFORMS["cx"]["api"] = WrongPassword
+        status, body = self.request("POST", "/api/platforms/cx/login", body={"username": "u", "password": "bad"})
+        self.assertEqual(status, 401)
+        self.assertIn("账号或密码", body.decode())
 
     def test_qr_login_completion_saves_session(self):
         client = Mock()
@@ -236,11 +272,14 @@ class WebServerTest(unittest.TestCase):
 
     def test_each_page_keeps_its_own_qr_code(self):
         codes = iter(range(10))
-        with patch("web.server.ZHSApi") as api:
-            api.side_effect = lambda: Mock(login_qr=Mock(return_value=("q%d" % next(codes), b"png")),
-                                           login_qr_status=Mock(return_value={"status": -1}))
-            first = self.app.login_start("zhs")["id"]
-            second = self.app.login_start("zhs")["id"]  # a second tab opens the login page
+        from web.server import PLATFORMS
+        original = PLATFORMS["zhs"]["api"]
+        PLATFORMS["zhs"]["api"] = lambda: Mock(
+            login_qr=Mock(return_value=("q%d" % next(codes), b"png")),
+            login_qr_status=Mock(return_value={"status": -1}))
+        self.addCleanup(lambda: PLATFORMS["zhs"].__setitem__("api", original))
+        first = self.app.login_start("zhs")["id"]
+        second = self.app.login_start("zhs")["id"]  # a second tab opens the login page
         platform = self.app.platforms["zhs"]
         platform.qr[first]["client"].login_qr_status.return_value = {"status": 1, "oncePassword": "o"}
         self.app.store.save_session = Mock()
