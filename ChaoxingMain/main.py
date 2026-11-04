@@ -69,16 +69,17 @@ def course_units(client, course):
                     if counts else bool(point.get("has_finished")))
         units = []
         for job in jobs:
-            work = job["type"] == "workid"
-            done = not work and (bool(job.get("is_passed")) or job["jobid"] in finished)
+            if job["type"] == "workid":
+                continue  # 作业在「AI 答题」里做，学习不碰它，放进格子会一直显示待学
+            done = bool(job.get("is_passed")) or job["jobid"] in finished
             if job["jobid"] in unfinished:
                 done = False
             if all_done:
                 done = True
             units.append({"id": job["jobid"], "name": job.get("name") or job["type"],
-                          "kind": "work" if work else job["type"],
-                          "state": "done" if done else "queued"})
-        chapters.append({"name": point.get("title") or "未命名章节", "units": units})
+                          "kind": job["type"], "state": "done" if done else "queued"})
+        if units:
+            chapters.append({"name": point.get("title") or "未命名章节", "units": units})
     return chapters
 
 

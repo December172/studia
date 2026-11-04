@@ -207,8 +207,16 @@ class ChaoxingExerciseRunner:
             try:
                 if self.delay:
                     self.sleep(self.delay)
-                response = self.ai_client.answer(model_question(question))
-                values[question["id"]] = encode_answer(question, response["answer"])
+                asked = model_question(question)
+                response = self.ai_client.answer(asked)
+                try:
+                    values[question["id"]] = encode_answer(question, response["answer"])
+                except ValueError as error:
+                    # 和 MOOC、智慧树一致：没把握（null）或格式不对就再问一次，要它给出最可能的答案；
+                    # 一道题空着，覆盖率不够就整份不交。
+                    logger.info("%s：第 %d 题 AI 没给出可用答案（%s），改为让它给出最可能的答案", name, index + 1, error)
+                    response = self.ai_client.answer(asked, guess=True)
+                    values[question["id"]] = encode_answer(question, response["answer"])
             except AIServiceError:
                 raise
             except AIError as error:

@@ -95,11 +95,11 @@ PLATFORMS = {
              "handler": AIMoocHandler, "units": mooc_units, "answer": True, "review": False, "needs_ai": True},
     "zyk": {"name": "资源库", "short": "资源库", "login": "browser", "api": ZYKMoocApi,
             "handler": ZYKMoocHandler, "units": None, "answer": False, "review": False, "needs_ai": False, "hidden": True},
+    "zhs": {"name": "智慧树", "short": "智慧树", "login": "qr", "api": ZHSApi,
+            "handler": ZHSHandler, "units": zhs_units, "answer": True, "review": True, "qa": True, "needs_ai": False},
     "cx": {"name": "超星", "short": "超星", "login": "qr", "password": True, "api": ChaoxingApi,
            "handler": ChaoxingStudyHandler, "units": cx_units, "answer": True, "review": False,
            "needs_ai": False},
-    "zhs": {"name": "智慧树", "short": "智慧树", "login": "qr", "api": ZHSApi,
-            "handler": ZHSHandler, "units": zhs_units, "answer": True, "review": True, "qa": True, "needs_ai": False},
 }
 
 
@@ -924,8 +924,9 @@ class Studia:
                 if client is None:
                     continue
                 try:
-                    # Token platforms save the access token; 超星 has none and saves its cookie jar.
-                    if getattr(client, "access_token", None) or getattr(client, "session", None) is not None:
+                    # Token platforms save the access token; 超星 has none and saves its cookie jar. Only 超星
+                    # restores from cookies, so another platform's client without a token keeps its older copy.
+                    if getattr(client, "access_token", None) or platform.id == "cx":
                         self.store.save_session(platform.id, client)
                 except Exception:  # a cookie jar changing under us, a full disk: keep the older copy
                     logger.warning("保存%s登录状态失败", platform.spec["name"], exc_info=True)
