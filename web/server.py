@@ -631,10 +631,12 @@ class Studia:
                 job["state"] = "paused"
             self._take_turn(job)
             self._save()
-        self.publish(dict(_job_public(job), type="job"))
+        public = _job_public(job)
+        self.publish(dict(public, type="job"))
         threading.Thread(target=self._run_job, args=(job, target, platform), daemon=True,
                          name="studia-job-%s" % job["id"]).start()
-        return {"ok": True, "id": job["id"]}
+        # The page shows the job from this reply too, not only from the event stream, which a proxy may hold back.
+        return {"ok": True, "id": job["id"], "job": public}
 
     def _check_conflicts(self, pid, course_id, kind):
         if len(self.jobs) >= MAX_PENDING:
@@ -1643,7 +1645,9 @@ def make_handler(access):
             try:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-                self.send_header("Cache-Control", "no-store")
+                self.send_header("Cache-Control", "no-store, no-transform")
+                # Nginx buffers proxied responses by default: events then reached the page in batches, or not at all.
+                self.send_header("X-Accel-Buffering", "no")
                 self.send_header("Connection", "close")  # no length: the stream ends when the socket does
                 self.end_headers()
                 while True:
@@ -1690,6 +1694,8 @@ def make_handler(access):
                 self._send(exc.status, {"error": str(exc)})
             except (PlatformUnavailable, ZHSError) as exc:
                 self._send(502, {"error": str(exc) or "平台暂时无法访问"})
+            except AIError as exc:  # e.g. drafting questions: the model timed out or the key was refused
+                self._send(502, {"error": str(exc)})
             except AuthenticationExpired:
                 self._send(401, {"error": "登录已过期，请重新登录"})
             except Exception:

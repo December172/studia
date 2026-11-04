@@ -1360,6 +1360,9 @@ async function startJob(body) {
   try {
     const started = await api("/api/jobs", { method: "POST", body });
     if (started.id) state.focus = started.id;
+    // Show it now; the stream's copy may come later (or already came, or the job already ended).
+    const job = started.job;
+    if (job && !state.jobs.some((j) => j.id === job.id) && !state.history.some((j) => j.id === job.id)) handleEvent({ ...job, type: "job" });
     if (body.type === "answer") { delete state.papers[key(body.platform, body.course)]; state.selected[key(body.platform, body.course)] = new Set(); }
     return true;
   } catch (error) { toast(error.message); return false; }
@@ -1385,6 +1388,11 @@ function finishUnits(job) {
   idleUnits(job);
   // The platform is the source of truth once the job is over; a waiting job keeps its marks until the user acts.
   if (job.state !== "waiting" && learns(job)) loadUnits(job.platform, job.course, true);
+}
+
+let resyncTimer = 0;
+function resync() {
+  if (!resyncTimer) resyncTimer = setTimeout(() => { resyncTimer = 0; refreshState(true).then(repaint); }, 1000);
 }
 
 function handleEvent(event) {
@@ -1419,7 +1427,8 @@ function handleEvent(event) {
     refreshState().then(repaint);
   } else if (event.type === "progress" || event.type === "log") {
     const job = state.jobs.find((j) => j.id === event.job);
-    if (!job) return;
+    // Progress of a job this page never heard start: its event was lost, so reread the jobs.
+    if (!job) { if (!state.history.some((j) => j.id === event.job)) resync(); return; }
     const run = runOf(job.id);
     if (event.type === "log") pushLine(run, event.text, event.level);
     else if (event.kind === "begin") run.overall = { name: event.name, total: event.total || 0, done: 0, unit: event.unit };
@@ -1470,6 +1479,7 @@ function connectEvents() {
   if (MOCK) { import("./mock.js").then((m) => m.subscribe(handleEvent)); return; }
   let source = null, heard = 0, opened = false;
   const open = () => {
+    heard = Date.now();  // a stream that never opens is retried too
     source?.close();
     source = new EventSource(session.mode === "hosted" ? "/api/events" : `/api/events?t=${encodeURIComponent(TOKEN)}`);
     source.onmessage = (message) => { heard = Date.now(); const event = JSON.parse(message.data); if (event.type !== "ping") handleEvent(event); };
@@ -1478,7 +1488,7 @@ function connectEvents() {
   };
   open();
   // The server pings every 15 s. A stream silent for 40 s is dead even if the browser hasn't noticed.
-  setInterval(() => { if (heard && Date.now() - heard > 40000) { heard = 0; open(); } }, 10000);
+  setInterval(() => { if (Date.now() - heard > 40000) open(); }, 10000);
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refreshState().then(repaint); });
 }
 
