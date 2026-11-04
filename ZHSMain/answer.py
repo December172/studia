@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
 from AIMoocMain.export_questions import clean_html_text
-from ai.client import AIError, AITransientServiceError
+from ai.client import GUESS_RULE, AIError, AITransientServiceError
 from base.auth import AuthenticationExpired, PlatformUnavailable
 from MoocMain.log import Logger
 from reporting import Reporter, child_thread_name
@@ -736,11 +736,14 @@ class ZHSAnswerRunner:
             public["context"] = (public["context"] + "\n" + hint
                                  if public.get("context") else hint)
         images = download_images(prepared["images"]) if prepared.get("images") else None
-        for _ in range(3):
+        for attempt in range(3):
             if self.cancel_event.is_set():
                 raise KeyboardInterrupt
             if stop.is_set():
                 raise _Skipped()
+            # 第一次没给出可用答案（没把握答了 null，或格式不对），后两次要它必须给出最可能的答案。
+            if attempt == 1:
+                public = dict(public, context="\n".join(filter(None, [public.get("context"), GUESS_RULE])))
             answer = self._ask(public, images).get("answer")
             try:
                 encoded = encode(prepared, answer, fill_sep=fill_sep)
@@ -750,15 +753,17 @@ class ZHSAnswerRunner:
             if wrong and texts and any(_same_answer(prepared, texts, combo) for combo in wrong):
                 continue
             return encoded
-        # The model cannot see image-only choices; a random untried option plus the
-        # memory of wrong ones converges over redos instead of blocking the paper.
-        if prepared["kind"] in (1, 14) and _image_only(prepared):
+        # Still nothing (an image it cannot see, a rule only the school knows): a random untried
+        # option. A blank holds back the whole paper; a guess may score, and the memory of
+        # wrong ones converges over redos.
+        if prepared["kind"] in (1, 2, 14):
             remaining = _untried_single(prepared, wrong)
             if remaining:
                 choice = self.rng.choice(remaining)
-                logger.info("图片题 AI 无法作答，随机选择未试过的选项 %s：%s",
+                logger.info("AI 无法作答，随机选择未试过的选项 %s：%s",
                             choice["label"], prepared["public"]["title"][:40])
-                return encode(prepared, choice["label"], fill_sep=fill_sep)
+                label = [choice["label"]] if prepared["kind"] == 2 else choice["label"]
+                return encode(prepared, label, fill_sep=fill_sep)
         raise ValueError("AI 返回的答案格式不符")
 
     def _wrong(self, prepared):
