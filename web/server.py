@@ -1591,6 +1591,8 @@ def make_handler(access):
                 self._send(exc.status, {"error": str(exc)})
             except (PlatformUnavailable, ZHSError) as exc:
                 self._send(502, {"error": str(exc) or "平台暂时无法访问"})
+            except AIError as exc:  # e.g. drafting questions: the model timed out or the key was refused
+                self._send(502, {"error": str(exc)})
             except AuthenticationExpired:
                 self._send(401, {"error": "登录已过期，请重新登录"})
             except Exception:

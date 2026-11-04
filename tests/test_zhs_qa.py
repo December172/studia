@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, Mock, patch
 from rich.console import Console
 
 import theme
+from ai.client import AIResponseError, AITransientServiceError
 from app import Application
 from base.auth import PlatformUnavailable
 from settings import SettingsStore
@@ -191,6 +192,17 @@ class WriteQuestionsTest(unittest.TestCase):
         title = ai.questions[0]["title"]
         self.assertIn("问题 7 号？", title)
         self.assertNotIn("问题 8 号？", title)
+
+    def test_broken_reply_is_asked_once_more_then_skipped(self):
+        broken = AIResponseError("AI 响应不是完整的答案 JSON")
+        ai = Mock(answer=Mock(side_effect=[broken, {"answer": LONG}]))
+        self.assertEqual(write_questions(ai, [], 1), [LONG])
+        ai = Mock(answer=Mock(side_effect=[broken, broken, {"answer": LONG}]))
+        self.assertEqual(write_questions(ai, [], 2), [LONG])  # the first question gives up, the second still comes
+        ai = Mock(answer=Mock(side_effect=AITransientServiceError("AI 连接失败或超时")))
+        with self.assertRaises(AITransientServiceError):
+            write_questions(ai, [], 1)
+        self.assertEqual(ai.answer.call_count, 1)  # a timeout is not waited out twice
 
     def test_progress_callback_reports_each_question(self):
         seen = []
