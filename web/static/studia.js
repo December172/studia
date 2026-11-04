@@ -44,6 +44,8 @@ const ICON = {
   chev: svg('<path d="m6 3.5 4.5 4.5L6 12.5"/>', 14),
   spark: svg('<path d="M8 1.8 9.4 6.6 14.2 8 9.4 9.4 8 14.2 6.6 9.4 1.8 8 6.6 6.6z"/>', 15),
   updown: svg('<path d="m5 6 3-3 3 3M5 10l3 3 3-3"/>', 12),
+  grip: '<svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor"><circle cx="3" cy="3" r="1.2"/><circle cx="7" cy="3" r="1.2"/><circle cx="3" cy="7" r="1.2"/><circle cx="7" cy="7" r="1.2"/><circle cx="3" cy="11" r="1.2"/><circle cx="7" cy="11" r="1.2"/></svg>',
+  dots: '<svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><circle cx="3" cy="7" r="1.3"/><circle cx="7" cy="7" r="1.3"/><circle cx="11" cy="7" r="1.3"/></svg>',
   play: '<svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><path d="M3 1.6v8.8L10.4 6z"/></svg>',
   repeat: svg('<path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5v3h-3"/>', 14),
   pen: svg('<path d="M10.5 2.5 13.5 5.5 6 13H3v-3z"/>', 14),
@@ -56,6 +58,7 @@ const ICON = {
   running: '<svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="var(--indigo-soft)"/><circle cx="8" cy="8" r="3" fill="var(--indigo)"/></svg>',
 };
 ICON.queued = ICON.running;
+ICON.paused = ICON.stopped;
 
 /* ------------------------------------------------------------------ api */
 
@@ -83,7 +86,7 @@ async function api(path, { method = "GET", body } = {}) {
 const state = {
   platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {}, earned: {}, qaDraft: {}, qaPosts: {}, qaOpen: new Set(),
   jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, lastDone: null,
-  current: store.get("studia-platform", ""), meOpen: false, adminTab: "people", logFilter: "all", editPassword: false, adminEdit: null,
+  current: store.get("studia-platform", ""), meOpen: false, adminTab: "people", logFilter: "all", editPassword: false, adminEdit: null, pausedOpen: new Set(),
 };
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
 const runOf = (id) => (state.runs[id] = state.runs[id] || freshRun());
@@ -92,10 +95,12 @@ const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "answer",
 const jobType = (j) => j.kind || { 自动学习: "study", 每日复习: "review", "AI 答题": "answer", 问答区答题: "qa", 问答区提问: "ask" }[j.title];
 // Only learning jobs fill a course's unit grid.
 const learns = (j) => GROUP[jobType(j)] === "learn";
+// A job in the list that is not running: waiting for a slot, or paused by an administrator.
+const WAIT_WORD = { queued: "排队中", paused: "已暂停" };
 function blocker(pid, cid, type) {
   for (const o of state.jobs) {
     if (GROUP[jobType(o)] !== GROUP[type] || o.platform !== pid) continue;
-    if (o.course === cid) return o.state === "queued" ? `正在排队（${o.title}）` : `正在${o.title}…`;
+    if (o.course === cid) return o.state === "running" ? `正在${o.title}…` : `${WAIT_WORD[o.state]}（${o.title}）`;
     if (pid === "zhs" && GROUP[type] === "learn" && !state.zhsParallel) return `智慧树一次只能播一个视频，等「${o.course_name}」的${o.title}结束`;
   }
   return "";
@@ -105,7 +110,7 @@ function focusedJob() {
   const [, pid, cid] = state.view.match(/^#\/course\/([^/]+)\/([^/]+)/) || [];
   return state.jobs.find((j) => j.id === state.focus)
     || state.jobs.find((j) => j.platform === pid && j.course === decodeURIComponent(cid || ""))
-    || state.jobs[state.jobs.length - 1] || null;
+    || [...state.jobs].reverse().find((j) => j.state === "running") || state.jobs.find((j) => !isPaused(j)) || state.jobs[0] || null;
 }
 const platformOf = (pid) => state.platforms.find((p) => p.id === pid);
 const key = (pid, cid) => `${pid}:${cid}`;
@@ -197,7 +202,8 @@ function switchPlatform(pid, navigate = true) {
 }
 
 function jobPill() {
-  if (state.jobs.length) return state.jobs.every((j) => j.state === "queued") ? '<span class="live">排队中</span>' : `<span class="live">${state.jobs.length} 个进行中</span>`;
+  if (state.jobs.length) return state.jobs.every((j) => j.state !== "running")
+    ? `<span class="live">${state.jobs.some((j) => j.state === "queued") ? "排队中" : "已暂停"}</span>` : `<span class="live">${state.jobs.filter((j) => j.state !== "paused").length} 个进行中</span>`;
   // Only what is running gets a count; past runs are not a number to watch.
   return state.history[0]?.state === "waiting" ? '<span class="live waiting">等你操作</span>' : "";
 }
@@ -304,7 +310,7 @@ function setPage(html) {
 
 const LABEL = { study: "自动学习", review: "每日复习", answer: "AI 答题", qa: "问答区答题", ask: "问答区提问" };
 const TYPE_OF = Object.fromEntries(Object.entries(LABEL).map(([k, v]) => [v, k]));
-const STATE_WORD = { done: "完成", error: "失败", waiting: "等你操作", stopped: "已停止", running: "进行中", queued: "排队中" };
+const STATE_WORD = { done: "完成", error: "失败", waiting: "等你操作", stopped: "已停止", running: "进行中", queued: "排队中", paused: "已暂停" };
 
 /* ---------------------------------------------------------------- units (course grid) */
 
@@ -390,19 +396,140 @@ function pageHead(title, sub, base, tabs, active) {
 const settingsHead = (tab, sub) => PHONE.matches
   ? `<h1 class="title">${SETTINGS_TABS.find(([k]) => k === tab)[1]}</h1><p class="sub">${sub}</p>`
   : pageHead("设置", sub, "#/settings", SETTINGS_TABS, tab);
-// Everyone's running and queued jobs, with the owner's name; shown under 任务 › 全站.
-const siteJobRows = (list) => !list.length ? `<div class="empty">现在没有任务在运行</div>` : `<div class="runs">${list.map((j) => `<div class="run">${j.state === "queued" ? ICON.waiting : ICON.running}
-    <span class="t1">${esc(j.title)} · ${esc(j.course_name)}<small>${esc(j.username)} · ${esc(platformOf(j.platform)?.short || j.platform)} · 开始于 ${ago(j.started)}</small></span>
-    <span class="fix"><button class="btn small danger" data-stop-job="${esc(j.user_id)}/${esc(j.id)}" data-confirm="确认停止">停止</button></span>
-    <span class="state ${j.state === "queued" ? "waiting" : "running"}">${j.state === "queued" ? "排队中" : "运行中"}<span class="mono">${duration(Date.now() / 1000 - j.started)}</span></span>
-    <span class="when"></span></div>`).join("")}</div>`;
+/* A person's jobs as a board: one slot per job they may run at once, the queue below in the order it will run,
+   the paused ones folded away. A queued job is dragged by its grip, within the queue to reorder it or onto a slot
+   to take that job's place (which then waits at the front of the queue). The person and an administrator see
+   the same board; owner is "" for one's own jobs, else the user id the admin routes take. */
+const isPaused = (j) => j.state === "paused" || j.hold === "pause";
+const inSlot = (j) => j.state === "running" && !j.hold;
+const byOrder = (a, b) => a.order - b.order;
+function boardParts(jobs, limit) {
+  const live = jobs.filter((j) => !isPaused(j)).sort(byOrder), running = live.filter(inSlot), rest = live.filter((j) => !inSlot(j));
+  // A queued job just moved into a slot (its place in line is within the limit) starts in a moment: show it there.
+  const incoming = rest.filter((j) => j.state === "queued" && j.order < limit).slice(0, Math.max(0, limit - running.length));
+  return { slots: [...running, ...incoming].sort(byOrder), queue: rest.filter((j) => !incoming.includes(j)),
+           incoming: incoming.length, paused: jobs.filter(isPaused).sort(byOrder) };
+}
+const DOTS = (j) => `<button class="dots" data-job-menu="${esc(j.id)}" aria-label="更多操作">${ICON.dots}</button>`;
+function slotCard(j, owner) {
+  const run = owner ? j.progress || {} : runOf(j.id), starting = j.state !== "running", { pct, label } = progressOf(run);
+  return `<div class="slot" data-slot="${esc(j.id)}" ${starting || !learns(j) ? "data-locked" : ""} style="--c:${inkOf({ id: j.course })}">
+    <span class="slot_head"><b>${esc(j.course_name)}</b>${DOTS(j)}</span>
+    <small>${esc(j.title)} · ${esc(starting ? "准备中…" : run.unit?.name || run.detail || "准备中…")}</small>
+    <span class="slot_foot"><span class="bar"><i style="width:${pct ?? 0}%"></i></span><span class="mono">${esc(label || duration(Date.now() / 1000 - (j.running_since || j.started)))}</span></span>
+  </div>`;
+}
+const queueRow = (j, i) => `<div class="qrow" data-drag="${esc(j.id)}">
+    ${j.hold ? '<span class="grip off"></span>' : `<span class="grip" data-grip aria-hidden="true">${ICON.grip}</span>`}<span class="place mono">${i + 1}</span>
+    <span class="t1">${esc(j.course_name)}<small>${esc(j.title)}${j.hold ? " · 正在让位" : ""}</small></span>${DOTS(j)}</div>`;
+const pausedRow = (j) => `<div class="qrow"><span class="grip off"></span><span class="place"></span>
+    <span class="t1">${esc(j.course_name)}<small>${esc(j.title)}${j.hold ? " · 正在暂停" : ""}</small></span>
+    ${j.hold ? "" : `<button class="btn small" data-job-act="continue" data-id="${esc(j.id)}">继续</button>`}${DOTS(j)}</div>`;
+function board(jobs, limit, owner = "") {
+  const { slots, queue, incoming, paused } = boardParts(jobs, limit), open = state.pausedOpen.has(owner);
+  const empty = Math.max(0, limit - slots.length);
+  return `<div class="board" data-board data-owner="${esc(owner)}" data-incoming="${incoming}">
+    <div class="slots">${slots.map((j) => slotCard(j, owner)).join("")}${'<div class="slot empty" data-slot=""><span>空位</span></div>'.repeat(empty)}</div>
+    ${queue.length ? `<div class="board_head">排队<small>拖动排序，拖进格子即替换</small></div><div class="runs queue">${queue.map(queueRow).join("")}</div>` : ""}
+    ${paused.length ? `<button class="board_head fold" data-paused-fold="${esc(owner)}" aria-expanded="${open}">已暂停 ${paused.length}<span class="chev_r" aria-hidden="true"></span></button>
+      ${open ? `<div class="runs">${paused.map(pausedRow).join("")}</div>` : ""}` : ""}
+  </div>`;
+}
+const boardCount = (jobs, limit) => { const n = boardParts(jobs, limit).slots.filter((j) => j.state === "running").length; return `名额 ${n}/${limit}`; };
+const jobsOf = (owner) => owner ? state.sitePeople?.find((u) => u.id === owner)?.jobs || [] : state.jobs;
+function jobAct(owner, id, action, body = {}) {
+  const url = owner ? `/api/admin/users/${owner}/jobs/${id}/${action}` : action === "stop" ? "/api/jobs/stop" : `/api/jobs/${action}`;
+  return api(url, { method: "POST", body: owner ? body : { id, ...body } })
+    .then((r) => { const text = r?.message || { stop: "正在停止…", pause: "已暂停", continue: "已排到最后" }[action]; if (text) toast(text); if (owner) loadSiteJobs(); },
+          (e) => toast(e.message));
+}
+
+// The ⋯ menu of one job, floating above the page so live repaints leave it alone.
+const jobMenu = document.createElement("div");
+jobMenu.className = "menu job_menu";
+jobMenu.setAttribute("role", "menu");
+jobMenu.hidden = true;
+document.body.appendChild(jobMenu);
+function openJobMenu(button) {
+  const owner = button.closest("[data-board]").dataset.owner, id = button.dataset.jobMenu;
+  const j = jobsOf(owner).find((x) => x.id === id);
+  if (!j) return;
+  const row = (act, label, extra = "") => `<button class="menu_row${act === "stop" ? " danger" : ""}" role="menuitem" data-job-act="${act}" data-id="${esc(id)}" data-owner="${esc(owner)}" ${extra}><span class="grow">${label}</span></button>`;
+  jobMenu.innerHTML = [
+    owner ? "" : `<button class="menu_row" role="menuitem" data-open="${esc(id)}"><span class="grow">查看</span></button>`,
+    j.state === "queued" && !j.hold ? row("move", "移到最前", 'data-to="0"') : "",
+    !j.hold && (j.state === "queued" || (inSlot(j) && learns(j))) ? row("pause", "暂停") : "",
+    j.state === "paused" ? row("continue", "继续") : "",
+    row("stop", "停止", 'data-confirm="确认停止"'),
+  ].join("");
+  jobMenu.hidden = false;
+  const at = button.getBoundingClientRect(), h = jobMenu.offsetHeight, w = jobMenu.offsetWidth;
+  jobMenu.style.left = `${Math.max(8, Math.min(at.right - w, innerWidth - w - 8))}px`;
+  jobMenu.style.top = `${at.bottom + 4 + h > innerHeight - 8 ? at.top - h - 4 : at.bottom + 4}px`;
+}
+const closeJobMenu = () => { jobMenu.hidden = true; };
+
+// Dragging a queued job by its grip (mouse or finger): a ghost follows the pointer; the slot under it, or the gap
+// between queue rows, is marked; dropping sends the move. Repaints wait until the drop (see repaint).
+let drag = null;
+document.addEventListener("pointerdown", (event) => {
+  const grip = event.target.closest("[data-grip]");
+  if (!grip || event.button > 0) return;
+  event.preventDefault();
+  closeJobMenu();
+  const row = grip.closest("[data-drag]"), at = row.getBoundingClientRect(), ghost = row.cloneNode(true);
+  ghost.classList.add("ghost");
+  // A card-sized ghost, held where it was grabbed: a full-width row would cover the slots it is dropped on.
+  Object.assign(ghost.style, { width: `${Math.min(at.width, 320)}px`, left: `${at.left}px`, top: `${at.top}px` });
+  document.body.appendChild(ghost);
+  row.classList.add("dragging");
+  document.body.classList.add("dragging");
+  drag = { row, ghost, box: row.closest("[data-board]"), x: event.clientX - at.left, y: event.clientY - at.top, target: null };
+});
+document.addEventListener("pointermove", (event) => {
+  if (!drag) return;
+  drag.ghost.style.left = `${event.clientX - Math.min(drag.x, 300)}px`;
+  drag.ghost.style.top = `${event.clientY - drag.y}px`;
+  // Near the top or bottom edge the page scrolls, so a long queue can be dragged end to end on a phone.
+  if (event.clientY < 72 || event.clientY > innerHeight - 72) scroller.scrollBy(0, event.clientY < 72 ? -14 : 14);
+  drag.box.querySelectorAll(".drop, .drop_before, .drop_after").forEach((el) => el.classList.remove("drop", "drop_before", "drop_after"));
+  drag.target = null;
+  const slot = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-slot]");
+  if (slot && drag.box.contains(slot) && !slot.hasAttribute("data-locked")) {
+    slot.classList.add("drop");
+    drag.target = slot.dataset.slot ? { swap: slot.dataset.slot } : { to: 0 };
+    return;
+  }
+  const list = drag.row.parentElement.getBoundingClientRect();
+  if (event.clientY < list.top - 24 || event.clientY > list.bottom + 24) return;
+  const rows = [...drag.row.parentElement.querySelectorAll("[data-drag]")].filter((r) => r !== drag.row);
+  const before = rows.findIndex((r) => { const b = r.getBoundingClientRect(); return event.clientY < b.top + b.height / 2; });
+  if (before >= 0) rows[before].classList.add("drop_before");
+  else rows[rows.length - 1]?.classList.add("drop_after");
+  // The server's queue also counts the jobs shown starting in a slot, which come first.
+  drag.target = { to: (before < 0 ? rows.length : before) + Number(drag.box.dataset.incoming) };
+});
+function endDrag() {
+  if (!drag) return;
+  const { row, ghost, box, target } = drag;
+  drag = null;
+  ghost.remove();
+  row.classList.remove("dragging");
+  document.body.classList.remove("dragging");
+  box.querySelectorAll(".drop, .drop_before, .drop_after").forEach((el) => el.classList.remove("drop", "drop_before", "drop_after"));
+  if (target) jobAct(box.dataset.owner, row.dataset.drag, "move", target);
+  repaint();
+}
+document.addEventListener("pointerup", endDrag);
+document.addEventListener("pointercancel", endDrag);
+const siteCount = () => (state.sitePeople || []).reduce((sum, u) => sum + u.jobs.length, 0);
 let siteTimer = 0;
 async function loadSiteJobs() {
   clearTimeout(siteTimer);
   const here = () => location.hash === "#/jobs/all";
   // Refresh every 5 seconds while the list is open; paused while hidden or a stop button is armed.
   if (!document.hidden && !document.querySelector(".armed")) {
-    try { state.siteJobs = (await api("/api/admin/jobs")).jobs; } catch (error) { toast(error.message); state.siteJobs = state.siteJobs || []; }
+    try { state.sitePeople = (await api("/api/admin/jobs")).people; } catch (error) { toast(error.message); state.sitePeople = state.sitePeople || []; }
     if (here()) repaint();
   }
   if (here()) siteTimer = setTimeout(loadSiteJobs, 5000);
@@ -434,7 +561,7 @@ const VIEWS = {
       body = `<div class="section"><h3>用户</h3><span class="aside">${users.length} 人</span></div>
         <div class="models">${users.map((u) => `<div class="model"><span class="avatar big">${esc(u.username.slice(0, 1).toUpperCase())}</span>
             <span class="m1"><b>${esc(u.username)}</b>${u.role === "admin" ? '<span class="pill blue">管理员</span>' : ""}${u.disabled ? '<span class="pill red">已停用</span>' : ""}<span class="pill">同时 ${u.job_limit} 个${u.max_jobs ? "（单独设置）" : ""}</span>
-            <small class="sans">${u.jobs?.some((j) => j.state !== "queued") ? "学习中" : u.jobs?.length ? "排队中" : u.last_login ? `上次在线 ${ago(u.last_login)}` : "还没登录过"}</small></span><span></span>
+            <small class="sans">${u.jobs?.some((j) => j.state === "running") ? "学习中" : u.jobs?.some((j) => j.state === "queued") ? "排队中" : u.jobs?.length ? "已暂停" : u.last_login ? `上次在线 ${ago(u.last_login)}` : "还没登录过"}</small></span><span></span>
             <span class="row_btns">${u.jobs?.length ? `<button class="btn small danger" data-stop-user="${u.id}" data-confirm="确认全部停止">停止全部任务</button>` : ""}
               <button class="btn small" data-row-edit="limit" data-uid="${u.id}" aria-pressed="${edit(u, "limit")}">任务上限</button>
               <button class="btn small" data-row-edit="password" data-uid="${u.id}" aria-pressed="${edit(u, "password")}">重置密码</button>
@@ -524,20 +651,16 @@ const VIEWS = {
     const head = `<h1 class="title">任务</h1>
       <p class="sub">${session.mode === "hosted" ? "在服务器上运行，关掉网页不影响" : "关掉网页不影响，关掉终端会停止"}</p>
       ${admin ? `<div class="tabs" role="tablist"><button class="tab" role="tab" aria-selected="${!all}" data-go="#/jobs">我的</button>
-        <button class="tab" role="tab" aria-selected="${all}" data-go="#/jobs/all">全站${state.siteJobs?.length ? `<span class="n">${state.siteJobs.length}</span>` : ""}</button></div>` : ""}`;
+        <button class="tab" role="tab" aria-selected="${all}" data-go="#/jobs/all">全站${siteCount() ? `<span class="n">${siteCount()}</span>` : ""}</button></div>` : ""}`;
     if (all) {
-      const list = state.siteJobs;
-      const running = (list || []).filter((j) => j.state === "running").length;
-      setPage(head + (list ? `<div class="section"><h3>运行中和排队</h3><span class="aside">${running} 运行中 · ${list.length - running} 排队</span></div>${siteJobRows(list)}` : `<div class="empty">正在读取…</div>`));
+      const people = state.sitePeople;
+      setPage(head + (!people ? `<div class="empty">正在读取…</div>` : !people.length ? `<div class="empty">现在没有任务在运行</div>`
+        : people.map((u) => `<div class="section"><h3>${esc(u.username)}</h3><span class="aside">${boardCount(u.jobs, u.limit)}</span></div>${board(u.jobs, u.limit, u.id)}`).join("")));
       return;
     }
     const open = new Set([...page.querySelectorAll(".run_lines:not([hidden])")].map((el) => el.dataset.lines));
-    const live = state.jobs.length ? `<div class="section"><h3>进行中</h3><span class="aside">上限 ${state.jobLimit} 个</span></div>
-      <div class="runs">${state.jobs.map((job) => { const run = runOf(job.id); return `<div class="run">${ICON.running}
-        <span class="t1">${esc(job.title)} · ${esc(job.course_name)}<small>${esc(platformOf(job.platform)?.short || "")} · ${esc(job.state === "queued" ? "排队中" : run.unit?.name || run.detail || "准备中…")}</small></span>
-        <span class="fix"><button class="btn small" data-open="${job.id}">查看</button><button class="btn small danger" data-stop="${job.id}" data-confirm="确认停止">停止</button></span>
-        <span class="state running">${job.state === "queued" ? "排队中" : progressBar(run)}</span>
-        <span class="when" data-elapsed="${job.id}">${duration(elapsed(job))}</span></div>`; }).join("")}</div>` : "";
+    const live = state.jobs.length ? `<div class="section"><h3>进行中</h3><span class="aside">${boardCount(state.jobs, state.jobLimit)}</span></div>
+      ${board(state.jobs, state.jobLimit)}` : "";
     const rows = state.history.map((j, i) => { const past = retried(j, i); return `<div class="run ${open.has(String(i)) ? "open" : ""} ${past ? "past" : ""}" data-history="${i}">${ICON[j.state] || ICON.stopped}
         <span class="t1">${esc(j.title)} · ${esc(j.course_name)}<small>${esc(platformOf(j.platform)?.short || "")} · ${esc(j.summary)}</small></span>
         <span class="fix">${past ? "" : fixButtons(j, i)}</span>
@@ -574,7 +697,7 @@ const VIEWS = {
       const last = state.history.find((j) => j.platform === p.id && j.course === c.id);
       const open = (state.papers[key(p.id, c.id)] || []).filter((x) => x.available && !x.done && !x.redo).length;
       // What is running and what is left to answer are separate facts: show both, never one hiding the other.
-      const status = job ? `<span class="live">${job.state === "queued" ? "排队中" : LIVE_WORD[job.title] || "进行中"}</span>`
+      const status = job ? `<span class="live">${WAIT_WORD[job.state] || LIVE_WORD[job.title] || "进行中"}</span>`
         : last?.state === "waiting" ? '<span class="live waiting">等你操作</span>' : "";
       const papers = open ? `<span class="todo">${open} 份未作答</span>` : state.paperErrors[key(p.id, c.id)] ? "试卷没读到" : "";
       const line = [status, papers].filter(Boolean).join('<span class="sep">·</span>') || (last ? `上次 ${ago(last.ended || last.started)}` : "还没学过");
@@ -1121,15 +1244,15 @@ function renderPlayer() {
   if (!job && !done) { player.hidden = true; return; }
   if (player.hidden) { player.hidden = false; player.classList.remove("enter"); void player.offsetWidth; player.classList.add("enter"); }
   if (job) {
-    const run = runOf(job.id), queued = job.state === "queued";
+    const run = runOf(job.id), waiting = WAIT_WORD[job.state];
     const { pct, label } = progressOf(run);
     const others = state.jobs.length - 1;
     player.style.setProperty("--c", inkOf({ id: job.course }));
     player.classList.remove("ended");
     patch(player, `
       <div class="np"><span class="art">${{ "AI 答题": ICON.pen, 每日复习: ICON.repeat, 问答区答题: ICON.chat, 问答区提问: ICON.chat }[job.title] || ICON.play}</span>
-        <span class="what"><small><span class="live">${queued ? "排队中" : LIVE_WORD[job.title] || "进行中"}</span>${esc(job.course_name)}</small>
-        <b>${esc(queued ? "排队中" : run.unit?.name || run.detail || "准备中…")}</b></span></div>
+        <span class="what"><small><span class="live">${waiting || LIVE_WORD[job.title] || "进行中"}</span>${esc(job.course_name)}</small>
+        <b>${esc(waiting || run.unit?.name || run.detail || "准备中…")}</b></span></div>
       <div class="scrub"><span class="track ${pct == null ? "unknown" : ""}"><i style="width:${pct ?? 0}%"></i></span><span class="t">${esc(label || clock(elapsed(job)))}</span></div>
       <div class="np_meta">${recentCells(key(job.platform, job.course))}
         ${others ? `<button class="btn" data-go="#/jobs" title="查看全部任务">另有 ${others} 个</button>` : ""}
@@ -1226,10 +1349,14 @@ function pushLine(run, text, level = "", done = false) {
   run.lines.length = Math.min(run.lines.length, 200);
 }
 
-function finishUnits(job) {
+// The unit a learning job was on is no longer being learned: it ended, or an administrator paused it or gave its slot away.
+function idleUnits(job) {
   if (!learns(job)) return;  // an answering job ending must not unmark the unit a study job is on
-  const k = key(job.platform, job.course);
-  for (const ch of unitsOf(k) || []) for (const u of ch.units) if (u.state === "running") u.state = job.state === "waiting" ? "waiting" : "queued";
+  for (const ch of unitsOf(key(job.platform, job.course)) || []) for (const u of ch.units) if (u.state === "running") u.state = job.state === "waiting" ? "waiting" : "queued";
+}
+
+function finishUnits(job) {
+  idleUnits(job);
   // The platform is the source of truth once the job is over; a waiting job keeps its marks until the user acts.
   if (job.state !== "waiting" && learns(job)) loadUnits(job.platform, job.course, true);
 }
@@ -1237,8 +1364,11 @@ function finishUnits(job) {
 function handleEvent(event) {
   if (event.type === "job") {
     const at = state.jobs.findIndex((j) => j.id === event.id);
-    if (event.state === "running" || event.state === "queued") {
-      if (at >= 0) state.jobs[at] = event;
+    if (event.state === "running" || WAIT_WORD[event.state]) {
+      if (at >= 0) {
+        if (state.jobs[at].state === "running" && event.state !== "running") { idleUnits(event); runOf(event.id).unit = null; }
+        state.jobs[at] = event;
+      }
       else {
         state.jobs.push(event);
         runOf(event.id);
@@ -1274,6 +1404,7 @@ function handleEvent(event) {
       if (u) u.state = event.status;
       if (u && event.status === "done") state.stamped = { id: u.id, at: Date.now() };
       if (event.status === "running") run.unit = { name: event.name, key: event.key };
+      else if (run.unit?.key === event.key) run.unit = null;  // mirrors _track: the bar then shows run.detail
     } else if (event.kind === "result") {
       if (run.overall) { run.overall.done += 1; run.sub = null; }
       pushLine(run, `${event.name} · ${STATUS[event.status] || event.status || ""}`, event.status === "error" || event.status === "ai_error" ? "error" : event.status === "waiting" ? "warn" : "", true);
@@ -1286,7 +1417,7 @@ function handleEvent(event) {
 
 let paintQueued = false, lastPaint = 0;
 function repaint() {
-  if (paintQueued) return;
+  if (paintQueued || drag) return;  // a drag repaints once it drops
   paintQueued = true;
   setTimeout(() => requestAnimationFrame(() => {
     paintQueued = false;
@@ -1490,6 +1621,7 @@ overlay.addEventListener("click", (event) => { if (event.target === overlay) clo
 
 document.addEventListener("click", (event) => {
   const t = event.target;
+  if (!t.closest("[data-job-menu]")) closeJobMenu();  // its items still act below: the hidden menu keeps them
   if (state.meOpen && !t.closest("[data-me]")) { state.meOpen = false; renderSidebar(); }
   if (t.closest("[data-me]")) { state.meOpen = !state.meOpen; renderSidebar(); return; }
   if (t.closest("[data-signout]")) { signOut(); return; }
@@ -1501,9 +1633,15 @@ document.addEventListener("click", (event) => {
   const open = t.closest("[data-open]"); if (open) { openSheet(open.dataset.open); return; }
   if (t.closest("[data-close]")) closeSheet();
   const stop = t.closest("[data-stop]"); if (stop) stopJob(stop.dataset.stop);
-  const siteStop = t.closest("[data-stop-job]");
-  if (siteStop) api(`/api/admin/users/${siteStop.dataset.stopJob.replace("/", "/jobs/")}/stop`, { method: "POST" })
-    .then(() => { toast("已发出停止指令"); loadSiteJobs(); }, (e) => toast(e.message));
+  const menuButton = t.closest("[data-job-menu]");
+  if (menuButton) { if (jobMenu.hidden || jobMenu.dataset.for !== menuButton.dataset.jobMenu) { openJobMenu(menuButton); jobMenu.dataset.for = menuButton.dataset.jobMenu; } else closeJobMenu(); }
+  const act = t.closest("[data-job-act]");
+  if (act) {
+    const { id, jobAct: action, to } = act.dataset, owner = act.dataset.owner ?? act.closest("[data-board]")?.dataset.owner ?? "";
+    jobAct(owner, id, action, to != null ? { to: Number(to) } : {});
+  }
+  const fold = t.closest("[data-paused-fold]");
+  if (fold) { const k = fold.dataset.pausedFold; state.pausedOpen.has(k) ? state.pausedOpen.delete(k) : state.pausedOpen.add(k); repaint(); }
   const focus = t.closest("[data-focus]"); if (focus) { state.focus = focus.dataset.focus; renderFocus(); renderPlayer(); }
   if (t.closest("[data-dismiss]")) { state.lastDone = null; repaint(); }
   const filter = t.closest("[data-filter]"); if (filter) { state.logFilter = filter.dataset.filter; renderFocus(); }
@@ -1520,6 +1658,7 @@ document.addEventListener("click", (event) => {
 
 window.addEventListener("keydown", (event) => {
   const mod = event.metaKey || event.ctrlKey;
+  if (event.key === "Escape" && !jobMenu.hidden) { closeJobMenu(); return; }
   if (overlay.classList.contains("open")) {
     if (event.key === "Escape" || (mod && event.key.toLowerCase() === "k")) { event.preventDefault(); closeFinder(); }
     else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -1567,6 +1706,9 @@ function route() {
   else go(homeOf(currentPlatform()));
 }
 window.addEventListener("hashchange", route);
+window.addEventListener("hashchange", closeJobMenu);
+scroller.addEventListener("scroll", closeJobMenu, { passive: true });
+window.addEventListener("resize", closeJobMenu);
 
 // The sign-in page's left half: a course grid quietly studying itself.
 function authGrid() {

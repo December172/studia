@@ -49,6 +49,8 @@ def task_availability(item, category, *, now=None):
     unavailable = item.get("_unavailable")
     if unavailable:
         return TaskAvailability(False, unavailable[0], unavailable[1])
+    if str(item.get("answerCount")) == "-1":  # the catalog's "no attempt left", for every category
+        return TaskAvailability(False, "次数用完", "已经交过，平台显示答题次数用完了。")
     server_label = {"-1": "未开始", "-2": "已截止"}.get(str(item.get("status")))
     if server_label:
         return TaskAvailability(False, server_label,
