@@ -215,6 +215,89 @@ class WebTaskTest(unittest.TestCase):
         self.assertEqual(caught.exception.status, 400)
 
 
+PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 16
+
+
+class FakeQrClient:
+    status = {"status": 1}
+    instances = []
+
+    def __init__(self):
+        self.session = Mock()
+        self.session.cookies.get_dict.return_value = {"UID": "1"}
+        self.closed = False
+        self.finished = False
+        FakeQrClient.instances.append(self)
+
+    def login_qr(self):
+        return ({"uuid": "u1", "enc": "e1"}, PNG)
+
+    def login_qr_status(self, token):
+        return dict(self.status)
+
+    def refresh_login_qr(self, token):
+        return ({"uuid": "u2", "enc": "e2"}, PNG)
+
+    def finish_qr_login(self, result=None):
+        self.finished = True
+
+    def close(self):
+        self.closed = True
+
+
+class WebQrLoginTest(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.store = SettingsStore(Path(temp.name) / "local")
+        FakeQrClient.instances.clear()
+
+    def start(self, api=FakeQrClient):
+        with patch.dict(PLATFORMS, {"cx": dict(PLATFORMS["cx"], api=api)}):
+            app = Studia(self.store, oauth=Mock(return_value=None))
+            started = app.login_start("cx")
+        return app, started
+
+    def test_qr_start_returns_an_image_and_confirm_saves_the_session(self):
+        app, started = self.start()
+        self.assertTrue(started["qr"].startswith("data:image/png;base64,"))
+        self.assertTrue(started["id"])
+        result = app.login_status("cx", started["id"])
+        self.assertEqual(result["status"], "done")
+        self.assertEqual(self.store.session("cx"), {"cookies": {"UID": "1"}})
+        self.assertTrue(FakeQrClient.instances[-1].finished)
+        self.assertTrue(app.logged_in(app.platforms["cx"]))
+
+    def test_expired_code_is_refreshed_without_restarting_the_scan(self):
+        class Expiring(FakeQrClient):
+            def login_qr_status(self, token):
+                return {"status": 2}
+
+        app, started = self.start(Expiring)
+        result = app.login_status("cx", started["id"])
+        self.assertEqual(result["status"], "refreshed")
+        self.assertIn("qr", result)
+        self.assertEqual(app.platforms["cx"].qr[started["id"]]["qr"], {"uuid": "u2", "enc": "e2"})
+
+    def test_cancel_message_reaches_the_page(self):
+        class Cancelled(FakeQrClient):
+            def login_qr_status(self, token):
+                return {"status": 3, "message": "这个账号需要手机二次验证"}
+
+        app, started = self.start(Cancelled)
+        result = app.login_status("cx", started["id"])
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("二次验证", result["message"])
+
+    def test_password_form_still_works_on_a_qr_platform(self):
+        app, _ = self.start()
+        with patch.dict(PLATFORMS, {"cx": dict(PLATFORMS["cx"], api=FakeChaoxingApi)}):
+            app.platforms["cx"].spec.update(api=FakeChaoxingApi)
+            result = app.login_start("cx", {"username": "13800000000", "password": "secret"})
+        self.assertEqual(result["status"], "done")
+        self.assertEqual(self.store.session("cx"), {"cookies": {"UID": "1", "fid": "2"}})
+
+
 class TerminalTest(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -243,8 +326,24 @@ class TerminalTest(unittest.TestCase):
         self.assertIs(client, api.return_value)
         self.assertEqual(rows, [CX_COURSE])
 
+    def test_qr_login_is_the_default(self):
+        view, output = make_view(["1"])
+        app = Application(view, self.store)
+        fresh = Mock()
+        fresh.course_list.return_value = [dict(CX_COURSE)]
+        fresh.session.cookies.get_dict.return_value = {"UID": "9"}
+        with patch("app.ChaoxingApi", return_value=fresh) as api, \
+                patch("app.cx_qr_login", return_value=True) as qr:
+            client, rows = app.cx_client_and_courses(choose=False)
+        api.assert_called_once_with()
+        qr.assert_called_once()
+        self.assertIs(client, fresh)
+        self.assertEqual(rows, [CX_COURSE])
+        self.assertEqual(self.store.session("cx"), {"cookies": {"UID": "9"}})
+        self.assertIn("扫码", output.getvalue())
+
     def test_expired_cookie_login_asks_for_the_password_again(self):
-        view, _ = make_view(["13800000000"])
+        view, _ = make_view(["2", "13800000000"])
         view.secret_fn = lambda _: "secret"
         app = Application(view, self.store)
         self.store.set("session_cx", {"cookies": {"UID": "1"}})

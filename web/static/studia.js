@@ -82,7 +82,7 @@ async function api(path, { method = "GET", body } = {}) {
 
 const state = {
   platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {}, earned: {}, qaDraft: {}, qaPosts: {}, qaOpen: new Set(),
-  jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, lastDone: null,
+  jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, loginMode: {}, lastDone: null,
   current: store.get("studia-platform", ""), meOpen: false, adminTab: "people", logFilter: "all", editPassword: false, adminEdit: null,
 };
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
@@ -175,6 +175,8 @@ function toggleTheme() {
 /* ---------------------------------------------------------------- sidebar */
 
 const INITIAL = { mooc: "M", cx: "超", zyk: "资", zhs: "智" };
+// 登录页要说清楚扫哪个 App；平台简称不一定就是 App 名。
+const APP_NAME = { mooc: "职教云", cx: "学习通", zyk: "资源库", zhs: "智慧树" };
 function currentPlatform() {
   return platformOf(state.current) || state.platforms.find((p) => p.logged_in) || state.platforms[state.platforms.length - 1];
 }
@@ -607,20 +609,27 @@ const VIEWS = {
     if (!p) return setPage(`<div class="empty">不支持这个平台</div>`);
     if (p.logged_in) return go(homeOf(p));
     const head = `<div class="crumb"><span class="dot ${pid}"></span>${esc(p.name)}</div><h1 class="title">登录${/^[A-Za-z]/.test(p.short) ? " " : ""}${esc(p.short)}</h1>`;
-    if (p.login === "qr") {
-      setPage(`${head}<p class="sub">用智慧树 App 扫码</p>
+    const app = APP_NAME[p.id] || p.name;
+    // 扫码平台可以再提供账号密码作为备用入口（超星：二次验证或扫码不方便时用）。
+    const password = p.login === "password" || (p.password && state.loginMode[p.id] === "password");
+    const toggle = (p.login === "qr" && p.password)
+      ? `<p class="sub"><button class="link" ${password ? "data-login-qr" : "data-login-password"}>${
+          password ? `用${esc(app)} App 扫码登录` : "改用账号密码登录"}</button></p>`
+      : "";
+    if (p.login === "qr" && !password) {
+      setPage(`${head}<p class="sub">用${esc(app)} App 扫码</p>
         <div class="login_card"><div class="qr"><div class="qr_empty">正在获取二维码…</div></div>
           <div class="login_status"><div data-status><b>等待扫码</b><p>二维码过期会自动刷新</p></div>
-            <button class="btn" data-start-login>刷新二维码</button></div></div>`);
+            <button class="btn" data-start-login>刷新二维码</button></div></div>${toggle}`);
       $("[data-start-login]", page).onclick = () => qrLogin(pid);
       qrLogin(pid);
-    } else if (p.login === "password") {
+    } else if (p.login === "password" || password) {
       setPage(`${head}<p class="sub">用${esc(p.name)}账号登录</p>
         <div class="login_card"><form class="auth_form" data-password-login>
           <label class="auth_field"><span>手机号 / 账号</span><input name="username" autocomplete="username" required autofocus></label>
           <label class="auth_field"><span>密码</span><input name="password" type="password" autocomplete="current-password" required></label>
           <div class="login_status"><div data-status><b>账号密码只用于登录</b><p>登录成功后只保存平台下发的 Cookie，不保存密码</p></div></div>
-          <button class="btn primary" data-start-login>登录</button></form></div>`);
+          <button class="btn primary" data-start-login>登录</button></form></div>${toggle}`);
       const form = $("[data-password-login]", page);
       form.onsubmit = (event) => { event.preventDefault(); passwordLogin(pid, form); };
     } else {
@@ -629,6 +638,10 @@ const VIEWS = {
           <button class="btn primary" data-start-login>打开登录页</button></div></div>`);
       $("[data-start-login]", page).onclick = () => browserLogin(pid);
     }
+    const toPassword = $("[data-login-password]", page);
+    if (toPassword) toPassword.onclick = () => { state.loginMode[p.id] = "password"; VIEWS.login(pid); };
+    const toQr = $("[data-login-qr]", page);
+    if (toQr) toQr.onclick = () => { state.loginMode[p.id] = "qr"; VIEWS.login(pid); };
   },
 
   course(pid, cid, tab) {
@@ -663,7 +676,7 @@ const VIEWS = {
         </div>` : "";
       setPage(`${head}${studia}<div class="section"><h3>平台账号</h3></div>
         <div class="models">${state.platforms.map((p) => `<div class="model"><span class="plat ${p.id}">${INITIAL[p.id]}</span>
-          <span class="m1"><b>${esc(p.name)}</b><small class="sans">${esc(platformStatus(p))} · ${p.login === "qr" ? "App 扫码登录" : p.login === "password" ? `${p.name}账号密码` : "职教云浏览器授权"}</small></span><span></span>
+          <span class="m1"><b>${esc(p.name)}</b><small class="sans">${esc(platformStatus(p))} · ${p.login === "qr" ? `${APP_NAME[p.id] || "App"} 扫码登录${p.password ? " / 账号密码" : ""}` : p.login === "password" ? `${p.name}账号密码` : "职教云浏览器授权"}</small></span><span></span>
           <span class="row_btns">${p.logged_in ? `<button class="btn small danger" data-logout="${p.id}" data-confirm="确认退出">退出</button>` : `<button class="btn small primary" data-go="#/login/${p.id}">登录</button>`}</span></div>`).join("")}</div>`);
       page.querySelectorAll("[data-logout]").forEach((el) => (el.onclick = async () => {
         try { await api(`/api/platforms/${el.dataset.logout}/logout`, { method: "POST" }); } catch (e) { toast(e.message); return; }

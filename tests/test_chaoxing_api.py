@@ -10,11 +10,13 @@ from ChaoxingMain.api import AES_KEY, ChaoxingApi, ChaoxingError, LoginError, Wo
 
 
 class FakeResponse:
-    def __init__(self, text="", status_code=200, url="https://mooc1.chaoxing.com/page", json_body=None):
+    def __init__(self, text="", status_code=200, url="https://mooc1.chaoxing.com/page",
+                 json_body=None, content=None):
         self.text = text
         self.status_code = status_code
         self.url = url
         self.json_body = json_body
+        self.content = content if content is not None else text.encode()
 
     def json(self):
         if self.json_body is None:
@@ -99,6 +101,98 @@ class LoginTest(unittest.TestCase):
 
         api = ChaoxingApi(cookies={"UID": "1"}, session=FakeSession(handler))
         self.assertTrue(api.logged_in)
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 16
+LOGIN_PAGE = ('<input type="hidden" value="u1" id="uuid"/>'
+              '<input type="hidden" id="enc" value="e1"/>')
+
+
+class QrLoginTest(unittest.TestCase):
+    def client(self, handler):
+        return ChaoxingApi(session=FakeSession(handler), sleep=lambda _: None)
+
+    def test_login_qr_reads_uuid_and_fetches_the_image(self):
+        seen = []
+
+        def handler(method, url, kwargs):
+            seen.append((method, url, kwargs))
+            if url.endswith("/login"):
+                return FakeResponse(LOGIN_PAGE)
+            if url.endswith("/createqr"):
+                return FakeResponse(content=PNG)
+            raise AssertionError(url)
+
+        token, image = self.client(handler).login_qr()
+        self.assertEqual(token, {"uuid": "u1", "enc": "e1"})
+        self.assertEqual(image, PNG)
+        self.assertEqual(seen[-1][2]["params"], {"uuid": "u1", "fid": -1})
+
+    def test_login_qr_without_parameters_is_reported(self):
+        with self.assertRaises(LoginError):
+            self.client(lambda *args: FakeResponse("<html>登录页</html>")).login_qr()
+
+    def status(self, payload):
+        seen = []
+
+        def handler(method, url, kwargs):
+            seen.append((method, url, kwargs))
+            return FakeResponse(json_body=payload)
+
+        result = self.client(handler).login_qr_status({"uuid": "u", "enc": "e"})
+        self.assertEqual(seen[0][1], "https://passport2.chaoxing.com/getauthstatus/v2")
+        self.assertEqual(seen[0][2]["data"]["enc"], "e")
+        return result
+
+    def test_status_mapping(self):
+        self.assertEqual(self.status({"status": True})["status"], 1)
+        self.assertEqual(self.status({"status": False, "type": "3"})["status"], -1)
+        self.assertEqual(self.status({"status": False, "type": 4, "nickname": "张三"}),
+                         {"status": 0, "nickname": "张三"})
+        self.assertEqual(self.status({"status": False, "type": "2"})["status"], 2)
+        self.assertEqual(self.status({"status": False, "type": "7", "mes": "二维码失效"})["status"], 2)
+        self.assertEqual(self.status({"status": False, "type": "6"})["status"], 3)
+        two_factor = self.status({"status": True, "containTwoFactorLogin": True})
+        self.assertEqual(two_factor["status"], 3)
+        self.assertIn("二次验证", two_factor["message"])
+
+    def test_refresh_gets_a_new_uuid_and_image(self):
+        seen = []
+
+        def handler(method, url, kwargs):
+            seen.append((method, url, kwargs))
+            if url.endswith("/refreshQRCode"):
+                return FakeResponse(json_body={"uuid": "u2", "enc": "e2"})
+            if url.endswith("/createqr"):
+                return FakeResponse(content=PNG)
+            raise AssertionError(url)
+
+        token, image = self.client(handler).refresh_login_qr({"uuid": "u", "enc": "e"})
+        self.assertEqual(token, {"uuid": "u2", "enc": "e2"})
+        self.assertEqual(image, PNG)
+        self.assertEqual(seen[0][1], "https://passport2.chaoxing.com/refreshQRCode")
+
+    def test_finish_visits_mooc_and_verifies_the_session(self):
+        urls = []
+
+        def handler(method, url, kwargs):
+            urls.append(url)
+            if url.startswith("https://i.mooc.chaoxing.com"):
+                return FakeResponse("<html>space</html>")
+            if "courselistdata" in url:
+                return FakeResponse("<html>courses</html>")
+            raise AssertionError(url)
+
+        api = self.client(handler)
+        api.finish_qr_login()
+        self.assertTrue(api.logged_in)
+        self.assertIn("https://i.mooc.chaoxing.com/space/index", urls)
+
+    def test_finish_reports_a_session_that_did_not_take(self):
+        api = self.client(lambda *args: FakeResponse(status_code=401))
+        with self.assertRaises(LoginError):
+            api.finish_qr_login()
+        self.assertFalse(api.logged_in)
 
 
 class RequestTest(unittest.TestCase):

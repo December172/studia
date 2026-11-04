@@ -4,7 +4,7 @@ const emit = (event) => listeners.forEach((listener) => listener(event));
 const platforms = [
   { id: "mooc", name: "MOOC", short: "MOOC", login: "browser", logged_in: true, features: { answer: true, review: false } },
   { id: "zhs", name: "智慧树", short: "智慧树", login: "qr", logged_in: true, features: { answer: true, review: true, qa: true } },
-  { id: "cx", name: "超星", short: "超星", login: "password", logged_in: true, features: { study: false, answer: true, review: false } },
+  { id: "cx", name: "超星", short: "超星", login: "qr", password: true, logged_in: true, features: { study: false, answer: true, review: false } },
 ];
 const courses = {
   mooc: [{ id: "m1", platform: "mooc", name: "大学英语（二）", type: "第 7 期开课", kind: "mooc", progress: 62 }, { id: "m2", platform: "mooc", name: "中外音乐与民族技艺实践", type: "第 3 期开课", kind: "mooc", progress: 100 }],
@@ -163,7 +163,10 @@ export async function request(path, method, body) {
     const p = platforms.find((x) => x.id === m[1]);
     if (method === "POST") {
       polls = 0;
-      if (p.login === "password") { p.logged_in = true; return { status: "done", message: "登录成功" }; }
+      if (p.login === "password" || (p.password && body && body.username)) {
+        p.logged_in = true;
+        return { status: "done", message: "登录成功" };
+      }
       return p.login === "qr" ? { id: "mock", qr: "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 29 29" shape-rendering="crispEdges"><rect width="29" height="29" fill="#fff"/><path d="M1 1h7v7H1zM21 1h7v7h-7zM1 21h7v7H1z" fill="none" stroke="#111"/><path d="M3 3h3v3H3zM23 3h3v3h-3zM3 23h3v3H3zM10 2h2v2h-2zM13 5h3v2h-3zM10 10h4v3h-4zM17 11h3v2h-3zM12 16h5v2h-5zM20 18h4v3h-4zM10 22h2v4h-2zM15 24h4v2h-4z" fill="#111"/></svg>') }
         : { status: "waiting", message: "已在浏览器打开职教云登录页" };
     }
