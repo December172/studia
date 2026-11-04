@@ -1274,6 +1274,7 @@ function handleEvent(event) {
       if (u) u.state = event.status;
       if (u && event.status === "done") state.stamped = { id: u.id, at: Date.now() };
       if (event.status === "running") run.unit = { name: event.name, key: event.key };
+      else if (run.unit?.key === event.key) run.unit = null;  // mirrors _track: the bar then shows run.detail
     } else if (event.kind === "result") {
       if (run.overall) { run.overall.done += 1; run.sub = null; }
       pushLine(run, `${event.name} · ${STATUS[event.status] || event.status || ""}`, event.status === "error" || event.status === "ai_error" ? "error" : event.status === "waiting" ? "warn" : "", true);
