@@ -67,7 +67,7 @@ class FakeClient:
     def empty_page(self, course, point_info):
         self.empty_pages.append(point_info["id"])
 
-    def study_video(self, course, job, *, speed=1.0, kind="Video", cancel_event=None):
+    def study_video(self, course, job, *, speed=1.0, kind="Video", cancel_event=None, job_info=None):
         with self.lock:
             self.video_calls.append((job["jobid"], kind))
             self.active_tasks += 1
@@ -79,7 +79,7 @@ class FakeClient:
             with self.lock:
                 self.active_tasks -= 1
 
-    def study_document(self, course, job):
+    def study_document(self, course, job, job_info=None):
         self.document_calls.append(job["jobid"])
         return "success"
 
@@ -174,6 +174,12 @@ class TaskTest(unittest.TestCase):
                              max_workers=2, sleep=lambda _: None)
         self.assertEqual(fake.course_points_calls, 0)
         self.assertEqual(fake.job_calls, [])
+
+    def test_skipped_non_task_video_does_not_fail_the_chapter(self):
+        fake, _, events = run([point("1")], {"1": [video("v1")]},
+                              video_results={("v1", "Video"): "skipped", ("v1", "Audio"): "skipped"})
+        self.assertEqual([event.status for event in events if event.kind == "result"], ["success"])
+        self.assertIn(("v1", "skipped"), [(event.key, event.status) for event in events if event.kind == "unit"])
 
     def test_document_and_read_use_the_client(self):
         jobs = {"1": [{"type": "document", "jobid": "d1", "name": "讲义"},

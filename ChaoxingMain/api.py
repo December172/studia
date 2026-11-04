@@ -7,6 +7,7 @@
 """
 import base64
 import hashlib
+import json
 import random
 import re
 import threading
@@ -57,7 +58,9 @@ VIDEO_HEADERS = {"Referer": "https://mooc1.chaoxing.com/ananas/modules/video/ind
 AUDIO_HEADERS = {"Referer": "https://mooc1.chaoxing.com/ananas/modules/audio/index_new.html?v=2025-0725-1842"}
 VIDEO_STATUS_URL = BASE_URL + "/ananas/status/%s"
 VIDEO_LOG_URL = BASE_URL + "/mooc-ans/multimedia/log/a/%s/%s"
-DOCUMENT_URL = BASE_URL + "/ananas/job/document"
+VIDEO_CUR_URL = BASE_URL + "/knowledge/getknowledgecurvideo"
+VIDEO_NEXT_URL = BASE_URL + "/knowledge/getnextknowledgevideo"
+DOCUMENT_URL = BASE_URL + "/mooc-ans/job/document"
 READ_URL = BASE_URL + "/ananas/job/readv2"
 EMPTY_PAGE_URL = BASE_URL + "/mooc-ans/mycourse/studentstudyAjax"
 # 上报视频进度时 enc 里的固定盐值，来自网页播放器。
@@ -68,12 +71,32 @@ def timestamp():
     return str(int(time.time() * 1000))
 
 
-def video_enc(clazz_id, jobid, objectid, playing_time, duration, userid):
-    """网页播放器上报进度用的 enc：md5("[课时][用户][任务][对象][毫秒播放][盐][毫秒时长][0_时长]")。"""
-    raw = "[%s][%s][%s][%s][%s][%s][%s][0_%s]" % (
+def video_enc(clazz_id, jobid, objectid, playing_time, duration, userid, clip_time=""):
+    """网页播放器上报进度用的 enc。
+
+    md5("[clazzId][uid][jobid][objectid][播放秒*1000][盐][时长秒*1000][clipTime]")；
+    clipTime 是老师截取的 vbegin_vend，普通视频才是 0_duration。
+    """
+    clip = clip_time or ("0_%d" % int(duration))
+    raw = "[%s][%s][%s][%s][%s][%s][%s][%s]" % (
         clazz_id, userid, jobid, objectid, int(playing_time) * 1000,
-        VIDEO_ENC_SALT, int(duration) * 1000, int(duration))
+        VIDEO_ENC_SALT, int(duration) * 1000, clip)
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def _flag_value(value):
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y")
+    return bool(value)
+
+
+def _format_rt(value):
+    """Java Double.toString 风格：整数值保留 .0（rt 是任务点要求的观看比例）。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "1.0"
+    return ("%.1f" % number) if number == int(number) else str(number)
 
 
 class ChaoxingError(RuntimeError):
@@ -335,6 +358,12 @@ class ChaoxingApi:
         except requests.RequestException as error:
             raise PlatformUnavailable("暂时无法连接超星平台：%s" % error) from None
 
+    def _json(self, response):
+        try:
+            return response.json()
+        except ValueError:
+            return None
+
     def _video_throttle(self):
         """上报进度很容易触发 403：和源码一样每次先随机停 0–2 秒，再保证 2 秒间隔。"""
         self.sleep(random.uniform(0, 2))
@@ -344,146 +373,287 @@ class ChaoxingApi:
                 self.sleep(wait)
             self._video_next = time.time() + self.VIDEO_LOG_INTERVAL
 
-    def video_status(self, job, kind="Video"):
-        """视频/音频的最新元数据（dtoken、duration、playTime）；失败返回 None。"""
+    def _video_object(self, payload):
+        """取视频 blob：{data|msg:{videoObject: json 字符串或对象}}。"""
+        if not isinstance(payload, dict):
+            return None
+        data = payload.get("data") or payload.get("msg")
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except ValueError:
+                data = None
+        if not isinstance(data, dict):
+            data = payload
+        blob = data.get("videoObject")
+        if isinstance(blob, str):
+            try:
+                blob = json.loads(blob)
+            except ValueError:
+                return None
+        return blob if isinstance(blob, dict) else None
+
+    def video_info(self, course, job, job_info=None, kind="Video"):
+        """视频任务点的完整播放信息。
+
+        优先取网页播放器实际使用的 ``knowledge/getknowledgecurvideo``（带 mid）或
+        ``getnextknowledgevideo``（带附件 id），里面有 reportUrl、fastforward、
+        vbegin/vend、rt、reportTimeInterval 等字段；取不到时退回 ananas/status
+        的旧数据（只有 dtoken/duration，按“允许拖动”处理）。
+        """
+        knowledge = str((job_info or {}).get("knowledgeid") or job.get("knowledgeid") or "")
+        blob = None
+        if job.get("mid"):
+            try:
+                response = self._request("post", VIDEO_CUR_URL, data={
+                    "courseid": course["courseId"], "clazzid": course["clazzId"],
+                    "knowledgeid": knowledge, "cpi": course["cpi"], "mid": job["mid"]})
+                blob = self._video_object(self._json(response))
+            except (ChaoxingError, PlatformUnavailable):
+                blob = None
+        if blob is None and job.get("aid"):
+            try:
+                response = self._request("get", VIDEO_NEXT_URL, params={
+                    "clazzId": course["clazzId"], "courseId": course["courseId"],
+                    "knowledgeId": knowledge, "cardId": str((job_info or {}).get("cardid") or ""),
+                    "cpi": course["cpi"], "attachmentId": str(job["aid"]), "isPhone": 1})
+                blob = self._video_object(self._json(response))
+            except (ChaoxingError, PlatformUnavailable):
+                blob = None
+        if blob:
+            info = self._normalize_video(blob, course, job)
+            if info["duration"] > 0 and info["reportUrl"]:
+                return info
+        return self._video_info_from_status(course, job, kind)
+
+    def _normalize_video(self, blob, course, job):
+        def number(key, default=0):
+            value = blob.get(key)
+            if value in (None, ""):
+                return default
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return default
+
+        duration = number("duration")
+        vbegin = number("vbegin")
+        vend = number("vend")
+        # 老师可能只截取视频的一段：clipTime 和完成位置都以截取窗口为准。
+        clip_end = vend if vend > 0 and (duration == 0 or vend < duration) else duration
+        clip_time = "0_%d" % duration if (vbegin < 0 or vend <= 0) else "%d_%d" % (vbegin, vend)
+        rt = blob.get("rt")
+        try:
+            rt = float(rt)
+        except (TypeError, ValueError):
+            rt = 0.0
+        return {
+            # blob 里 jobid 为空 = 非任务点视频（平台不记录完成），不要用卡片 jobid 顶替。
+            "jobid": str(blob.get("jobid") or blob.get("jobId") or ""),
+            "objectid": str(blob.get("objectid") or blob.get("objectId") or job.get("objectid") or ""),
+            "otherInfo": str(blob.get("otherInfo") or job.get("otherinfo") or ""),
+            "duration": duration,
+            "end": clip_end,
+            "vbegin": vbegin,
+            "vend": vend,
+            "clip_time": clip_time,
+            "playTime": number("playTime"),
+            "reportUrl": str(blob.get("reportUrl") or ""),
+            "fastforward": _flag_value(blob.get("fastforward")),
+            "rt": max(0.0, min(1.0, rt)),
+            "interval": number("reportTimeInterval", 60) or 60,
+            "clazzId": str(blob.get("clazzId") or blob.get("clazzid") or course["clazzId"]),
+            "cpi": str(blob.get("cpi") or course["cpi"]),
+            "attDuration": job.get("attDuration", ""),
+            "attDurationEnc": job.get("attDurationEnc", ""),
+            "videoFaceCaptureEnc": job.get("videoFaceCaptureEnc", ""),
+        }
+
+    def _video_status(self, job, kind="Video"):
         headers = VIDEO_HEADERS if kind == "Video" else AUDIO_HEADERS
         response = self._raw("get", VIDEO_STATUS_URL % job["objectid"],
                              params={"k": self.fid(), "flag": "normal"}, headers=headers)
         if response.status_code != 200:
             return None
-        try:
-            data = response.json()
-        except ValueError:
-            return None
+        data = self._json(response)
         return data if isinstance(data, dict) and data.get("status") == "success" else None
 
-    @staticmethod
-    def _passed(response):
+    def _video_info_from_status(self, course, job, kind="Video"):
+        """旧接口兜底：只有 dtoken/duration，没有 fastforward/clip 信息。"""
+        data = self._video_status(job, kind)
+        if data is None:
+            return None
         try:
-            return bool(response.json().get("isPassed"))
-        except (ValueError, AttributeError):
-            return False
-
-    def video_log(self, course, job, dtoken, duration, playing_time, kind="Video"):
-        """上报一次播放进度，返回 (isPassed, HTTP 状态码)；403 交给调用方决定是否重试。"""
-        self._video_throttle()
-        headers = VIDEO_HEADERS if kind == "Video" else AUDIO_HEADERS
-        params = {
-            "clazzId": course["clazzId"],
-            "playingTime": int(playing_time),
-            "duration": int(duration),
-            "clipTime": "0_%d" % int(duration),
-            "objectId": job["objectid"],
-            "otherInfo": job["otherinfo"],
-            "courseId": course["courseId"],
-            "jobid": job["jobid"],
-            "userid": self.user_id(),
-            "isdrag": "3",
-            "view": "pc",
-            "enc": video_enc(course["clazzId"], job["jobid"], job["objectid"],
-                             playing_time, duration, self.user_id()),
-            "dtype": kind,
+            duration = int(data.get("duration") or 0)
+            dtoken = data["dtoken"]
+        except (KeyError, TypeError, ValueError):
+            return None
+        if duration <= 0:
+            return None
+        fast = job.get("fastforward")
+        return {
+            "jobid": str(job["jobid"]), "objectid": str(job.get("objectid") or ""),
+            "otherInfo": str(job.get("otherinfo") or ""), "duration": duration,
+            "end": duration, "vbegin": 0, "vend": 0, "clip_time": "0_%d" % duration,
+            "playTime": int(job.get("playTime") or 0) // 1000,
+            "reportUrl": VIDEO_LOG_URL % (course["cpi"], dtoken),
+            "fastforward": True if fast is None else _flag_value(fast),
+            "rt": float(job.get("rt") or 0) or 0.0,
+            "interval": 60,
+            "clazzId": course["clazzId"], "cpi": course["cpi"],
+            "attDuration": job.get("attDuration", ""), "attDurationEnc": job.get("attDurationEnc", ""),
+            "videoFaceCaptureEnc": job.get("videoFaceCaptureEnc", ""),
         }
-        for key in ("videoFaceCaptureEnc", "attDuration", "attDurationEnc"):
-            if job.get(key):
-                params[key] = job[key]
-        url = VIDEO_LOG_URL % (course["cpi"], dtoken)
 
-        def send(rt):
-            params.update({"rt": rt, "_t": timestamp()})
-            return self._raw("get", url, params=dict(params), headers=headers)
+    def video_report(self, info, playing_time, isdrag, *, drag_from=None, kind="Video"):
+        """按网页播放器的格式上报一次进度，返回 (isPassed, HTTP 状态码)。
 
-        rt = job.get("rt") or ""
-        if not rt:
-            found = re.search(r"-rt_([1d])", job.get("otherinfo") or "")
-            if found:
-                rt = "0.9" if found.group(1) == "d" else "1"
-        if rt:
-            response = send(rt)
-            return self._passed(response), response.status_code
-        # 没有 rt 时两个值都试，和源码一致。
-        response = None
-        for candidate in ("0.9", "1"):
-            response = send(candidate)
-            if response.status_code == 200:
-                return self._passed(response), 200
-            if response.status_code != 403:
-                return False, response.status_code
-        return False, response.status_code if response is not None else 0
-
-    def study_video(self, course, job, *, speed=1.0, kind="Video", cancel_event=None):
-        """完成一个视频/音频任务点，返回 success / forbidden / error / cancelled。
-
-        先直接“拖到结尾”上报一次（isdrag=3）：平台允许拖拽的课程会立刻完成，不用等
-        真实播放时间；被拒绝时再按真实时间累计进度（speed 倍速），每 30–90 秒
-        （视频时间）上报一次，和源码的视频心跳一致。
+        isdrag：0=playing、1=drag（playingTime 为 from-to）、2=pause、3=start、
+        4=complete。enc 里的最后一段是 clipTime，不是固定的 0_duration。
         """
-        info = self.video_status(job, kind)
+        url = info.get("reportUrl") or ""
+        if not url:
+            return False, 0
+        self._video_throttle()
+        seconds = max(0, int(playing_time))
+        if isdrag == 1:
+            playing = "%d-%d" % (max(0, int(drag_from or 0)), seconds)
+        else:
+            playing = str(seconds)
+        clip = info["clip_time"]
+        params = {
+            "otherInfo": info["otherInfo"],
+            "playingTime": playing,
+            "duration": str(info["duration"]),
+            "akid": "null",
+            "jobid": info["jobid"],
+            "clipTime": clip,
+            "clazzId": info["clazzId"],
+            "objectId": info["objectid"],
+            "userid": self.user_id(),
+            "isdrag": str(isdrag),
+            "enc": video_enc(info["clazzId"], info["jobid"], info["objectid"],
+                             seconds, info["duration"], self.user_id(), clip),
+            "rt": _format_rt(info["rt"]),
+            "dtype": kind,
+            "view": "pc",
+        }
+        for key in ("attDuration", "attDurationEnc", "videoFaceCaptureEnc"):
+            if info.get(key):
+                params[key] = info[key]
+        headers = VIDEO_HEADERS if kind == "Video" else AUDIO_HEADERS
+        response = self._raw("get", url, params=params, headers=headers)
+        if response.status_code == 200:
+            data = self._json(response)
+            return bool(isinstance(data, dict) and data.get("isPassed")), 200
+        return False, response.status_code
+
+    def study_video(self, course, job, *, speed=1.0, kind="Video", cancel_event=None, job_info=None):
+        """完成一个视频/音频任务点，返回 success / skipped / forbidden / error / cancelled。
+
+        网页播放器的协议（flutter_chaoxing 的验证记录）：
+        - fastforward=true 时可以直接上报 isdrag=4（complete）到结尾，一步完成；
+        - fastforward=false 时不允许拖过已看位置，只能按真实时间播放，
+          期间用 isdrag=0（playing）心跳，最后再用 isdrag=4 收尾；
+        - 老师截取的片段（vbegin/vend）以截取结尾为完成位置，enc 里用对应的 clipTime。
+        """
+        info = self.video_info(course, job, job_info, kind)
         if info is None:
             return "error"
-        try:
-            dtoken = info["dtoken"]
-            duration = int(info.get("duration") or 0)
-        except (KeyError, TypeError, ValueError):
-            return "error"
-        if duration <= 0:
-            return "error"
-        play_time = int(job.get("playTime") or 0) // 1000
         name = job.get("name") or job["jobid"]
-        # 直接拖到结尾。允许拖拽的课程（不少课程/视频不要求真实观看时长）一步完成，
-        # 不必每个视频都按真实时间播放。
-        passed, _ = self.video_log(course, job, dtoken, duration, duration, kind)
-        if passed:
-            logger.info("%s：直接拖到结尾完成", name)
-            return "success"
-        # 拖拽被拒时补报当前进度（源码是先报当前再试结尾，这里先试结尾）。
-        if self.video_log(course, job, dtoken, duration, play_time, kind)[0]:
-            return "success"
-        logger.info("%s：平台不允许拖到结尾，按真实时间播放（%.0f 倍速）", name, speed)
-
-        last_log, last_iter = 0, time.time()
-        wait = random.randint(30, 90)
+        if not info["jobid"]:
+            logger.info("%s：不是任务点视频（没有 jobid），跳过", name)
+            return "skipped"
+        duration, end = info["duration"], info["end"]
+        if duration <= 0 or end <= 0:
+            return "error"
+        start = min(end, max(info["playTime"], info["vbegin"] if info["vbegin"] > 0 else 0))
+        play_time = float(start)
+        passed, state = False, 200
+        if info["fastforward"]:
+            # 允许拖动：先直接“看到结尾”，不行再模拟一次拖动后收尾。
+            passed, state = self.video_report(info, end, 4, kind=kind)
+            if not passed:
+                passed, state = self.video_report(info, end, 1, drag_from=int(play_time), kind=kind)
+                if not passed:
+                    passed, state = self.video_report(info, end, 4, kind=kind)
+            if passed:
+                logger.info("%s：直接跳到结尾完成", name)
+                return "success"
+            logger.info("%s：平台没有接受直接跳到结尾，按真实时间播放", name)
+        else:
+            logger.info("%s：视频不允许拖动（fastforward=false），按真实时间播放", name)
+        if cancel_event is not None and cancel_event.is_set():
+            return "cancelled"
+        self.video_report(info, play_time, 3, kind=kind)  # start
+        last_log = play_time
+        last_iter = time.time()
+        interval = max(1, info["interval"])
         forbidden = 0
-        try:
-            while not passed:
-                if cancel_event is not None and cancel_event.is_set():
-                    return "cancelled"
-                if play_time - last_log >= wait or play_time >= duration:
-                    passed, state = self.video_log(course, job, dtoken, duration, int(play_time), kind)
-                    if state == 403:
-                        if forbidden >= 2:
-                            logger.warning("%s：视频进度连续 403，跳过", job.get("name") or job["jobid"])
-                            return "forbidden"
-                        forbidden += 1
-                        self.sleep(random.uniform(2, 4))
-                        refreshed = self.video_status(job, kind)
-                        if refreshed is not None:
-                            dtoken = refreshed.get("dtoken", dtoken)
-                            duration = int(refreshed.get("duration") or duration)
-                            play_time = min(duration, int(refreshed.get("playTime") or 0) // 1000)
-                            last_iter = time.time()
-                            continue
-                    elif not passed and state != 200:
-                        return "error"
-                    wait, last_log = random.randint(30, 90), play_time
-                now = time.time()
-                play_time = min(duration, play_time + (now - last_iter) * speed)
-                last_iter = now
-                self.sleep(1)
-        except PlatformUnavailable:
-            raise
+        end_attempts = 0
+        while not passed:
+            if cancel_event is not None and cancel_event.is_set():
+                return "cancelled"
+            if play_time - last_log >= interval or play_time >= end:
+                passed, state = self.video_report(info, int(play_time), 0, kind=kind)  # playing
+                if state == 403:
+                    if forbidden >= 2:
+                        logger.warning("%s：视频进度连续 403，跳过", name)
+                        return "forbidden"
+                    forbidden += 1
+                    self.sleep(random.uniform(2, 4))
+                    refreshed = self.video_info(course, job, job_info, kind)
+                    if refreshed is not None:
+                        info = refreshed
+                        duration, end = info["duration"], info["end"]
+                        play_time = min(end, max(float(info["playTime"]), 0.0))
+                        last_log = play_time
+                        continue
+                elif not passed and state != 200:
+                    return "error"
+                last_log = play_time
+                if play_time >= end and not passed:
+                    end_attempts += 1
+                    if end_attempts > 5:
+                        logger.warning("%s：到达结尾多次仍未确认完成，跳过", name)
+                        return "forbidden"
+                    passed, state = self.video_report(info, end, 4, kind=kind)  # complete
+                    if passed:
+                        break
+                    self.sleep(2)
+            now = time.time()
+            play_time = min(end, play_time + (now - last_iter) * speed)
+            last_iter = now
+            self.sleep(1)
+        logger.info("%s：播放完成", name)
         return "success"
 
-    def study_document(self, course, job):
+    def study_document(self, course, job, job_info=None):
+        """完成文档/PPT/PDF 任务点：和网页 H5 阅读器一样打一次 mooc-ans/job/document。
+
+        文档任务不需要像视频那样等时长，平台通常收到这次上报就直接标记完成；
+        少数卡片的 otherInfo 里没有 nodeId，退回本章的 knowledgeid。
+        """
         found = re.findall(r"nodeId_(.*?)-", job.get("otherinfo") or "")
-        if not found:
-            logger.warning("%s：文档任务缺少 knowledgeid", job.get("name") or job["jobid"])
+        knowledge = found[0] if found else str((job_info or {}).get("knowledgeid") or "")
+        if not knowledge:
+            logger.warning("%s：文档任务缺少 knowledgeid，无法标记完成", job.get("name") or job["jobid"])
             return "error"
-        self._request("get", DOCUMENT_URL, params={
-            "jobid": job["jobid"], "knowledgeid": found[0],
+        # flutter_chaoxing 验证过的 H5 文档阅读完成 ping：mooc-ans/job/document，
+        # 比旧版的 ananas/job/document 多了 checkMicroTopic / courseEngineInfo 参数。
+        response = self._request("get", DOCUMENT_URL, params={
+            "jobid": job["jobid"], "knowledgeid": knowledge,
             "courseid": course["courseId"], "clazzid": course["clazzId"],
-            "jtoken": job.get("jtoken", ""), "_dc": timestamp(),
+            "jtoken": job.get("jtoken", ""), "checkMicroTopic": "true",
+            "microTopicId": "undefined", "courseEngineInfo": "false",
         })
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict) and payload.get("status") is False:
+            logger.warning("%s：平台未确认文档完成：%s", job.get("name") or job["jobid"], payload.get("msg") or "")
+            return "error"
         return "success"
 
     def study_read(self, course, job, job_info):

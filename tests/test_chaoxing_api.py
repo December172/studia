@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import unittest
 
 from Crypto.Cipher import AES
@@ -277,53 +278,100 @@ class CatalogTest(unittest.TestCase):
 
 
 VIDEO_JOB = {"type": "video", "jobid": "work-v", "name": "视频1", "objectid": "obj",
-             "otherinfo": "nodeId_123-a", "playTime": 5000, "rt": "0.9",
-             "attDuration": "", "attDurationEnc": "", "videoFaceCaptureEnc": ""}
+             "otherinfo": "nodeId_123-a", "mid": "m1", "aid": "a1", "playTime": 30000,
+             "rt": "0.9"}
+JOB_INFO = {"knowledgeid": "123"}
+VIDEO_BLOB = {
+    "type": "video", "videoName": "视频1", "duration": 600, "otherInfo": "nodeId_123-a",
+    "objectid": "obj", "jobid": "work-v", "fastforward": True, "vbegin": 10, "vend": 590,
+    "playTime": 30, "reportTimeInterval": 15,
+    "reportUrl": "https://mooc1.chaoxing.com/mooc-ans/multimedia/log/a/333/dt",
+    "knowledgeid": "123", "courseid": "111", "clazzId": "222", "mid": "m1", "rt": 0.9,
+    "cpi": "333", "aid": "a1",
+}
 
 
 class LearningApiTest(unittest.TestCase):
-    def test_video_enc_matches_the_platform_formula(self):
-        raw = "[222][99][work-1][obj][120000][d_yHJ!$pdA~5][600000][0_600]"
-        self.assertEqual(video_enc(222, "work-1", "obj", 120, 600, 99),
+    def client(self, handler):
+        return ChaoxingApi(cookies={"UID": "99", "fid": "7"}, session=FakeSession(handler), sleep=lambda _: None)
+
+    def blob_client(self, blob, reports, passed=lambda count, params: count >= 1):
+        def handler(method, url, kwargs):
+            if "getknowledgecurvideo" in url:
+                self.assertEqual(kwargs["data"]["mid"], "m1")
+                return FakeResponse(json_body={"data": {"videoObject": json.dumps(blob)}})
+            reports.append(kwargs["params"])
+            return FakeResponse(json_body={"isPassed": bool(passed(len(reports), kwargs["params"]))})
+
+        return self.client(handler)
+
+    def test_video_enc_uses_the_clip_time(self):
+        raw = "[222][99][work-v][obj][600000][d_yHJ!$pdA~5][600000][10_590]"
+        self.assertEqual(video_enc(222, "work-v", "obj", 600, 600, 99, "10_590"),
                          hashlib.md5(raw.encode()).hexdigest())
 
-    def test_video_tries_dragging_to_the_end_first(self):
-        seen = []
-        state = {"logs": 0}
+    def test_video_info_reads_the_player_blob(self):
+        api = self.blob_client(VIDEO_BLOB, [])
+        info = api.video_info(COURSE, VIDEO_JOB, JOB_INFO)
+        self.assertEqual(info["duration"], 600)
+        self.assertEqual(info["end"], 590)              # 老师截取的结尾
+        self.assertEqual(info["clip_time"], "10_590")
+        self.assertTrue(info["fastforward"])
+        self.assertEqual(info["rt"], 0.9)
+        self.assertEqual(info["interval"], 15)
+        self.assertEqual(info["playTime"], 30)
+        self.assertEqual(info["reportUrl"], VIDEO_BLOB["reportUrl"])
+
+    def test_fastforward_video_completes_with_one_complete_report(self):
+        reports = []
+        api = self.blob_client(VIDEO_BLOB, reports)
+        self.assertEqual(api.study_video(COURSE, VIDEO_JOB, job_info=JOB_INFO), "success")
+        self.assertEqual(len(reports), 1)
+        report = reports[0]
+        self.assertEqual(report["isdrag"], "4")          # complete
+        self.assertEqual(report["playingTime"], "590")
+        self.assertEqual(report["clipTime"], "10_590")
+        self.assertEqual(report["rt"], "0.9")
+        self.assertEqual(report["view"], "pc")
+        self.assertEqual(report["enc"], video_enc(222, "work-v", "obj", 590, 600, "99", "10_590"))
+
+    def test_rejected_completion_falls_back_to_drag_then_complete(self):
+        reports = []
+        api = self.blob_client(VIDEO_BLOB, reports, passed=lambda count, params: count >= 3)
+        self.assertEqual(api.study_video(COURSE, VIDEO_JOB, job_info=JOB_INFO), "success")
+        self.assertEqual([report["isdrag"] for report in reports], ["4", "1", "4"])
+        self.assertEqual(reports[1]["playingTime"], "30-590")  # drag 是 from-to
+        self.assertEqual(reports[2]["playingTime"], "590")
+
+    def test_video_without_fastforward_reports_start_playing_complete(self):
+        blob = dict(VIDEO_BLOB, fastforward=False, playTime=600, vend=0, vbegin=0)
+        reports = []
+        api = self.blob_client(blob, reports, passed=lambda count, params: params["isdrag"] == "4")
+        self.assertEqual(api.study_video(COURSE, VIDEO_JOB, job_info=JOB_INFO), "success")
+        self.assertEqual([report["isdrag"] for report in reports], ["3", "0", "4"])
+        self.assertEqual(reports[-1]["playingTime"], "600")
+
+    def test_non_task_video_is_skipped(self):
+        blob = dict(VIDEO_BLOB, jobid="")
+        reports = []
+        api = self.blob_client(blob, reports)
+        self.assertEqual(api.study_video(COURSE, VIDEO_JOB, job_info=JOB_INFO), "skipped")
+        self.assertEqual(reports, [])
+
+    def test_video_without_mid_uses_the_status_endpoint(self):
+        job = {key: value for key, value in VIDEO_JOB.items() if key != "mid"}
+        calls = []
 
         def handler(method, url, kwargs):
-            seen.append((url, kwargs))
-            if "/ananas/status/" in url:
-                return FakeResponse(json_body={"status": "success", "dtoken": "dt", "duration": 600})
-            state["logs"] += 1
-            return FakeResponse(json_body={"isPassed": state["logs"] >= 2})
+            calls.append((url, kwargs))
+            return FakeResponse(json_body={"status": "success", "dtoken": "dt", "duration": 600})
 
-        api = ChaoxingApi(cookies={"UID": "99", "fid": "7"}, session=FakeSession(handler), sleep=lambda _: None)
-        self.assertEqual(api.study_video(COURSE, VIDEO_JOB, speed=1), "success")
-        logs = [kwargs for url, kwargs in seen if "/multimedia/log/" in url]
-        self.assertEqual(len(logs), 2)
-        drag, current = logs[0]["params"], logs[1]["params"]
-        self.assertEqual(drag["playingTime"], 600)     # 先尝试直接拖到结尾
-        self.assertEqual(current["playingTime"], 5)    # 拖拽被拒后补报当前进度
-        self.assertEqual(drag["userid"], "99")
-        self.assertEqual(drag["rt"], "0.9")
-        self.assertEqual(drag["dtype"], "Video")
-        self.assertEqual(drag["enc"], video_enc(222, "work-v", "obj", 600, 600, "99"))
-
-    def test_video_that_allows_dragging_finishes_in_one_report(self):
-        seen = []
-
-        def handler(method, url, kwargs):
-            seen.append((url, kwargs))
-            if "/ananas/status/" in url:
-                return FakeResponse(json_body={"status": "success", "dtoken": "dt", "duration": 600})
-            return FakeResponse(json_body={"isPassed": True})
-
-        api = ChaoxingApi(cookies={"UID": "99", "fid": "7"}, session=FakeSession(handler), sleep=lambda _: None)
-        self.assertEqual(api.study_video(COURSE, VIDEO_JOB, speed=1), "success")
-        logs = [kwargs for url, kwargs in seen if "/multimedia/log/" in url]
-        self.assertEqual(len(logs), 1)                  # 不再补报当前进度，也不等待
-        self.assertEqual(logs[0]["params"]["playingTime"], 600)
+        api = self.client(handler)
+        info = api.video_info(COURSE, job, JOB_INFO)
+        self.assertTrue(any("/knowledge/getnextknowledgevideo" in url for url, _ in calls))
+        self.assertTrue(any("/ananas/status/obj" in url for url, _ in calls))
+        self.assertEqual(info["duration"], 600)
+        self.assertTrue(info["reportUrl"].endswith("/multimedia/log/a/333/dt"))
 
     def test_document_read_and_empty_page(self):
         seen = []
@@ -332,11 +380,15 @@ class LearningApiTest(unittest.TestCase):
             seen.append((url, kwargs))
             return FakeResponse("{}")
 
-        api = ChaoxingApi(cookies={"UID": "1"}, session=FakeSession(handler), sleep=lambda _: None)
+        api = self.client(handler)
         self.assertEqual(api.study_document(COURSE, {"jobid": "d1", "otherinfo": "nodeId_123-rt_1"}), "success")
-        self.assertIn("/ananas/job/document", seen[-1][0])
-        self.assertEqual(seen[-1][1]["params"]["knowledgeid"], "123")
-        self.assertEqual(seen[-1][1]["params"]["courseid"], "111")
+        self.assertIn("/mooc-ans/job/document", seen[-1][0])
+        params = seen[-1][1]["params"]
+        self.assertEqual(params["knowledgeid"], "123")
+        self.assertEqual(params["courseid"], "111")
+        self.assertEqual(params["checkMicroTopic"], "true")
+        self.assertEqual(params["microTopicId"], "undefined")
+        self.assertEqual(params["courseEngineInfo"], "false")
         self.assertEqual(api.study_read(COURSE, {"jobid": "r1", "jtoken": "jt"}, {"knowledgeid": "123"}), "success")
         self.assertIn("/ananas/job/readv2", seen[-1][0])
         self.assertEqual(seen[-1][1]["params"]["jtoken"], "jt")
@@ -345,9 +397,25 @@ class LearningApiTest(unittest.TestCase):
         self.assertEqual(seen[-1][1]["params"]["chapterId"], "p1")
 
     def test_document_without_knowledgeid_is_an_error(self):
-        api = ChaoxingApi(cookies={"UID": "1"}, session=FakeSession(lambda *a: FakeResponse("{}")),
-                          sleep=lambda _: None)
+        api = self.client(lambda *a: FakeResponse("{}"))
         self.assertEqual(api.study_document(COURSE, {"jobid": "d1", "otherinfo": ""}), "error")
+
+    def test_document_falls_back_to_the_chapter_knowledgeid(self):
+        seen = []
+
+        def handler(method, url, kwargs):
+            seen.append(kwargs["params"])
+            return FakeResponse(json_body={"status": True})
+
+        api = self.client(handler)
+        self.assertEqual(api.study_document(COURSE, {"jobid": "d1", "otherinfo": ""},
+                                            {"knowledgeid": "123"}), "success")
+        self.assertEqual(seen[0]["knowledgeid"], "123")
+
+    def test_document_rejected_by_the_platform_is_an_error(self):
+        api = self.client(lambda *a: FakeResponse(json_body={"status": False, "msg": "已过期"}))
+        self.assertEqual(api.study_document(COURSE, {"jobid": "d1", "otherinfo": "nodeId_123-x"},
+                                            {"knowledgeid": "123"}), "error")
 
 
 class WorkTest(unittest.TestCase):

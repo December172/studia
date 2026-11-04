@@ -161,7 +161,7 @@ class ChaoxingStudyHandler:
                            [pool.submit(self.process_task, course, job, job_info) for job in tasks]]
         if self.cancel_event.is_set() or "cancelled" in results:
             return "cancelled"
-        return "success" if all(result == "success" for result in results) else "error"
+        return "success" if all(result in ("success", "skipped") for result in results) else "error"
 
     # ------------------------------------------------------------------ 任务点
 
@@ -189,16 +189,19 @@ class ChaoxingStudyHandler:
     def _run_task(self, course, job, job_info):
         kind = job["type"]
         if kind == "video":
-            result = self.client.study_video(course, job, speed=self.speed, cancel_event=self.cancel_event)
+            result = self.client.study_video(course, job, speed=self.speed, cancel_event=self.cancel_event,
+                                             job_info=job_info)
+            if result == "skipped":
+                return result  # 非任务点视频，不用再试音频
             if result not in ("success", "cancelled"):
                 # 源码在视频失败后再试一次音频：有些任务点实际是音频，解码字段一样。
                 audio = self.client.study_video(course, job, speed=self.speed, kind="Audio",
-                                                cancel_event=self.cancel_event)
+                                                cancel_event=self.cancel_event, job_info=job_info)
                 if audio in ("success", "cancelled") or result == "forbidden":
                     result = audio
             return result
         if kind == "document":
-            return self.client.study_document(course, job)
+            return self.client.study_document(course, job, job_info)
         if kind == "read":
             return self.client.study_read(course, job, job_info)
         return "skipped"
