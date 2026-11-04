@@ -5,6 +5,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+from ai.client import AIResponseError
 from settings import SettingsStore
 from web.server import JOBS, HttpError, Studia, _ask_texts, _Board, drain
 
@@ -91,6 +92,29 @@ class WebQaTest(unittest.TestCase):
         self.assertNotIn("回答很多的提问", prompt)
         self.assertEqual(bridge.call_count, 1)  # the board is read once, not per question
         self.assertFalse(JOBS)
+
+    def test_draft_retries_a_broken_model_answer(self):
+        ai = Mock()
+        ai.answer = Mock(side_effect=[AIResponseError("AI 响应不是完整的答案 JSON"),
+                                      {"answer": "边缘计算会不会取代云计算？", "explanation": "换个方向"}])
+        self.app._ai = Mock(return_value=ai)
+        with patch("web.server.QaBridge", return_value=FakeBridge()), \
+                patch("ZHSMain.qa.time.sleep"):
+            result = self.app.qa_draft("zhs", {"course": "shared-1000091138"})
+        self.assertEqual(result["questions"], ["边缘计算会不会取代云计算？"])
+        self.assertEqual(ai.answer.call_count, 2)
+
+    def test_draft_failure_is_reported_instead_of_raising_a_traceback(self):
+        ai = Mock(answer=Mock(side_effect=AIResponseError(
+            "AI 响应不是完整的答案 JSON；本题未作答（finish_reason=length）")))
+        self.app._ai = Mock(return_value=ai)
+        with patch("web.server.QaBridge", return_value=FakeBridge()), \
+                patch("ZHSMain.qa.time.sleep"):
+            with self.assertRaises(HttpError) as caught:
+                self.app.qa_draft("zhs", {"course": "shared-1000091138"})
+        self.assertEqual(caught.exception.status, 502)
+        self.assertIn("没写出可用的提问", str(caught.exception))
+        self.assertIn("finish_reason=length", str(caught.exception))
 
     def test_drafting_waits_for_slow_models_without_testing_first(self):
         config = Mock(timeout=120, api_format="chat_completions")
