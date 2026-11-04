@@ -16,7 +16,8 @@ from AIMoocMain.activities import CourseActivities
 from base.util import parse_duration, get_mp3_duration
 
 # 作业、考试、测验在答题里做；子节点和文件夹无法展开。
-SKIPPED_TYPES = ("作业", "考试", "测验", "子节点", "文件夹")
+ANSWERED_TYPES = ("作业", "考试", "测验")
+SKIPPED_TYPES = ANSWERED_TYPES + ("子节点", "文件夹")
 
 
 def course_units(client, course):
@@ -35,11 +36,14 @@ def course_units(client, course):
         for node in nodes:
             yield from leaves(node["children"]) if node.get("children") else (node,)
 
-    return [{"name": chapter.get("name") or "未命名章节", "units": [{
+    # 测验、考试在「答题」里，不是学习单元：不画进格子，只剩它们的章节（期末考试）整章不要。
+    chapters = [{"name": chapter.get("name") or "未命名章节", "units": [{
         "id": str(node.get("id")), "name": node.get("name") or "资源", "kind": node.get("fileType") or "",
         "state": "done" if node.get("id") in done else
                  "skipped" if node.get("fileType") in SKIPPED_TYPES else "queued",
-    } for node in leaves(chapter_cells)]} for chapter, chapter_cells in zip(design, cells)]
+    } for node in leaves(chapter_cells) if node.get("fileType") not in ANSWERED_TYPES]}
+        for chapter, chapter_cells in zip(design, cells)]
+    return [chapter for chapter in chapters if chapter["units"]]
 
 
 class AIMoocHandler:
@@ -142,6 +146,8 @@ class AIMoocHandler:
         if self.activities is None or self.cancel_event.is_set():
             return
         course_name = course.get("courseName", "未知课程")
+        # 资源都处理完了；不说一声，页面会一直停在最后一项资源上，像是卡住了。
+        self.progress.detail("课程讨论和评价 · " + course_name)
         try:
             summary = self.activities.run_course(course)
         except (AuthenticationExpired, RequestRateLimited):
