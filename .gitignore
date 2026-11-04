@@ -151,8 +151,6 @@ ai_results/
 env/
 venv/
 ENV/
-env.bak/
-venv.bak/
 
 # Spyder project settings
 .spyderproject
@@ -177,23 +175,12 @@ dmypy.json
 
 tiku/
 
-# 本地课程结构导出与 Git 历史备份
-/exports/
-*.bundle
-
 # 本机登录与模型配置（默认存放在仓库外）
 settings.json
-.settings-*
 
 # 本机 Claude/DeepSeek 分工配置
 CLAUDE.local.md
 .claude/ds
-
-# 服务器数据卷的备份包（含账号数据，不进仓库）
-studia-data-*.tgz
-
-# 本地构建/端口覆盖，不提交（compose 会自动加载）
-docker-compose.override.yml
 
 # 私人部署记录与服务器账号数据
 /docs/DOCKER_OPS.md
