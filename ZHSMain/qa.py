@@ -219,8 +219,12 @@ class QaBridge:
 
 def answer_questions(qa, ai, *, max_answers=1, limit=10, interval=60, state_path=None,
                      should_stop=lambda: False, on_event=lambda kind, name, status="": None,
-                     sleep=time.sleep):
-    """取题 → AI 生成 → 发布，返回统计。ctx 只需 questions/publish 两个方法，便于测试替身。"""
+                     sleep=time.sleep, voice=None):
+    """取题 → AI 生成 → 发布，返回统计。ctx 只需 questions/publish 两个方法，便于测试替身。
+
+    voice 是这个账号固定的说话风格（REPLY_VOICES 的序号）；同一账号每次都像同一个人，不同账号各不一样。
+    """
+    voice = random.randrange(len(REPLY_VOICES)) if voice is None else voice
     seen = set()
     if state_path:
         try:
@@ -238,12 +242,8 @@ def answer_questions(qa, ai, *, max_answers=1, limit=10, interval=60, state_path
             break
         title = item["content"]
         try:
-            answer = ai.answer({"type": "问答题", "title": title}).get("answer")
-            # 规则：回答开头不要加「答案：」「回答：」这类词。
-            answer = re.sub(r"^\s*(?:答案|回答|答)\s*[:：]\s*", "", answer) if isinstance(answer, str) else answer
-            if not isinstance(answer, str) or len(answer.strip()) < 30:
-                raise ValueError("AI 回答为空或过短")
-            answer_id = qa.publish(item["id"], answer.strip()[:1000])
+            answer = write_reply(ai, title, seen=item.get("seen") or (), voice=voice)
+            answer_id = qa.publish(item["id"], answer)
         except CaptchaRequired:
             raise
         except Exception as exc:  # 单题失败不影响队列，与 ai/runner.py 的做法一致
@@ -268,6 +268,66 @@ def answer_questions(qa, ai, *, max_answers=1, limit=10, interval=60, state_path
     return stats
 
 
+# 回答写得像同学在论坛随手回的，不像教材：答题用的系统提示会写出「1. 2. 3.」分点、
+# 「主要体现在以下几个方面」的套话；所有账号用同一套写法，一个帖子下面就全是一个味。
+REPLY_RULES = (
+    "你是同班同学，在课程问答区回这条提问。只写回复正文：一段话，不分点、不编号、不换行，"
+    "不用冒号列清单；不要「首先」「其次」「最后」「综上所述」「总之」「主要体现在」「以下几个方面」"
+    "「具有重要意义」这类套话；不要复述提问，不要称呼，不要以「答：」开头；"
+    "说人话，像在论坛里随手回的，可以带点口语，可以有自己的看法。"
+)
+# 每个账号固定一种说话风格：(风格, 最少字数, 最多字数)。
+REPLY_VOICES = (
+    ("话少，一两句说完，不展开", 20, 50),
+    ("爱举身边的例子，语气随和，偶尔用「其实」「比如」", 45, 100),
+    ("说话直接，先亮出自己的判断，会说「我觉得」", 35, 80),
+    ("比较认真，把一个原因讲透，但不分点", 60, 120),
+    ("从自己的经历或见过的事说起，像在聊天", 40, 90),
+)
+# 每条回答随机换一个角度，同一个人答不同的帖子也不是一个模子。
+REPLY_ANGLES = ("举一个生活里或身边的具体例子", "先说自己的看法，再给一个理由", "补充一个别人容易忽略的地方",
+                "说说实际可以怎么做", "说一点和常见说法不太一样的看法", "联系课上讲过的内容说一句")
+REPLY_CLICHES = ("首先", "其次", "最后", "综上", "总之", "总而言之", "主要体现在", "以下几个", "以下几点",
+                 "具有重要意义", "至关重要", "不可或缺", "赋能", "助力", "此外", "与此同时", "值得注意的是",
+                 "一方面", "另一方面")
+LIST_MARK = re.compile(r"(?:^|[：:；;。，,\s])[（(]?(?:[1-9]|[一二三四五六七八九])[)）.、．]")
+
+
+def reply_flaw(text, most):
+    """像 AI 写的地方：分点编号、套话、太长；没有返回 None。"""
+    if "\n" in text or LIST_MARK.search(text):
+        return "不要分点编号，写成一段话"
+    for cliche in REPLY_CLICHES:
+        if cliche in text:
+            return "别用「%s」这种套话" % cliche
+    if len(text) > most * 1.5 + 20:
+        return "太长了，压到 %d 个字以内" % most
+    if len(text) < 10:
+        return "太短了"
+    return None
+
+
+def write_reply(ai, question, *, seen=(), voice=0, rng=random):
+    """以同学的口吻回一条：这个账号的说话风格，加上随机一个角度；seen 是这个帖子下已有的回答，
+    让模型换个说法，别和它们一个味。不合格带着原因重写，最多三次。"""
+    style, least, most = REPLY_VOICES[voice % len(REPLY_VOICES)]
+    context = "%s\n这次的写法：%s；说话风格：%s；%d 到 %d 个字。" % (
+        REPLY_RULES, rng.choice(REPLY_ANGLES), style, least, most)
+    seen = [str(text).strip()[:80] for text in seen if str(text).strip()][:3]
+    if seen:
+        context += "\n下面已经有人这样回了，换个角度说，别用他们的说法和用词：\n" + "\n".join("- " + text for text in seen)
+    redo = ""
+    for _ in range(3):
+        answer = ai.answer({"type": "问答题", "title": question, "context": context + redo}).get("answer")
+        text = re.sub(r"^\s*(?:答案|回答|答)\s*[:：]\s*", "", " ".join(str(answer or "").split())).strip("\"'“”")
+        flaw = reply_flaw(text, most)
+        if flaw is None:
+            return text
+        logger.info("AI 的回答不像同学写的（%s），重写", flaw)
+        redo = "\n上一次写的不合格：%s。重写。" % flaw
+    raise ValueError("AI 的回答三次都像 AI 写的：%s" % flaw)
+
+
 # 智慧树问答规则（wiki-wenda.zhihuishu.com「问答规则」）：有效提问每条 5 分、最多 10 条；
 # 有效回答每条 2 分、最多 20 条；自己的提问下有 5 个有效回答再 1 分、最多 10 条；
 # 合计再乘课程互动分占比。数据次日上午更新。封顶以后再发不加分，只多一分被判刷帖的风险。
@@ -277,14 +337,20 @@ DAILY_QUESTIONS, DAILY_ANSWERS = 5, 10
 
 # 让模型的「问答题」能力产出提问正文：它只需把问题写成答案，答卷格式不变。
 QUESTION_RULES = (
-    "要求：只输出提问本身，一句话，20 到 60 个字，以一个问号结尾，中间不要再出现问号；"
-    "结合这一节讲的内容，问原因、比较、影响，或者提出自己的看法请大家讨论；"
+    "要求：像刚学完这一节的学生在问答区发的提问，口语一点、具体一点；只输出提问本身，一句话，"
+    "15 到 45 个字，以一个问号结尾，中间不要再出现问号；问原因、比较、影响或者怎么做，让同学能聊起来；"
+    "不要堆术语、不要用英文缩写，不要写成「在……场景中，通常采用哪些……」这种论文题；"
     "不要问能直接搜到固定答案的事实（谁、哪一年、什么时候），"
     "不要写成名词解释（什么是、是什么意思、指什么）或是非题（是不是、对不对、有没有、能不能、是否、……吗）；"
     "不要用「请问」开头，不要称呼老师同学，不要「作为大学生」「我们」这类铺垫；"
     "不要带括号、下划线、序号、选项、答案、链接。"
 )
-QUESTION_PROMPT = "这门课是「%s」。请围绕课程里「%s」这一节的内容，写一个发到课程问答区的提问。\n" + QUESTION_RULES
+QUESTION_PROMPT = ("这门课是「%s」。请围绕课程里「%s」这一节的内容，写一个发到课程问答区的提问，"
+                   "这次可以用「%s」这种问法。\n" + QUESTION_RULES)
+# 问法轮换：同一个人发的几条不是一个句式（规则：短时间内同一句式连续提问会被删）。
+QUESTION_SHAPES = ("为什么……？", "……和……比，差别到底在哪？", "如果……，会怎么样？", "生活里哪些地方用得上……？",
+                   "……最难做好的是哪一步？", "要是让你来……，你会怎么做？")
+OWN_QUESTION_MOST = 50  # 我们自己发的提问：再长就像论文题了
 QUESTION_AVOID = "\n问答区里已经有这些提问，不要重复，也不要换个说法问同一件事：\n%s"
 QUESTION_REDO = "\n上一次写的「%s」不合格：%s。请重写。"
 MIN_QUESTION, MAX_QUESTION = 8, 200
@@ -320,6 +386,17 @@ def question_flaw(text):
             return reason
     if not MIN_QUESTION <= len(text) <= MAX_QUESTION:
         return "要 %d–%d 个字" % (MIN_QUESTION, MAX_QUESTION)
+    return None
+
+
+def own_question_flaw(text):
+    """我们自己发的提问再严一点：短、少术语，读起来像学生问的。"""
+    if len(text) > OWN_QUESTION_MOST:
+        return "太长了，像论文题，缩到 45 个字以内"
+    if len(re.findall(r"[A-Za-z][A-Za-z-]+", text)) >= 2:
+        return "英文术语太多，换成大白话"
+    if re.match(r"在.{2,24}(?:场景|架构|体系|环境|背景|过程|框架)(?:中|下|里)", text):
+        return "「在……场景中」开头像论文题，换成学生会问的说法"
     return None
 
 
@@ -397,7 +474,7 @@ def write_questions(ai, reference, count, *, course_name="", topics=(), on_progr
     texts = []
     for index in range(1, total + 1):
         topic = order[(index - 1) % len(order)] if order else "课程的核心内容"
-        base = QUESTION_PROMPT % (course_name or "这门课", topic) + avoid
+        base = QUESTION_PROMPT % (course_name or "这门课", topic, QUESTION_SHAPES[(index - 1) % len(QUESTION_SHAPES)]) + avoid
         if on_progress is not None:
             on_progress(index, total)
         redo = ""
@@ -409,7 +486,8 @@ def write_questions(ai, reference, count, *, course_name="", topics=(), on_progr
                 logger.warning("AI 第 %d 条提问的回复不完整，重试", index)
                 continue
             text = _clean_question(answer)
-            flaw = question_flaw(text) or ("和已有的提问重复" if text in texts or text in reference else None)
+            flaw = (question_flaw(text) or ("和已有的提问重复" if text in texts or text in reference else None)
+                    or own_question_flaw(text))
             if flaw is None:
                 texts.append(text)
                 break

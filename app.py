@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import random
 import time
+import zlib
 
 from MoocMain.log import Logger
 
@@ -312,10 +313,13 @@ class Application:
             self.view.note(str(exc), "error")
         return self.ai_status_text(config)
 
-    def study(self, version, client=None, selected=None, review_minutes=0):
+    def study(self, version, client=None, selected=None, review_minutes=0, meeting=False):
         api_class, handler = {1: (ZYKMoocApi, ZYKMoocHandler),
                               2: (ZHSApi, ZHSHandler),
                               3: (ChaoxingApi, ChaoxingStudyHandler)}.get(version, (AIMoocApi, AIMoocHandler))
+        if meeting:
+            from ZHSMain.meeting import MeetingHandler
+            handler = MeetingHandler
         if client is None:
             client, selected = (self.cx_client_and_courses() if version == 3
                                 else self.client_and_courses(api_class))
@@ -332,14 +336,16 @@ class Application:
             # reporting a successful study run.
             activity_ai = self.verify_ai(self.ai_configuration())
             inject['activity_ai'] = activity_ai
-        elif version == 2:
+        elif version == 2 and not meeting:
             config = self.store.ai_config()
             if config is not None:
                 captcha_ai = AIClient(config)
                 inject['captcha_ai'] = captcha_ai
         try:
             self.view.plan("学习管理", selected)
-            if version == 2 and review_minutes:
+            if meeting:
+                note = "见面课：1 倍速续看线上回放，平台确认签到后继续下一节；未开放或需现场参加的课程会提示。"
+            elif version == 2 and review_minutes:
                 note = "智慧树每日复习：共享课 1 倍速重看已学视频 %d 分钟。" % review_minutes
             elif version == 3:
                 note = ("超星学习：最多 %d 个章节同时处理，章节内的视频、文档、阅读任务点并行完成；"
@@ -652,7 +658,8 @@ class Application:
             try:
                 def run(qa, event):
                     answer_questions(qa, ai, max_answers=5, limit=limit, state_path=state_path,
-                                     on_event=event, sleep=_qa_pause)
+                                     on_event=event, sleep=_qa_pause,
+                                     voice=zlib.crc32(str(getattr(client, "uuid", None) or "local").encode()))  # 同一个账号一个说话风格
 
                 totals = self._zhs_qa_courses(client, courses, run, "发布")
             finally:
