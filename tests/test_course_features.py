@@ -96,7 +96,7 @@ class TerminalMenuTest(unittest.TestCase):
         self.assertIn("只做新一代信息技术导论", menu["每日复习"])
         self.assertIn("只做新一代信息技术导论", menu["问答区"])
         menu = self.menu([MOOC_LIKE], {"review": [], "qa": []})
-        self.assertEqual(set(menu), {"自动学习", "AI 答题"})
+        self.assertEqual(set(menu), {"自动学习", "AI 答题", "见面课"})
         menu = self.menu([SHARED], {"review": [SHARED], "qa": [SHARED]})
         self.assertNotIn("只做", menu["每日复习"])
 

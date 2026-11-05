@@ -14,6 +14,7 @@ import secrets
 import threading
 import time
 import webbrowser
+import zlib
 from dataclasses import asdict, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -41,6 +42,7 @@ from task_metrics import completion_with_score, score_text
 from ZHSMain.answer import ZHSAnswerRunner, catalog
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi, ZHSError, course_offers
 from ZHSMain.main import ZHSHandler, course_units as zhs_units
+from ZHSMain.meeting import MeetingHandler
 from ZHSMain.memory import AnswerMemory
 from ZHSMain.qa import ANSWER_CAP, ASK_PACE, DAILY_ANSWERS, DAILY_QUESTIONS, QA_PACE, QUESTION_CAP, REFERENCE_ANSWERS, \
     MAX_QUESTION, QaBridge, _clean_question, answer_questions, publish_questions, qa_room, question_flaw, write_questions
@@ -60,15 +62,20 @@ MAX_PENDING = 20
 SHARED_MODEL_ID = "admin-shared"
 # The platform's unit and paper lists take seconds to tens of seconds; reuse them for a while.
 CACHE_TTL = 600
-LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题", "qa": "问答区答题", "ask": "问答区提问",
+LABEL = {"study": "自动学习", "review": "每日复习", "meeting": "见面课", "answer": "AI 答题", "qa": "问答区答题", "ask": "问答区提问",
          "mastery": "掌握度学习"}
 # Jobs that play course content conflict with each other; answering is separate.
 # Answering the board and asking on it are separate lines, so drafting questions never waits out an answering run.
-GROUP = {"study": "learn", "review": "learn", "answer": "answer", "mastery": "answer", "qa": "qa", "ask": "ask"}
+GROUP = {"study": "learn", "review": "learn", "meeting": "learn", "answer": "answer", "mastery": "answer", "qa": "qa", "ask": "ask"}
 QA_POSTS = 300  # posts kept per account for the web list
 PEER_ANSWERS = 5  # a question with 5 valid answers earns its asker the point; more from us adds nothing
 PEER_DELAY = 30 * 60  # seconds a classmate's question waits before people here answer it
 PEERS_MARKER = "qa-peers.on"  # present while the person takes part in 站内互答
+# How often the Zhihuishu sign-in centre is touched for everyone signed in (Studia.keep_passport). Its ticket
+# seemed to lapse two to three hours after last use, taking the Q&A board with it; touching it inside that
+# window should keep it, and the log line each time shows whether it does.
+KEEPALIVE = 50 * 60
+BOARD_EVERY = 3  # every third round (from the first) also opens the Q&A board: does a live ticket really let us in?
 DRAFT_TIMEOUT = 300  # reasoning models take one to two minutes to write a single question
 # Running job id -> its Studia app. A job thread is named "studia-job-<id>" and passes that
 # name on to the helper threads it starts, so a log line can be traced back to its job.
@@ -249,6 +256,48 @@ class Studia:
                 platform.client.close()
             platform.client, platform.rows, platform.entries, platform.cache = None, [], {}, {}
 
+    def keep_passport(self, board=False):
+        """Touch the Zhihuishu sign-in centre for this person and log the answer, with the hours since the scan:
+        the log then shows whether the ticket keeps or still lapses. With board, also open the Q&A board and log
+        whether it let us in, next to the ticket's state. True/False, None when not signed in or the platform
+        could not be reached."""
+        platform = self.platforms.get("zhs")
+        if platform is None or not self.logged_in(platform):
+            return None
+        try:
+            alive = self.client(platform).passport_alive()
+        except Exception as exc:  # a network blip says nothing about the ticket
+            logger.info("%s智慧树登录中心保活没连上：%s", self.who(), type(exc).__name__)
+            return None
+        since = self.store.get("zhs_signed_in_at")
+        age = "（扫码后 %.1f 小时）" % ((time.time() - since) / 3600) if isinstance(since, (int, float)) else ""
+        if alive:
+            logger.info("%s智慧树登录中心票据有效，已保活%s", self.who(), age)
+        else:
+            logger.warning("%s智慧树登录中心票据已失效，问答区要重新扫码才能进%s", self.who(), age)
+        if board:
+            entered = self._enter_board(platform)
+            if entered is not None:
+                logger.info("%s智慧树问答区%s（登录中心票据%s）%s", self.who(), "能进" if entered else "进不去",
+                            "有效" if alive else "已失效", age)
+        self.save_sessions(platform)  # the sign-in centre may have renewed cookies
+        return alive
+
+    def _enter_board(self, platform):
+        """Open the Q&A board of the person's first shared course and leave: True if it let us in, False if it sent
+        us to sign in, None when there is no such course or the page did not load."""
+        client = self.client(platform)
+        try:
+            course = next((c for c in client.shared_courses() if c.get("courseId") and c.get("recruitId")), None)
+            if course is None:
+                return None
+            with QaBridge(client.access_token, course_id=course["courseId"], recruit_id=course["recruitId"]):
+                return True
+        except AuthenticationExpired:
+            return False
+        except Exception:
+            return None
+
     def who(self):
         """Log prefix naming the Studia account on a hosted server; request threads carry no job tag."""
         return "%s · " % self.owner if self.owner else ""
@@ -419,6 +468,7 @@ class Studia:
                 platform.client = client
                 self.store.save_session(platform.id, client)
                 logger.info("%s%s 扫码登录成功", self.who(), name)
+                self.store.set("zhs_signed_in_at", time.time())  # the keep-alive log counts hours from here
                 self.publish({"type": "account"})  # other tabs and devices pick up the login
                 return {"status": "done", "message": "登录成功"}
             if status == 2:
@@ -604,7 +654,7 @@ class Studia:
         allowed = ({"study"} if platform.spec.get("study", True) else set()) | \
                   ({"review"} if platform.spec["review"] else set()) | \
                   ({"answer"} if platform.spec["answer"] else set()) | \
-                  ({"mastery"} if platform.id == "zhs" else set()) | \
+                  ({"mastery", "meeting"} if platform.id == "zhs" else set()) | \
                   ({"qa", "ask"} if platform.spec.get("qa") else set())
         if kind not in allowed:
             raise HttpError(400, "这个平台暂不支持该操作")
@@ -612,6 +662,8 @@ class Studia:
         if kind == "mastery" and not course_features(platform.id, row)["mastery"]:
             raise HttpError(400, "掌握度学习目前仅支持智慧树共享课")
         room = self.qa_room(platform, row) if kind in ("qa", "ask") else None  # reads the score: before the lock
+        if kind == "meeting" and (row.get("zhs") or {}).get("kind") != "shared":
+            raise HttpError(400, "见面课仅支持智慧树共享课")
         if kind in ("review", "qa", "ask"):
             shares = (platform.cache.get(("shares", (row.get("zhs") or {}).get("courseId"))) or (0, None))[1]
             if not course_features(platform.id, row, shares)["qa" if kind == "ask" else kind]:
@@ -972,7 +1024,7 @@ class Studia:
             if kind == "review" and entry.get("minutes", 0) < 1:
                 continue
             # A paused job does not run by itself, so it comes back however long the service was down.
-            paused = entry.get("paused") is True and kind in ("study", "review")
+            paused = entry.get("paused") is True and GROUP[kind] == "learn"
             if kind in ("answer", "mastery", "qa", "ask") or (not paused and (not fresh or entry.get("resumes", 0) >= RESUME_LIMIT)):
                 self._record(entry, "stopped", INTERRUPTED)
                 continue
@@ -1034,6 +1086,15 @@ class Studia:
         spec = platform.spec
         kwargs = {"client": self.client(platform), "course_rows": [row], "on_progress": self.progress_of(job),
                   "cancel_event": job["cancel"], "max_workers": self.store.concurrency()["study"]}
+        if job.get("kind") == "meeting":
+            handler = MeetingHandler(**kwargs)
+            if handler.blocked is not None:
+                raise handler.blocked
+            if handler.failed:
+                raise ZHSError(handler.summary)
+            if handler.pending:
+                raise NeedsRetry(handler.summary + "；未开放或需现场参加的课请查看日志")
+            return handler.summary
         ai = None
         captcha_ai = None
         if spec["needs_ai"]:
@@ -1159,7 +1220,8 @@ class Studia:
             with self._board(platform, row) as board:
                 stats = answer_questions(board, ai, max_answers=0, limit=limit, interval=1,
                                          state_path=str(Path(self.store.path).parent / "zhs-qa-answers.json"),
-                                         should_stop=job["cancel"].is_set, on_event=event, sleep=self._pace(job))
+                                         should_stop=job["cancel"].is_set, on_event=event, sleep=self._pace(job),
+                                         voice=zlib.crc32((self.owner or "local").encode()))  # one person, one voice
             return _tally("回答了 %d 条提问", stats["answered"], stats["failed"])
         except AuthenticationExpired:
             # 问答区自己的会话比智慧树登录短，进站还要走一次单点登录跳转；被跳到登录页
@@ -1541,7 +1603,8 @@ class _Board:
         # and it is a real question, not one of the floods the board is full of. Not right after it went up, though:
         # a ring of accounts answering each other within minutes is exactly what the board cleans out.
         now = time.time()
-        found = [{"id": q["id"], "content": q["text"], "answers": q["ours"], "at": q["at"] * 1000, "peer": True}
+        found = [{"id": q["id"], "content": q["text"], "answers": q["ours"], "at": q["at"] * 1000, "peer": True,
+                  "seen": q.get("replies") or []}
                  for q in self.peers() if q["ours"] < PEER_ANSWERS and now - q["at"] > PEER_DELAY][:limit]
         have = {q["id"] for q in found}
         found += [q for q in self.bridge.questions(max_answers=0, limit=limit) if q["id"] not in have]
@@ -1876,6 +1939,7 @@ def serve(port=0, open_browser=True, store=None):
     if open_browser:
         webbrowser.open(url)
     threading.Thread(target=app.resume, daemon=True, name="studia-resume").start()
+    threading.Thread(target=keep_passports, args=(lambda: [app],), daemon=True, name="studia-keepalive").start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1884,6 +1948,22 @@ def serve(port=0, open_browser=True, store=None):
         app.shutdown()
         drain()
         server.server_close()
+
+
+def keep_passports(apps, interval=KEEPALIVE, first=60, stop=None):
+    """Every interval (the first time after `first` seconds, so a fresh deploy shows its state soon), touch the
+    sign-in centre for everyone the apps() callable returns. Runs until stop is set; one person's error is logged
+    and the rest carry on."""
+    stop = stop or threading.Event()
+    wait, rounds = first, 0
+    while not stop.wait(wait):
+        board = rounds % BOARD_EVERY == 0
+        for app in apps():
+            try:
+                app.keep_passport(board=board)
+            except Exception:
+                logger.warning("智慧树登录中心保活出错", exc_info=True)
+        wait, rounds = interval, rounds + 1
 
 
 def drain(timeout=20):
