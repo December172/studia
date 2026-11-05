@@ -91,8 +91,8 @@ const state = {
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
 const runOf = (id) => (state.runs[id] = state.runs[id] || freshRun());
 // Mirrors the server's rules (web/server.py _check_conflicts) so buttons say why before you click.
-const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "qa", ask: "ask" };
-const jobType = (j) => j.kind || { 自动学习: "study", 每日复习: "review", "AI 答题": "answer", 问答区答题: "qa", 问答区提问: "ask" }[j.title];
+const GROUP = { study: "learn", review: "learn", meeting: "learn", answer: "answer", qa: "qa", ask: "ask" };
+const jobType = (j) => j.kind || { 自动学习: "study", 每日复习: "review", 见面课: "meeting", "AI 答题": "answer", 问答区答题: "qa", 问答区提问: "ask" }[j.title];
 // Only learning jobs fill a course's unit grid.
 const learns = (j) => GROUP[jobType(j)] === "learn";
 // A job in the list that is not running: waiting for a slot, or paused by an administrator.
@@ -310,7 +310,7 @@ function setPage(html) {
   if (on && (on.offsetLeft < nav.scrollLeft || on.offsetLeft + on.offsetWidth > nav.scrollLeft + nav.clientWidth)) nav.scrollLeft = on.offsetLeft - 16;
 }
 
-const LABEL = { study: "自动学习", review: "每日复习", answer: "AI 答题", qa: "问答区答题", ask: "问答区提问" };
+const LABEL = { study: "自动学习", review: "每日复习", meeting: "见面课", answer: "AI 答题", qa: "问答区答题", ask: "问答区提问" };
 const TYPE_OF = Object.fromEntries(Object.entries(LABEL).map(([k, v]) => [v, k]));
 const STATE_WORD = { done: "完成", error: "失败", waiting: "等你操作", stopped: "已停止", running: "进行中", queued: "排队中", paused: "已暂停" };
 
@@ -979,6 +979,7 @@ function studyActions(p, c) {
     : p.id === "cx" ? "视频、文档、阅读任务点：章节并行，视频先尝试直接完成"
     : "学完资源库里的资源";
   return [["study", ICON.play, "自动学习", study],
+    ...(p.id === "zhs" && c.kind === "shared" ? [["meeting", ICON.play, "见面课", "1 倍速续看线上回放，平台确认签到后自动停止"]] : []),
     ...(f.review ? [["review", ICON.repeat, "每日复习", "重看 30 分钟攒习惯分，每天一次"]] : [])];
 }
 // "#/course/p/c/<tab>": the Q&A tab only exists on courses whose assessment counts it.
@@ -1300,7 +1301,7 @@ function recentCells(k) {
 }
 
 const player = $(".player"), sheet = $(".sheet");
-const LIVE_WORD = { 自动学习: "正在学习", 每日复习: "正在复习", "AI 答题": "正在答题", 问答区答题: "正在回答", 问答区提问: "正在提问" };
+const LIVE_WORD = { 自动学习: "正在学习", 每日复习: "正在复习", 见面课: "正在观看见面课", "AI 答题": "正在答题", 问答区答题: "正在回答", 问答区提问: "正在提问" };
 const recentlyDone = () => (!state.jobs.length && state.lastDone && Date.now() - state.lastDone.shownAt < 60000 ? state.lastDone : null);
 
 function renderPlayer() {
@@ -1344,7 +1345,7 @@ function renderFocus() {
   const { pct, label } = progressOf(run);
   const k = key(job.platform, job.course);
   body.style.setProperty("--c", inkOf({ id: job.course }));
-  const units = learns(job) && unitsOf(k), t = units && tally(units);
+  const units = jobType(job) !== "meeting" && learns(job) && unitsOf(k), t = units && tally(units);
   const grid = units
     ? `<div class="section"><h3>整门课</h3><span class="aside mono">${t.done}/${t.all} · ${Math.round((t.done / (t.all || 1)) * 100)}%</span></div>${gridHtml(k)}` : "";
   const spot = live && spotOf(job, run);
