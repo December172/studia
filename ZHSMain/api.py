@@ -646,6 +646,54 @@ class ZHSApi:
         return self.secure(STUDY_GATEWAY + "/learning/saveDatabaseIntervalTimeV2", payload,
                            captcha_ev=captcha_ev, captcha_vision=captcha_vision)
 
+    def meeting_list(self, recruit_id):
+        # Entering the page establishes stuonline's own SSO session.
+        response = self._request("GET", STUONLINE + "/stuonline/teachMeeting/stuListV2",
+                                 params={"recruitId": recruit_id}, expect_json=False)
+        if urllib.parse.urlsplit(response.url).hostname != "stuonline.zhihuishu.com":
+            raise AuthenticationExpired("智慧树登录已过期，请重新扫码")
+        rows, page = [], 0
+        while True:
+            data = self._request(
+                "POST", STUONLINE + "/stuonline/json/teachMeeting/listTeachMeetingStu?examV2=ss",
+                data={"recruitId": recruit_id, "page.pageNo": page, "page.pageSize": 10}, origin=STUONLINE)
+            if "mapCount" not in data:
+                raise PlatformUnavailable("智慧树见面课列表返回格式异常")
+            items = data.get("maps")
+            count = self._int_or_zero(data.get("mapCount"))
+            if items is None and count == 0:
+                return rows
+            if not isinstance(items, list) or (not items and len(rows) < count):
+                raise PlatformUnavailable("智慧树见面课列表返回格式异常")
+            rows.extend(items)
+            if len(rows) >= count:
+                return rows
+            page += 1
+
+    def meeting_status(self, meeting):
+        try:
+            user_id = json.loads(urllib.parse.unquote(self.session.cookies.get("CASLOGC") or ""))["userId"]
+        except (ValueError, KeyError, TypeError):
+            raise AuthenticationExpired("智慧树登录已过期，请重新扫码") from None
+        response = self._request(
+            "GET", "https://im.zhihuishu.com/live/checkLiveHomeAuth",
+            params={"liveCourseId": meeting["liveCourseId"], "courseId": meeting["courseId"],
+                    "recruitId": meeting["recruitId"], "userId": user_id, "callback": "studia"},
+            origin="https://lc.zhihuishu.com", expect_json=False)
+        # The official player uses JSONP; parse its envelope without executing JavaScript.
+        match = re.fullmatch(r"\s*studia\((.*)\);?\s*", response.text, re.S)
+        try:
+            data = json.loads(match[1]) if match else None
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            raise PlatformUnavailable("智慧树见面课签到状态返回格式异常")
+        if data.get("unlogin") == "unlogin":
+            raise AuthenticationExpired("智慧树登录已过期，请重新扫码")
+        if str(data.get("signInStatus")) not in ("1", "2"):
+            raise PlatformUnavailable("智慧树未返回见面课签到状态")
+        return data
+
     def ai_course_basic(self, course_id, class_id):
         return self.secure(
             AI_GATEWAY + "/knowledge-study/course-basic",

@@ -638,6 +638,9 @@ class TerminalUI:
                 choices.append((3, "每日复习", only(review, "重看已学视频 30 分钟，攒学习习惯分")))
             if qa:
                 choices.append((4, "问答区", only(qa, "回答提问，或让 AI 出提问")))
+            meetings = [row for row in courses if (row.get("zhs") or {}).get("kind") == "shared"]
+            if meetings:
+                choices.append((5, "见面课", only(meetings, "续看线上回放，自动完成观看签到")))
         return self.choice(title, choices, help_text="Esc 返回课程列表 · q 退出")
 
     def choose_platform(self, current):

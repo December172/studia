@@ -42,6 +42,7 @@ from task_metrics import completion_with_score, score_text
 from ZHSMain.answer import ZHSAnswerRunner, catalog
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi, ZHSError, course_offers
 from ZHSMain.main import ZHSHandler, course_units as zhs_units
+from ZHSMain.meeting import MeetingHandler
 from ZHSMain.memory import AnswerMemory
 from ZHSMain.qa import ANSWER_CAP, ASK_PACE, DAILY_ANSWERS, DAILY_QUESTIONS, QA_PACE, QUESTION_CAP, REFERENCE_ANSWERS, \
     MAX_QUESTION, QaBridge, _clean_question, answer_questions, publish_questions, qa_room, question_flaw, write_questions
@@ -60,10 +61,10 @@ MAX_JOBS = 4
 MAX_PENDING = 20
 # The platform's unit and paper lists take seconds to tens of seconds; reuse them for a while.
 CACHE_TTL = 600
-LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题", "qa": "问答区答题", "ask": "问答区提问"}
+LABEL = {"study": "自动学习", "review": "每日复习", "meeting": "见面课", "answer": "AI 答题", "qa": "问答区答题", "ask": "问答区提问"}
 # Jobs that play course content conflict with each other; answering is separate.
 # Answering the board and asking on it are separate lines, so drafting questions never waits out an answering run.
-GROUP = {"study": "learn", "review": "learn", "answer": "answer", "qa": "qa", "ask": "ask"}
+GROUP = {"study": "learn", "review": "learn", "meeting": "learn", "answer": "answer", "qa": "qa", "ask": "ask"}
 QA_POSTS = 300  # posts kept per account for the web list
 PEER_ANSWERS = 5  # a question with 5 valid answers earns its asker the point; more from us adds nothing
 PEER_DELAY = 30 * 60  # seconds a classmate's question waits before people here answer it
@@ -684,11 +685,14 @@ class Studia:
         allowed = ({"study"} if platform.spec.get("study", True) else set()) | \
                   ({"review"} if platform.spec["review"] else set()) | \
                   ({"answer"} if platform.spec["answer"] else set()) | \
+                  ({"meeting"} if platform.id == "zhs" else set()) | \
                   ({"qa", "ask"} if platform.spec.get("qa") else set())
         if kind not in allowed:
             raise HttpError(400, "这个平台暂不支持该操作")
         row = self.find_row(platform, course_id)
         room = self.qa_room(platform, row) if kind in ("qa", "ask") else None  # reads the score: before the lock
+        if kind == "meeting" and (row.get("zhs") or {}).get("kind") != "shared":
+            raise HttpError(400, "见面课仅支持智慧树共享课")
         if kind in ("review", "qa", "ask"):
             shares = (platform.cache.get(("shares", (row.get("zhs") or {}).get("courseId"))) or (0, None))[1]
             if not course_features(platform.id, row, shares)["qa" if kind == "ask" else kind]:
@@ -1047,7 +1051,7 @@ class Studia:
             if kind == "review" and entry.get("minutes", 0) < 1:
                 continue
             # A paused job does not run by itself, so it comes back however long the service was down.
-            paused = entry.get("paused") is True and kind in ("study", "review")
+            paused = entry.get("paused") is True and GROUP[kind] == "learn"
             if kind in ("answer", "qa", "ask") or (not paused and (not fresh or entry.get("resumes", 0) >= RESUME_LIMIT)):
                 self._record(entry, "stopped", INTERRUPTED)
                 continue
@@ -1108,6 +1112,15 @@ class Studia:
         spec = platform.spec
         kwargs = {"client": self.client(platform), "course_rows": [row], "on_progress": self.progress_of(job),
                   "cancel_event": job["cancel"], "max_workers": self.store.concurrency()["study"]}
+        if job.get("kind") == "meeting":
+            handler = MeetingHandler(**kwargs)
+            if handler.blocked is not None:
+                raise handler.blocked
+            if handler.failed:
+                raise ZHSError(handler.summary)
+            if handler.pending:
+                raise NeedsRetry(handler.summary + "；未开放或需现场参加的课请查看日志")
+            return handler.summary
         ai = None
         captcha_ai = None
         if spec["needs_ai"]:

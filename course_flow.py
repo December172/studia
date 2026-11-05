@@ -112,6 +112,12 @@ class CourseWorkspace:
                         self.platform, self.client, targets, review_minutes=REVIEW_MINUTES))
                 elif mode == 4 and self.platform == 2:
                     result = self.qa_area(offers["qa"])  # 只去考核里有问答互动分的课
+                elif mode == 5 and self.platform == 2:
+                    targets = [row for row in courses if (row.get("zhs") or {}).get("kind") == "shared"]
+                    self.view.review_study(targets, title="见面课",
+                                           notice="1 倍速续看线上回放，以平台签到结果为准；现场课需按教师要求完成。")
+                    result = self.execute(lambda: self.app.study(
+                        self.platform, self.client, targets, meeting=True), "见面课")
                 else:
                     result = self.tasks(courses, mode, task_state.setdefault(mode, {}))
                 if result == 2:
