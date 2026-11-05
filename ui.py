@@ -1303,7 +1303,7 @@ class TerminalUI:
 
     def qa_drafts(self, texts):
         """AI 出好的提问，发之前删改。返回要发的列表；r 换一批返回 None；Esc 或删光返回 []。"""
-        from ZHSMain.qa import MAX_QUESTION, MIN_QUESTION
+        from ZHSMain.qa import _clean_question, question_flaw
         texts, warning = list(texts), ""
         while texts:
             self.table("出好的提问", ["编号", "内容"], list(enumerate(texts, 1)))
@@ -1327,11 +1327,12 @@ class TerminalUI:
             if not raw.startswith("e"):
                 texts.pop(index)
                 continue
-            text = " ".join(self.ask("改成", texts[index]).split())
-            if MIN_QUESTION <= len(text) <= MAX_QUESTION:
+            text = _clean_question(self.ask("改成", texts[index]))
+            flaw = question_flaw(text)  # 问答区规则：会被判无效或删掉的写法不让改进去
+            if flaw is None:
                 texts[index] = text
             else:
-                warning = f"提问要 {MIN_QUESTION}–{MAX_QUESTION} 个字，这条没改。"
+                warning = f"{flaw}，这条没改。"
         return []
 
     def concurrency_editor(self, current, *, message=''):
