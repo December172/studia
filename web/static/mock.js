@@ -3,7 +3,9 @@ const listeners = new Set();
 const emit = (event) => listeners.forEach((listener) => listener(event));
 const platforms = [
   { id: "mooc", name: "MOOC", short: "MOOC", login: "browser", logged_in: true, features: { study: true, answer: true, review: false } },
-  { id: "zhs", name: "智慧树", short: "智慧树", login: "qr", logged_in: true, features: { study: true, answer: true, review: true, qa: true } },
+  // ?mock&rescan: the sign-in centre's ticket has lapsed, the Q&A board waits for a fresh scan.
+  { id: "zhs", name: "智慧树", short: "智慧树", login: "qr", logged_in: true, rescan: new URLSearchParams(location.search).has("rescan"),
+    features: { study: true, answer: true, review: true, qa: true } },
   { id: "cx", name: "超星", short: "超星", login: "qr", password: true, logged_in: true, features: { study: true, answer: true, review: false } },
 ];
 const courses = {
@@ -177,6 +179,7 @@ export async function request(path, method, body) {
     if (polls < 3) return { status: "waiting", message: "等待扫码" };
     if (polls < 4 && p.login === "qr") return { status: "scanned", message: "已扫码" };
     p.logged_in = true;
+    p.rescan = false;
     return { status: "done", message: "登录成功" };
   }
   if ((m = path.match(/^\/api\/platforms\/(\w+)\/logout$/))) { platforms.find((x) => x.id === m[1]).logged_in = false; return {}; }
