@@ -17,19 +17,19 @@ NEITHER = {"progress": 40, "habit": 0, "interactive": 0, "knowledge": 0, "test":
 class CourseFeaturesTest(unittest.TestCase):
     def test_review_and_qa_follow_the_assessment_rule(self):
         self.assertEqual(course_features("zhs", SHARED, EARNS),
-                         {"study": True, "answer": True, "review": True, "qa": True})
+                         {"study": True, "answer": True, "review": True, "qa": True, "mastery": True})
         self.assertEqual(course_features("zhs", MOOC_LIKE, NEITHER),
-                         {"study": True, "answer": True, "review": False, "qa": False})
+                         {"study": True, "answer": True, "review": False, "qa": False, "mastery": True})
         # An unreadable rule narrows nothing beyond the course kind.
         self.assertEqual(course_features("zhs", SHARED, None),
-                         {"study": True, "answer": True, "review": True, "qa": True})
+                         {"study": True, "answer": True, "review": True, "qa": True, "mastery": True})
         self.assertEqual(course_features("zhs", AI, None),
-                         {"study": True, "answer": True, "review": False, "qa": False})
+                         {"study": True, "answer": True, "review": False, "qa": False, "mastery": False})
         self.assertEqual(course_features("mooc", {"courseName": "英语"}, None),
-                         {"study": True, "answer": True, "review": False, "qa": False})
+                         {"study": True, "answer": True, "review": False, "qa": False, "mastery": False})
         # 超星没有自动学习，界面上也不显示学习标签页。
         self.assertEqual(course_features("cx", {"title": "高等数学"}, None),
-                         {"study": True, "answer": True, "review": False, "qa": False})
+                         {"study": True, "answer": True, "review": False, "qa": False, "mastery": False})
 
     def test_score_shares_reads_the_rule(self):
         api = ZHSApi()
@@ -111,7 +111,7 @@ class TerminalMenuTest(unittest.TestCase):
         workspace.client = Mock()
         workspace.client.score_shares.side_effect = lambda cid, rid: EARNS if cid == 1000091138 else NEITHER
         workspace.course_loop([SHARED, MOOC_LIKE])
-        self.assertEqual(view.course_menu.call_args.args[2], {"review": [SHARED], "qa": [SHARED]})
+        self.assertEqual(view.course_menu.call_args.args[2], {"review": [SHARED], "qa": [SHARED], "mastery": [SHARED, MOOC_LIKE]})
         self.assertEqual(app.study.call_args.args[2], [SHARED])
 
 

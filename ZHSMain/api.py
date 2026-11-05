@@ -53,6 +53,8 @@ HEADERS = {
 
 STUDY_GATEWAY = STUDY + "/gateway/t/v1"
 AI_GATEWAY = AI + "/run/gateway/t/stu"
+MASTERY = "https://aistudy.zhihuishu.com/gateway/t/v1"
+MASTERY_PAGE = "https://studywisdomh5.zhihuishu.com"
 
 # ---------------------------------------------------------------- 失败诊断
 # One warning line per failed call, so a log shows which endpoint failed and what the
@@ -185,7 +187,8 @@ def course_offers(row, shares=None):
     所以只给共享课，并且考核规则里这一项大于 0 才开。shares 读不到（None）时不收窄。"""
     shared = (row.get("zhs") or {}).get("kind") == "shared"
     earns = lambda name: shares is None or shares.get(name, 0) > 0
-    return {"review": shared and earns("habit"), "qa": shared and earns("interactive")}
+    return {"review": shared and earns("habit"), "qa": shared and earns("interactive"),
+            "mastery": shared}
 
 
 class WatchPoints:
@@ -309,14 +312,15 @@ class ZHSApi:
         }
 
     def secure(self, url, payload, *, key="video", ok=0, as_json=False, method="POST",
-               captcha_ev=None, captcha_vision=None, optional=False):
+               captcha_ev=None, captcha_vision=None, optional=False, origin=None):
         form = self._secure_form(payload, key)
+        headers = {"origin": origin} if origin else {}
         if method.upper() == "GET":
-            result = self._request("GET", url, params=form)
+            result = self._request("GET", url, params=form, **headers)
         elif as_json:
-            result = self._request("POST", url, json_body=form)
+            result = self._request("POST", url, json_body=form, **headers)
         else:
-            result = self._request("POST", url, data=form)
+            result = self._request("POST", url, data=form, **headers)
 
         code = result.get("code", ok)
         if code != ok and code == -12:
@@ -331,11 +335,11 @@ class ZHSApi:
                     self.pass_captcha(captcha_ev, vision=captcha_vision, captcha_type=captcha_type)):
                 form = self._secure_form(payload, key)
                 if method.upper() == "GET":
-                    result = self._request("GET", url, params=form)
+                    result = self._request("GET", url, params=form, **headers)
                 elif as_json:
-                    result = self._request("POST", url, json_body=form)
+                    result = self._request("POST", url, json_body=form, **headers)
                 else:
-                    result = self._request("POST", url, data=form)
+                    result = self._request("POST", url, data=form, **headers)
                 code = result.get("code", ok)
         if code != ok:
             message = result.get("message") or result.get("msg") or ""
@@ -645,6 +649,73 @@ class ZHSApi:
     def shared_save_progress(self, payload, *, captcha_ev=None, captcha_vision=None):
         return self.secure(STUDY_GATEWAY + "/learning/saveDatabaseIntervalTimeV2", payload,
                            captcha_ev=captcha_ev, captcha_vision=captcha_vision)
+
+    def _mastery_get(self, path, payload):
+        return self.secure(MASTERY + path, payload, ok=200, method="GET", origin=MASTERY_PAGE)["data"]
+
+    @staticmethod
+    def _mastery_data(result):
+        code = result.get("code")
+        if code == -12:
+            raise CaptchaRequired("智慧树要求验证码，请到网页完成验证后重试")
+        if code in (401, 403):
+            raise AuthenticationExpired("智慧树登录已过期，请重新扫码")
+        if code != 200:
+            raise ZHSApiError(code, result.get("message") or result.get("msg") or "掌握度请求失败")
+        if result.get("data") is None or result.get("data") is False:
+            raise PlatformUnavailable("智慧树未确认掌握度操作结果，请到平台核对")
+        return result["data"]
+
+    def mastery_nodes(self, course_id, recruit_id):
+        """Read the official mastery map, including nodes outside chapter themes; never open a test."""
+        info = self._mastery_get("/learning/queryCourseMapInfo", {"courseId": course_id, "recruitId": recruit_id})
+        if not isinstance(info, dict) or not info.get("mapHashStr") or not info.get("mapStr"):
+            raise PlatformUnavailable("智慧树掌握度图谱返回格式异常")
+        tree = self._mastery_data(self._request(
+            "POST", "https://share-course-map-service.zhihuishu.com/gateway/t/node/queryMasteryNodeInfo",
+            json_body={"idHash": info["mapHashStr"], "idStr": info["mapStr"]}, origin=MASTERY_PAGE))
+        if (not isinstance(tree, dict) or "nodeThemeRespVos" not in tree
+                or tree["nodeThemeRespVos"] is not None and not isinstance(tree["nodeThemeRespVos"], list)
+                or tree.get("randomNodes") is not None and not isinstance(tree["randomNodes"], list)):
+            raise PlatformUnavailable("智慧树掌握度知识点返回格式异常")
+        nodes = {}
+
+        def visit(items):
+            for node in items:
+                children = node.get("children") or []
+                if children:
+                    visit(children)
+                elif node.get("idHash"):
+                    nodes[str(node["idHash"])] = node
+
+        visit(tree["nodeThemeRespVos"] or [])
+        visit(tree.get("randomNodes") or [])
+        return list(nodes.values())
+
+    def mastery_progress(self, recruit_id):
+        result = self._mastery_get("/mastery/getAllMasteryInfos", {"recruitId": recruit_id})
+        if not isinstance(result, list):
+            raise PlatformUnavailable("智慧树掌握度进度返回格式异常")
+        return result
+
+    def mastery_start(self, course_id, recruit_id, knowledge_id):
+        # The site's misspelling knowledeId is part of the wire protocol. This GET creates an attempt.
+        return self._mastery_get("/exam/start", {
+            "courseId": course_id, "recruitId": recruit_id, "knowledeId": knowledge_id})
+
+    def mastery_submit(self, recruit_id, knowledge_id, exam_id, answers):
+        # Unlike reads, the official /exam/submit sends plain JSON, not secretStr.
+        return self._mastery_data(self._request("POST", MASTERY + "/exam/submit", json_body={
+            "recruitId": recruit_id, "knowledgeId": knowledge_id, "examId": exam_id,
+            "answerVos": answers, "dateFormate": int(time.time() * 1000)}, origin=MASTERY_PAGE))
+
+    def mastery_result(self, recruit_id, knowledge_id, exam_id):
+        return self._mastery_get("/exam/getAnswerMasteryInfo", {
+            "recruitId": recruit_id, "knowledeId": knowledge_id, "examId": exam_id})
+
+    def mastery_answers(self, recruit_id, knowledge_id, exam_id):
+        return self._mastery_get("/exam/getUserAnswers", {
+            "recruitId": recruit_id, "knowledeId": knowledge_id, "examId": exam_id})
 
     def ai_course_basic(self, course_id, class_id):
         return self.secure(

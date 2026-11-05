@@ -91,8 +91,8 @@ const state = {
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
 const runOf = (id) => (state.runs[id] = state.runs[id] || freshRun());
 // Mirrors the server's rules (web/server.py _check_conflicts) so buttons say why before you click.
-const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "qa", ask: "ask" };
-const jobType = (j) => j.kind || { 自动学习: "study", 每日复习: "review", "AI 答题": "answer", 问答区答题: "qa", 问答区提问: "ask" }[j.title];
+const GROUP = { study: "learn", review: "learn", answer: "answer", mastery: "answer", qa: "qa", ask: "ask" };
+const jobType = (j) => j.kind || { 自动学习: "study", 每日复习: "review", "AI 答题": "answer", 掌握度学习: "mastery", 问答区答题: "qa", 问答区提问: "ask" }[j.title];
 // Only learning jobs fill a course's unit grid.
 const learns = (j) => GROUP[jobType(j)] === "learn";
 // A job in the list that is not running: waiting for a slot, or paused by an administrator.
@@ -310,7 +310,7 @@ function setPage(html) {
   if (on && (on.offsetLeft < nav.scrollLeft || on.offsetLeft + on.offsetWidth > nav.scrollLeft + nav.clientWidth)) nav.scrollLeft = on.offsetLeft - 16;
 }
 
-const LABEL = { study: "自动学习", review: "每日复习", answer: "AI 答题", qa: "问答区答题", ask: "问答区提问" };
+const LABEL = { study: "自动学习", review: "每日复习", answer: "AI 答题", mastery: "掌握度学习", qa: "问答区答题", ask: "问答区提问" };
 const TYPE_OF = Object.fromEntries(Object.entries(LABEL).map(([k, v]) => [v, k]));
 const STATE_WORD = { done: "完成", error: "失败", waiting: "等你操作", stopped: "已停止", running: "进行中", queued: "排队中", paused: "已暂停" };
 
@@ -979,7 +979,8 @@ function studyActions(p, c) {
     : p.id === "cx" ? "视频、文档、阅读任务点：章节并行，视频先尝试直接完成"
     : "学完资源库里的资源";
   return [["study", ICON.play, "自动学习", study],
-    ...(f.review ? [["review", ICON.repeat, "每日复习", "重看 30 分钟攒习惯分，每天一次"]] : [])];
+    ...(f.review ? [["review", ICON.repeat, "每日复习", "重看 30 分钟攒习惯分，每天一次"]] : []),
+    ...(f.mastery ? [["mastery", ICON.spark, "掌握度学习", "AI 作答并提交知识点练习；满分和免考跳过，每点最多 3 次。最新成绩可能覆盖旧成绩"]] : [])];
 }
 // "#/course/p/c/<tab>": the Q&A tab only exists on courses whose assessment counts it.
 const courseTab = (c, tab) => tab === "answer" ? "answer" : tab === "qa" && c.features?.qa ? "qa"
@@ -1141,7 +1142,7 @@ function renderCourse(p, c, tab, full = false) {
       const lastOf = state.history.find((j) => j.platform === p.id && j.course === c.id && j.title === LABEL[type]);
       const block = blocker(p.id, c.id, type);
       const foot = block || (lastOf ? `上次 ${ago(lastOf.ended || lastOf.started)} · ${lastOf.summary}` : "还没有运行过");
-      return `<button class="act" data-start="${type}" ${block ? "disabled" : ""}><span class="act_head"><span class="glyph">${icon}</span>${label}</span>
+      return `<button class="act" data-start="${type}" ${type === "mastery" ? 'data-confirm="确认自动作答并提交练习"' : ""} ${block ? "disabled" : ""}><span class="act_head"><span class="glyph">${icon}</span>${label}</span>
         <p>${text}</p><span class="foot"><span>${esc(foot)}</span>${i === 0 ? '<span class="kbd">S</span>' : ""}</span></button>`;
     }).join("")}</div>
       <div class="section"><h3>学习单元</h3></div>

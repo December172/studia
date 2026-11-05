@@ -59,10 +59,11 @@ MAX_JOBS = 4
 MAX_PENDING = 20
 # The platform's unit and paper lists take seconds to tens of seconds; reuse them for a while.
 CACHE_TTL = 600
-LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题", "qa": "问答区答题", "ask": "问答区提问"}
+LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题", "qa": "问答区答题", "ask": "问答区提问",
+         "mastery": "掌握度学习"}
 # Jobs that play course content conflict with each other; answering is separate.
 # Answering the board and asking on it are separate lines, so drafting questions never waits out an answering run.
-GROUP = {"study": "learn", "review": "learn", "answer": "answer", "qa": "qa", "ask": "ask"}
+GROUP = {"study": "learn", "review": "learn", "answer": "answer", "mastery": "answer", "qa": "qa", "ask": "ask"}
 QA_POSTS = 300  # posts kept per account for the web list
 PEER_ANSWERS = 5  # a question with 5 valid answers earns its asker the point; more from us adds nothing
 PEER_DELAY = 30 * 60  # seconds a classmate's question waits before people here answer it
@@ -601,10 +602,13 @@ class Studia:
         allowed = ({"study"} if platform.spec.get("study", True) else set()) | \
                   ({"review"} if platform.spec["review"] else set()) | \
                   ({"answer"} if platform.spec["answer"] else set()) | \
+                  ({"mastery"} if platform.id == "zhs" else set()) | \
                   ({"qa", "ask"} if platform.spec.get("qa") else set())
         if kind not in allowed:
             raise HttpError(400, "这个平台暂不支持该操作")
         row = self.find_row(platform, course_id)
+        if kind == "mastery" and not course_features(platform.id, row)["mastery"]:
+            raise HttpError(400, "掌握度学习目前仅支持智慧树共享课")
         room = self.qa_room(platform, row) if kind in ("qa", "ask") else None  # reads the score: before the lock
         if kind in ("review", "qa", "ask"):
             shares = (platform.cache.get(("shares", (row.get("zhs") or {}).get("courseId"))) or (0, None))[1]
@@ -623,6 +627,8 @@ class Studia:
             if kind == "answer":
                 selected = self._selected(platform, course_id, body.get("tasks") or [])
                 target = lambda: self._answer(platform, selected, bool(body.get("auto_submit")), job)
+            elif kind == "mastery":
+                target = lambda: self._mastery(platform, row, job)
             elif kind == "qa":
                 options = _qa_options(body)
                 if not room["answer"]:
@@ -965,7 +971,7 @@ class Studia:
                 continue
             # A paused job does not run by itself, so it comes back however long the service was down.
             paused = entry.get("paused") is True and kind in ("study", "review")
-            if kind in ("answer", "qa", "ask") or (not paused and (not fresh or entry.get("resumes", 0) >= RESUME_LIMIT)):
+            if kind in ("answer", "mastery", "qa", "ask") or (not paused and (not fresh or entry.get("resumes", 0) >= RESUME_LIMIT)):
                 self._record(entry, "stopped", INTERRUPTED)
                 continue
             body = {"platform": entry.get("platform"), "type": kind, "course": entry.get("course")}
@@ -1045,6 +1051,22 @@ class Studia:
             if captcha_ai is not None:
                 captcha_ai.session.close()
         return "今日复习完成" if minutes else "学习完成"
+
+    def _mastery(self, platform, row, job):
+        ai = self._ai("掌握度练习需要 AI，请先在设置里添加模型")
+        try:
+            runner = ZHSAnswerRunner(
+                self.client(platform), ai, auto_submit=True, on_progress=self.progress_of(job),
+                cancel_event=job["cancel"], max_workers=self.store.concurrency()["ai"],
+                memory=self.memory or AnswerMemory(Path(self.store.path).parent / "zhs-answers.json"))
+            result = runner.run_mastery(row)
+            if result["status"] == "ai_error":
+                self.store.save_ai_health(ai.config, "error", result["message"])
+            if result["status"] not in ("submitted", "skipped"):
+                raise HttpError(502, result["message"])
+            return result["message"]
+        finally:
+            ai.session.close()
 
     def _answer(self, platform, selected, auto_submit, job):
         cancel, on_progress = job["cancel"], self.progress_of(job)
@@ -1569,7 +1591,8 @@ def course_features(pid, row, shares=None):
     return {"study": bool(spec.get("study", True)),
             "answer": bool(spec["answer"]),
             "review": bool(spec["review"]) and offers["review"],
-            "qa": bool(spec.get("qa")) and offers["qa"]}
+            "qa": bool(spec.get("qa")) and offers["qa"],
+            "mastery": offers.get("mastery", False)}
 
 
 def _course(pid, row, shares=None):
