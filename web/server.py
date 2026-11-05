@@ -14,6 +14,7 @@ import secrets
 import threading
 import time
 import webbrowser
+import zlib
 from dataclasses import asdict, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1134,7 +1135,8 @@ class Studia:
             with self._board(platform, row) as board:
                 stats = answer_questions(board, ai, max_answers=0, limit=limit, interval=1,
                                          state_path=str(Path(self.store.path).parent / "zhs-qa-answers.json"),
-                                         should_stop=job["cancel"].is_set, on_event=event, sleep=self._pace(job))
+                                         should_stop=job["cancel"].is_set, on_event=event, sleep=self._pace(job),
+                                         voice=zlib.crc32((self.owner or "local").encode()))  # one person, one voice
             return _tally("回答了 %d 条提问", stats["answered"], stats["failed"])
         except AuthenticationExpired:
             # 问答区自己的会话比智慧树登录短，进站还要走一次单点登录跳转；被跳到登录页
@@ -1471,7 +1473,8 @@ class _Board:
         # and it is a real question, not one of the floods the board is full of. Not right after it went up, though:
         # a ring of accounts answering each other within minutes is exactly what the board cleans out.
         now = time.time()
-        found = [{"id": q["id"], "content": q["text"], "answers": q["ours"], "at": q["at"] * 1000, "peer": True}
+        found = [{"id": q["id"], "content": q["text"], "answers": q["ours"], "at": q["at"] * 1000, "peer": True,
+                  "seen": q.get("replies") or []}
                  for q in self.peers() if q["ours"] < PEER_ANSWERS and now - q["at"] > PEER_DELAY][:limit]
         have = {q["id"] for q in found}
         found += [q for q in self.bridge.questions(max_answers=0, limit=limit) if q["id"] not in have]

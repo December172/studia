@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import random
 import time
+import zlib
 
 from MoocMain.log import Logger
 
@@ -631,7 +632,8 @@ class Application:
             try:
                 def run(qa, event):
                     answer_questions(qa, ai, max_answers=5, limit=limit, state_path=state_path,
-                                     on_event=event, sleep=_qa_pause)
+                                     on_event=event, sleep=_qa_pause,
+                                     voice=zlib.crc32(str(getattr(client, "uuid", None) or "local").encode()))  # 同一个账号一个说话风格
 
                 totals = self._zhs_qa_courses(client, courses, run, "发布")
             finally:
