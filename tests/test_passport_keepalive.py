@@ -63,19 +63,38 @@ class KeepPassportTest(unittest.TestCase):
         self.assertIsNotNone(self.store.session("zhs"))  # never signs anyone out
 
 
+class BoardCheckTest(KeepPassportTest):
+    def test_the_board_check_is_logged_next_to_the_ticket(self):
+        from unittest.mock import patch
+        from base.auth import AuthenticationExpired
+        self.signed_in({"return_value": True})
+        self.platform.client.shared_courses.return_value = [{"courseId": 1, "recruitId": 7}]
+        with patch("web.server.QaBridge") as bridge, self.assertLogs("web.server", "INFO") as logs:
+            self.app.keep_passport(board=True)
+        self.assertIn("问答区能进（登录中心票据有效）", logs.output[-1])
+        self.assertEqual(bridge.call_args.kwargs, {"course_id": 1, "recruit_id": 7})
+        self.signed_in({"return_value": False})
+        self.platform.client.shared_courses.return_value = [{"courseId": 1, "recruitId": 7}]
+        with patch("web.server.QaBridge") as bridge, self.assertLogs("web.server", "INFO") as logs:
+            bridge.return_value.__enter__.side_effect = AuthenticationExpired("登录页")
+            self.app.keep_passport(board=True)
+        self.assertIn("问答区进不去（登录中心票据已失效）", logs.output[-1])
+
+
 class LoopTest(unittest.TestCase):
     def test_everyone_is_touched_and_one_error_does_not_stop_the_rest(self):
         stop = threading.Event()
         broken, fine = Mock(), Mock()
         broken.keep_passport.side_effect = RuntimeError("boom")
-        fine.keep_passport.side_effect = lambda: stop.set()
+        fine.keep_passport.side_effect = lambda **_: stop.set()
         thread = threading.Thread(target=keep_passports, args=(lambda: [broken, fine],),
-                                  kwargs={"interval": 0.01, "first": 0, "stop": stop})
+                                  kwargs={"interval": 0.01, "first": 0, "stop": stop}, daemon=True)
         thread.start()
         thread.join(2)
         self.assertFalse(thread.is_alive())
         broken.keep_passport.assert_called()
         fine.keep_passport.assert_called()
+        self.assertEqual(fine.keep_passport.call_args_list[0].kwargs, {"board": True})  # the first round opens the board
 
 
 if __name__ == "__main__":
