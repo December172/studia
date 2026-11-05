@@ -84,14 +84,14 @@ async function api(path, { method = "GET", body } = {}) {
 }
 
 const state = {
-  platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {}, earned: {}, qaDraft: {}, qaPosts: {}, qaOpen: new Set(),
+  platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {}, earned: {}, qaDraft: {}, qaPosts: {}, qaRoom: {}, qaPeers: null, qaOpen: new Set(),
   jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, loginMode: {}, lastDone: null,
   current: store.get("studia-platform", ""), meOpen: false, adminTab: "people", logFilter: "all", editPassword: false, adminEdit: null, pausedOpen: new Set(),
 };
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
 const runOf = (id) => (state.runs[id] = state.runs[id] || freshRun());
 // Mirrors the server's rules (web/server.py _check_conflicts) so buttons say why before you click.
-const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "answer", ask: "answer" };
+const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "qa", ask: "ask" };
 const jobType = (j) => j.kind || { 自动学习: "study", 每日复习: "review", "AI 答题": "answer", 问答区答题: "qa", 问答区提问: "ask" }[j.title];
 // Only learning jobs fill a course's unit grid.
 const learns = (j) => GROUP[jobType(j)] === "learn";
@@ -429,9 +429,10 @@ const pausedRow = (j) => `<div class="qrow"><span class="grip off"></span><span 
     ${j.hold ? "" : `<button class="btn small" data-job-act="continue" data-id="${esc(j.id)}">继续</button>`}${DOTS(j)}</div>`;
 function board(jobs, limit, owner = "") {
   const { slots, queue, incoming, paused } = boardParts(jobs, limit), open = state.pausedOpen.has(owner);
-  const empty = Math.max(0, limit - slots.length);
+  // Empty slots only matter as drop targets for the queue; otherwise 名额 n/limit in the heading says it.
+  const empty = queue.length ? Math.max(0, limit - slots.length) : 0;
   return `<div class="board" data-board data-owner="${esc(owner)}" data-incoming="${incoming}">
-    <div class="slots">${slots.map((j) => slotCard(j, owner)).join("")}${'<div class="slot empty" data-slot=""><span>空位</span></div>'.repeat(empty)}</div>
+    <div class="slots">${slots.map((j) => slotCard(j, owner)).join("")}${'<div class="slot vacant" data-slot=""><span>空位</span></div>'.repeat(empty)}</div>
     ${queue.length ? `<div class="board_head">排队<small>拖动排序，拖进格子即替换</small></div><div class="runs queue">${queue.map(queueRow).join("")}</div>` : ""}
     ${paused.length ? `<button class="board_head fold" data-paused-fold="${esc(owner)}" aria-expanded="${open}">已暂停 ${paused.length}<span class="chev_r" aria-hidden="true"></span></button>
       ${open ? `<div class="runs">${paused.map(pausedRow).join("")}</div>` : ""}` : ""}
@@ -986,27 +987,51 @@ const courseTab = (c, tab) => tab === "answer" ? "answer" : tab === "qa" && c.fe
 
 // Q&A tab. Where the interaction share stands, then two actions: answer a few questions now, or have
 // AI draft new ones that the person edits before they go out. Everything posted is listed below.
-const QA_SIZES = [5, 10, 20], ASK_SIZES = [1, 3, 5];
-const qaSize = () => { const n = store.get("studia-qa-size", 10); return QA_SIZES.includes(n) ? n : 10; };
-const askSize = () => { const n = store.get("studia-ask-size", 3); return ASK_SIZES.includes(n) ? n : 3; };
+// The board's own rules (智慧树问答规则): 10 valid questions and 20 valid answers score in full, its data updates
+// the next morning, and a few a day per course keeps clear of its flood checks. The server says how many are left
+// today (room) and why when none are. Each lane is one part of the score, drawn as cells like the course grid:
+// counted, posted today (counted tomorrow), still open.
+const QA_LANES = { ask: { cap: 10, daily: 5, size: 3, key: "studia-ask-size" }, answer: { cap: 20, daily: 10, size: 5, key: "studia-qa-size" } };
+function qaCount(kind, room) {
+  const lane = QA_LANES[kind], left = room ? room[kind] : lane.daily;
+  return Math.max(1, Math.min(Number(store.get(lane.key, lane.size)) || lane.size, left || 1, lane.daily));
+}
+function qaLane(kind, room, { title, valid, today, reason, note, button }) {
+  const lane = QA_LANES[kind], counted = Math.min(valid || 0, lane.cap), pending = Math.max(0, Math.min(today, lane.cap - counted));
+  const cells = Array.from({ length: lane.cap }, (_, i) => `<i class="cell ${i < counted ? "done" : i < counted + pending ? "pending" : ""}"></i>`).join("");
+  const n = qaCount(kind, room), most = Math.min(room ? room[kind] : lane.daily, lane.daily);
+  const stepper = `<span class="stepper"><button class="btn small" data-qa-step="${kind}" data-d="-1" aria-label="少一条" ${n <= 1 ? "disabled" : ""}>−</button>
+    <output>${n}</output><button class="btn small" data-qa-step="${kind}" data-d="1" aria-label="多一条" ${n >= most ? "disabled" : ""}>+</button></span>`;
+  return `<section class="qa_lane"><header><b>${title}</b><span class="qa_num">${valid ?? "—"}<span class="of">/${lane.cap}</span></span></header>
+    <div class="qa_cells" title="实心：已算分 · 斜纹：今天发的，明天上午算 · 空：还能拿分">${cells}</div>
+    <small class="sans">${esc(reason || note)}</small>
+    <div class="qa_act">${reason ? "" : stepper}${button(n, !!reason)}</div></section>`;
+}
 function qaBody(p, c) {
-  const k = key(p.id, c.id), earned = state.earned[k], q = earned?.qa, block = blocker(p.id, c.id, "qa");
-  const draft = state.qaDraft[k], posts = state.qaPosts[k], size = qaSize();
-  const n = (v) => (q ? v : "—");
-  const stat = `<div class="qa_stat"><span class="qa_score"><b>${earned ? pts(earned.interactive) : "—"}</b><span class="of">/${c.shares?.interactive || 10}</span> 分</span>
-    <span>有效回答 <b>${n(q?.answers)}</b></span><span>有效提问 <b>${n(q?.questions)}</b></span><span>收获回答 <b>${n(q?.received)}</b></span></div>`;
-  const answer = `<div class="model plain qa_row"><span class="m1"><b>回答提问</b><small class="sans">${esc(block || `先挑没人回答的，约 ${size} 分钟发完`)}</small></span>
-    <span class="row_btns"><span class="sizes">${QA_SIZES.map((s) => `<button class="chip" data-qa-size="${s}" aria-pressed="${s === size}">${s} 条</button>`).join("")}</span>
-      <button class="btn primary" data-qa-start ${block ? "disabled" : ""}>开始</button></span></div>`;
+  const k = key(p.id, c.id), earned = state.earned[k], q = earned?.qa;
+  const draft = state.qaDraft[k], posts = state.qaPosts[k], room = state.qaRoom[k], today = room?.posted || { ask: 0, answer: 0 };
   const texts = draft?.texts || [];
-  const ask = `<div class="model plain qa_row"><span class="m1"><b>发起提问</b><small class="sans">${esc(
-      draft?.loading ? `正在出第 ${draft.loading}/${draft.total} 条…` : draft?.error || "AI 从回答少的话题里出题，你改好再发")}</small></span>
-    <span class="row_btns"><span class="sizes">${ASK_SIZES.map((s) => `<button class="chip" data-ask-size="${s}" aria-pressed="${s === askSize()}">${s} 条</button>`).join("")}</span>
-      <button class="btn" data-qa-draft ${draft?.loading ? "disabled" : ""}>${texts.length ? "换一批" : "出题"}</button></span></div>
-    ${texts.map((t, i) => `<div class="model plain qa_draft"><textarea rows="2" data-qa-edit="${i}" maxlength="200">${esc(t)}</textarea>
-      <button class="btn small" data-qa-drop="${i}" aria-label="删掉这条">删掉</button></div>`).join("")}
-    ${texts.length ? `<div class="model plain qa_row"><span class="m1"><small class="sans">${esc(block || "发出后挂在你的账号名下")}</small></span>
-      <span class="row_btns"><button class="btn primary" data-qa-ask ${block || draft?.loading ? "disabled" : ""}>发布 ${texts.length} 条</button></span></div>` : ""}`;
+  const askBlock = blocker(p.id, c.id, "ask") || (room && !room.ask ? room.why.ask : "");
+  const answerBlock = blocker(p.id, c.id, "qa") || (room && !room.answer ? room.why.answer : "");
+  const head = `<div class="qa_head"><span class="qa_score"><b>${earned ? pts(earned.interactive) : "—"}</b><span class="of">/${c.shares?.interactive || 10}</span> 分</span>
+    <small class="sans">次日上午更新 · 斜纹是今天发的</small></div>`;
+  const ask = qaLane("ask", room, { title: "提问", valid: q?.questions, today: today.ask,
+    reason: draft?.loading ? `正在出第 ${draft.loading}/${draft.total} 条…` : askBlock,
+    note: draft?.error || `今天还能问 ${room ? room.ask : "—"} 条 · 收获回答 ${q?.received ?? "—"}`,
+    button: (n, off) => `<button class="btn" data-qa-draft ${off ? "disabled" : ""}>${texts.length ? "换一批" : `出 ${n} 条题`}</button>` });
+  const answer = qaLane("answer", room, { title: "回答", valid: q?.answers, today: today.answer, reason: answerBlock,
+    note: `今天还能答 ${room ? room.answer : "—"} 条`,
+    button: (n, off) => `<button class="btn primary" data-qa-start ${off ? "disabled" : ""}>答 ${n} 条</button>` });
+  const tooMany = room && texts.length > room.ask;
+  const drafts = texts.map((t, i) => `<div class="model plain qa_draft"><textarea rows="2" data-qa-edit="${i}" maxlength="200">${esc(t)}</textarea>
+      <button class="btn small" data-qa-drop="${i}" aria-label="删掉这条">删掉</button></div>`).join("")
+    + (texts.length ? `<div class="model plain qa_row"><span class="m1"><small class="sans">${esc(askBlock ||
+      (tooMany ? `今天还能发 ${room.ask} 条，删掉几条` : "隔 10–20 分钟发一条，免得像刷帖"))}</small></span>
+      <span class="row_btns"><button class="btn primary" data-qa-ask ${askBlock || tooMany || draft?.loading ? "disabled" : ""}>发布 ${texts.length} 条</button></span></div>` : "");
+  // Only a hosted site has classmates to answer; the person opts in, both ways.
+  const peers = session.mode === "hosted" ? `<div class="model plain qa_row qa_switch"><span class="m1"><b>站内互答</b><small class="sans">${
+      state.qaPeers ? "先答同学的提问，你的提问也给同学答" : "和站里同班的同学互相回答"}</small></span>
+    <span class="row_btns"><button class="switch ${state.qaPeers ? "on" : ""}" role="switch" aria-checked="${!!state.qaPeers}" aria-label="站内互答" data-qa-peers></button></span></div>` : "";
   const list = !posts ? '<div class="empty">正在读取…</div>' : !posts.length ? '<div class="empty">还没在这门课发过</div>'
     : `<div class="runs">${posts.map((x) => {
       // Keyed by the post itself, so a new post on top does not move which one is open.
@@ -1016,7 +1041,7 @@ function qaBody(p, c) {
         <span class="when"></span></div>
         ${x.kind === "answer" && open ? `<div class="qa_text">${esc(x.text)}</div>` : ""}`;
     }).join("")}</div>`;
-  return `<div class="section"><h3>问答互动</h3></div><div class="models">${stat}${answer}${ask}</div>
+  return `<div class="section"><h3>问答互动</h3></div><div class="models qa_board">${head}<div class="qa_lanes">${ask}${answer}</div>${drafts}${peers}</div>
     <div class="section"><h3>已发布</h3></div>${list}`;
 }
 const loadingPosts = new Set();
@@ -1024,7 +1049,7 @@ async function loadQaPosts(p, c) {
   const k = key(p.id, c.id);
   if (loadingPosts.has(k) || state.qaPosts[k]) return;
   loadingPosts.add(k);
-  try { state.qaPosts[k] = (await api(`/api/platforms/${p.id}/qa?course=${encodeURIComponent(c.id)}`)).posts; }
+  try { ({ posts: state.qaPosts[k], room: state.qaRoom[k], peers: state.qaPeers } = await api(`/api/platforms/${p.id}/qa?course=${encodeURIComponent(c.id)}`)); }
   catch { state.qaPosts[k] = []; }
   finally { loadingPosts.delete(k); }
   repaint();
@@ -1032,7 +1057,8 @@ async function loadQaPosts(p, c) {
 // One question per request, shown as it comes: a slow model takes a minute or two for each,
 // and one request for all of them could outlast the browser or a proxy in between.
 async function draftQuestions(p, c) {
-  const draft = state.qaDraft[key(p.id, c.id)] = { texts: [], total: askSize(), loading: 1 };
+  const room = state.qaRoom[key(p.id, c.id)];
+  const draft = state.qaDraft[key(p.id, c.id)] = { texts: [], total: qaCount("ask", room), loading: 1 };
   for (; draft.loading <= draft.total; draft.loading++) {
     repaint();
     try { draft.texts.push(...(await api(`/api/platforms/${p.id}/qa/draft`, { method: "POST", body: { course: c.id, have: draft.texts } })).questions); }
@@ -1163,10 +1189,22 @@ function renderCourse(p, c, tab, full = false) {
   if (full) setPage(head + body); else { quiet = true; setPage(head + body); quiet = false; }
 
   page.querySelectorAll("[data-start]").forEach((el) => (el.onclick = () => startJob({ platform: p.id, course: c.id, type: el.dataset.start })));
-  page.querySelectorAll("[data-qa-size]").forEach((el) => (el.onclick = () => { store.set("studia-qa-size", Number(el.dataset.qaSize)); renderCourse(p, c, tab); }));
-  page.querySelectorAll("[data-ask-size]").forEach((el) => (el.onclick = () => { store.set("studia-ask-size", Number(el.dataset.askSize)); renderCourse(p, c, tab); }));
+  page.querySelectorAll("[data-qa-step]").forEach((el) => (el.onclick = () => {
+    const kind = el.dataset.qaStep;
+    store.set(QA_LANES[kind].key, qaCount(kind, state.qaRoom[k]) + Number(el.dataset.d));  // qaCount clamps it on the way back
+    renderCourse(p, c, tab);
+  }));
   const qaStart = $("[data-qa-start]", page);
-  if (qaStart) qaStart.onclick = () => startJob({ platform: p.id, course: c.id, type: "qa", limit: qaSize() });
+  if (qaStart) qaStart.onclick = () => startJob({ platform: p.id, course: c.id, type: "qa", limit: qaCount("answer", state.qaRoom[k]) });
+  const qaPeers = $("[data-qa-peers]", page);
+  if (qaPeers) qaPeers.onclick = async () => {
+    const on = !state.qaPeers;
+    state.qaPeers = on;  // flip at once; put back if the server says no
+    renderCourse(p, c, tab);
+    try { state.qaPeers = (await api(`/api/platforms/${p.id}/qa/peers`, { method: "POST", body: { on } })).peers; toast(on ? "已开启站内互答" : "已关闭站内互答"); }
+    catch (error) { state.qaPeers = !on; toast(error.message); }
+    renderCourse(p, c, tab);
+  };
   const qaDraft = $("[data-qa-draft]", page);
   if (qaDraft) qaDraft.onclick = () => draftQuestions(p, c);
   // Edits go straight into the draft, so a background repaint writes back what was typed.
@@ -1420,6 +1458,7 @@ function handleEvent(event) {
       delete state.papers[key(event.platform, event.course)];
       delete state.earned[key(event.platform, event.course)];
       delete state.qaPosts[key(event.platform, event.course)];
+      delete state.qaRoom[key(event.platform, event.course)];
       loadCourses(event.platform);
       setTimeout(repaint, 61000);
     }
@@ -1876,6 +1915,7 @@ async function loadMe() {
   let setup = false;
   if (!MOCK) { try { ({ mode: session.mode, setup } = await api("/api/mode")); } catch { /* old server: local */ } }
   if (MOCK && params.has("auth")) { showAuth(params.get("auth") || "login"); return; }
+  if (MOCK && params.has("hosted")) session.mode = "hosted";  // ?mock&hosted previews what a hosted site shows
   if (setup) { showAuth("setup"); return; }
   if (session.mode === "hosted" && !(await loadMe())) { showAuth(); return; }
   await refreshState();

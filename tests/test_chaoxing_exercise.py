@@ -204,6 +204,18 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(client.payloads[0]["pyFlag"], "")
         self.assertEqual(client.payloads[0]["answerq5"], "")
 
+    def test_unusable_answer_is_asked_again_for_a_best_guess(self):
+        class GuessingAI(FakeAI):
+            def answer(self, question, guess=False):
+                self.asked.append(guess)
+                return {"answer": "B" if guess else None, "explanation": ""}
+
+        client, ai = FakeClient(work_page(SINGLE)), GuessingAI()
+        result = runner(client, ai, auto_submit=True).run(COURSE, POINT, JOB, JOB_INFO)
+        self.assertEqual(ai.asked, [False, True])
+        self.assertEqual(result["status"], "submitted")
+        self.assertEqual(client.payloads[0]["answerq1"], "B")
+
     def test_saves_only_when_auto_submit_off(self):
         client = FakeClient(work_page(SINGLE))
         result = runner(client, FakeAI({"1+1=?": "B"}), auto_submit=False).run(COURSE, POINT, JOB, JOB_INFO)
