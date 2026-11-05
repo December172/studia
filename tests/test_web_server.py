@@ -220,7 +220,7 @@ class WebServerTest(unittest.TestCase):
                "zhs": {"kind": "shared", "courseId": 7}}
         self.assertEqual(_course("zhs", row), {"id": "shared-7", "platform": "zhs", "name": "导论", "type": "共享课",
                                                "kind": "shared", "progress": 100,
-                                               "features": {"study": True, "answer": True, "review": True, "qa": True}, "shares": None})
+                                                        "features": {"study": True, "answer": True, "review": True, "qa": True, "mastery": True}, "shares": None})
         self.assertEqual(_course("mooc", {"courseName": "高数", "courseId": "a/b"})["id"], "a_b")
         self.assertIsNone(_course("zhs", {"zhs": {"kind": "ai", "courseId": 8}})["progress"])
 

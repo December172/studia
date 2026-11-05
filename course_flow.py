@@ -112,6 +112,18 @@ class CourseWorkspace:
                         self.platform, self.client, targets, review_minutes=REVIEW_MINUTES))
                 elif mode == 4 and self.platform == 2:
                     result = self.qa_area(offers["qa"])  # 只去考核里有问答互动分的课
+                elif mode == 5 and self.platform == 2:
+                    targets = offers["mastery"]
+                    self.view.review_study(targets, title="掌握度学习", notice=(
+                        "AI 作答并提交知识点练习；满分和免考跳过，每点最多练习 3 次。"
+                        "平台按最新一次结果计分，可能覆盖已有掌握度。"))
+                    config = self.app.ai_configuration()
+
+                    def mastery():
+                        self.app.execute_zhs_mastery(self.client, targets, config)
+                        return []
+
+                    result = self.execute(mastery, "掌握度学习")
                 else:
                     result = self.tasks(courses, mode, task_state.setdefault(mode, {}))
                 if result == 2:
@@ -130,7 +142,7 @@ class CourseWorkspace:
         """所选课程里哪些用得上每日复习、问答区（看各门课的考核规则），{"review": [...], "qa": [...]}。
         某门课的规则读不到就不收窄，照旧可选。"""
         from ZHSMain.api import course_offers
-        found = {"review": [], "qa": []}
+        found = {"review": [], "qa": [], "mastery": []}
         with self.view.activity("读取考核规则"):
             for row in courses:
                 z = row.get("zhs") or {}
