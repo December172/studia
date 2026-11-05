@@ -314,7 +314,9 @@ def decode_questions_info(html_text):
         value = form.get(key)
         other_answers = [node.get("name") for node in div.xpath(".//*[@name]")
                          if node.get("name", "").startswith("answer")
-                         and node.get("name") not in (key, "answertype" + question["id"])]
+                         and node.get("name") not in (key, "answertype" + question["id"])
+                         # Multiple-choice spans toggle the hidden answer; they are not submitted controls.
+                         and not (node.tag == "span" and node.get("name") == "answercheck" + question["id"])]
         if isinstance(value, list):
             filled = [part for part in value if part.strip()]
             if len(filled) <= 1:
