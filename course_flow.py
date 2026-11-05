@@ -4,6 +4,7 @@ from pathlib import Path
 from AIMoocMain.export_questions import QuizExportHandler, paper_exam_id
 from ai.runner import report_path
 from ui import Back, Cancelled
+from ZHSMain.qa import ANSWER_CAP, DAILY_ANSWERS, DAILY_QUESTIONS, QUESTION_CAP
 
 REVIEW_MINUTES = 30
 
@@ -154,10 +155,15 @@ class CourseWorkspace:
             action = self.view.qa_menu(self.qa_scores(courses))  # Esc 回课程菜单
             try:
                 if action == 1:
+                    left = self.qa_left(courses, "answers", ANSWER_CAP, DAILY_ANSWERS)
+                    if left <= 0:
+                        self.view.note("有效回答已经 %d 条，再答不加分。" % ANSWER_CAP, "warning")
+                        continue
                     saved = self.store.get("qa", {})
-                    limit = self.view.qa_size("回答提问 / 每门课几条", (5, 10, 20),
+                    limit = self.view.qa_size("回答提问 / 每门课几条", (3, 5, 10),
                                               saved.get("limit") if isinstance(saved, dict) else None)
                     self.app.remember(lambda: self.store.set("qa", {"limit": limit}))
+                    limit = min(limit, left)
                     config = self.app.ai_configuration()
 
                     def answer():
@@ -174,8 +180,8 @@ class CourseWorkspace:
                 return 2
 
     def qa_scores(self, courses):
-        """每门课一行：互动分和「我的互动」三个数，和网页问答区顶上那行一样。读不到的课不写。"""
-        lines = []
+        """每门课一行：互动分和离封顶还差多少（有效提问 10 条、有效回答 20 条拿满），和网页问答区顶上那行一样。"""
+        lines, self.qa_counts = [], {}
         with self.view.activity("读取问答得分"):
             for row in courses:
                 z = row.get("zhs") or {}
@@ -184,21 +190,33 @@ class CourseWorkspace:
                 except Exception:  # 只是展示，读不到不挡操作
                     continue
                 full = (self.shares.get(z["courseId"]) or {}).get("interactive")
-                q = got["qa"]
+                q = self.qa_counts[z["courseId"]] = got["qa"]
                 lines.append(f"{row.get('courseName', '')}：互动分 {got['interactive']:g}{f'/{full:g}' if full else ''}"
-                             f" · 有效回答 {q['answers']} · 有效提问 {q['questions']} · 收获回答 {q['received']}")
+                             f" · 提问 {q['questions']}/{QUESTION_CAP} · 回答 {q['answers']}/{ANSWER_CAP}"
+                             f" · 收获回答 {q['received']}（次日上午更新）")
         return lines
 
+    def qa_left(self, courses, kind, cap, daily):
+        """这几门课里离封顶最远的还差几条，再不超过每天的上限。读不到分数的课按还没发过算。"""
+        counts = getattr(self, "qa_counts", {})
+        return min(daily, max((cap - int((counts.get((row.get("zhs") or {}).get("courseId")) or {}).get(kind) or 0)
+                               for row in courses), default=cap))
+
     def ask_questions(self, courses):
-        """发起提问：一门课一批，AI 照这门课问答区里回答少的提问出题。"""
+        """发起提问：一门课一批，AI 围绕这门课的小节出题，避开问答区里已有的提问。"""
         course = courses[0]
         if len(courses) > 1:
             course = courses[self.view.choice("发起提问 / 哪门课", [
                 (i, row.get("courseName", ""), "") for i, row in enumerate(courses, 1)]) - 1]
+        left = self.qa_left([course], "questions", QUESTION_CAP, DAILY_QUESTIONS)
+        if left <= 0:
+            self.view.note("有效提问已经 %d 条，再发不加分。" % QUESTION_CAP, "warning")
+            return 1
         saved = self.store.get("qa_ask", {})
         count = self.view.qa_size("发起提问 / 出几条", (1, 3, 5),
                                   saved.get("count") if isinstance(saved, dict) else None)
         self.app.remember(lambda: self.store.set("qa_ask", {"count": count}))
+        count = min(count, left)
         texts = self.prepare_questions([course], {"count": count})
         if not texts:
             return 1
