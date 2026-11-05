@@ -10,15 +10,16 @@ from web.server import JOBS, HttpError, Studia, _ask_texts, _Board, drain
 
 ROW = {"courseName": "新一代信息技术导论", "zhs": {"kind": "shared", "courseId": 1000091138, "recruitId": 444872}}
 LONG = "这是一段足够长的回答，讲清楚了概念和它的用途。" * 3
+DRAFT = "边缘计算和云计算各自适合什么样的业务场景？"
 
 
 class FakeBridge:
     """Stands in for QaBridge: a board with questions by answer count; records what gets posted."""
 
     def __init__(self, board=None):
-        self.board = board or [{"id": 1, "content": "已有一条回答的提问", "answers": 1},
-                               {"id": 2, "content": "没人回答的提问", "answers": 0},
-                               {"id": 3, "content": "回答很多的提问", "answers": 5}]
+        self.board = board or [{"id": 1, "content": "分层架构为什么能让系统更容易维护？", "answers": 1},
+                               {"id": 2, "content": "边缘计算和云计算在工厂里应该怎样分工？", "answers": 0},
+                               {"id": 3, "content": "物联网设备的安全为什么总是难以保障？", "answers": 5}]
         self.published, self.asked = [], []
 
     def __enter__(self): return self
@@ -47,7 +48,8 @@ class WebQaTest(unittest.TestCase):
         self.addCleanup(drain, 5)
 
     def run_job(self, body, bridge):
-        with patch("web.server.QaBridge", return_value=bridge), patch("web.server.QA_PACE", (0, 0)):
+        with patch("web.server.QaBridge", return_value=bridge), patch("web.server.QA_PACE", (0, 0)), \
+                patch("web.server.ASK_PACE", (0, 0)):
             self.app.start_job(dict(body, platform="zhs", course="shared-1000091138"))
             deadline = time.time() + 5
             while self.app.jobs and time.time() < deadline:
@@ -60,7 +62,7 @@ class WebQaTest(unittest.TestCase):
         self.assertEqual(job["state"], "done")
         self.assertEqual([qid for qid, _ in bridge.published], [2, 1])
         posts = self.app.qa_posts("zhs", "shared-1000091138")["posts"]
-        self.assertEqual([(p["kind"], p["question"]) for p in posts], [("answer", "已有一条回答的提问"), ("answer", "没人回答的提问")])
+        self.assertEqual([(p["kind"], p["question"]) for p in posts], [("answer", "分层架构为什么能让系统更容易维护？"), ("answer", "边缘计算和云计算在工厂里应该怎样分工？")])
         self.assertEqual(posts[0]["text"], LONG)
 
     def test_asking_publishes_the_reviewed_texts(self):
@@ -72,24 +74,40 @@ class WebQaTest(unittest.TestCase):
         self.assertEqual(self.app.qa_posts("zhs", "shared-1000091138")["posts"][0]["kind"], "ask")
 
     def test_ask_texts_are_checked(self):
-        for bad in ({}, {"texts": []}, {"texts": ["太短"]}, {"texts": ["合格的提问一二三四五"] * 6}):
+        for bad in ({}, {"texts": []}, {"texts": ["太短？"]}, {"texts": [DRAFT] * 6},
+                    {"texts": ["云计算好吗？"]}, {"texts": ["物联网安全为什么难做？？"]}):
             with self.assertRaises(HttpError):
                 _ask_texts(bad)
-        self.assertEqual(_ask_texts({"texts": ["同一个提问写了两遍", "同一个提问写了两遍"]}), ["同一个提问写了两遍"])
+        self.assertEqual(_ask_texts({"texts": [DRAFT, DRAFT]}), [DRAFT])
 
     def test_draft_writes_one_question_at_a_time_from_the_quiet_threads(self):
-        ai = Mock(answer=Mock(return_value={"answer": "边缘计算会不会取代云计算？"}))
+        ai = Mock(answer=Mock(return_value={"answer": "边缘计算和云计算各自适合什么样的业务场景？"}))
         self.app._ai = Mock(return_value=ai)
         with patch("web.server.QaBridge", return_value=FakeBridge()) as bridge:
             first = self.app.qa_draft("zhs", {"course": "shared-1000091138"})
             again = self.app.qa_draft("zhs", {"course": "shared-1000091138", "have": first["questions"]})
-        self.assertEqual(first["questions"], ["边缘计算会不会取代云计算？"])
+        self.assertEqual(first["questions"], ["边缘计算和云计算各自适合什么样的业务场景？"])
         self.assertEqual(again["questions"], [])  # the one the page already has is not repeated
         prompt = ai.answer.call_args.args[0]["title"]
-        self.assertIn("没人回答的提问", prompt)
-        self.assertIn("边缘计算会不会取代云计算？", prompt)  # shown to the model so it writes something else
-        self.assertNotIn("回答很多的提问", prompt)
+        self.assertIn("边缘计算和云计算在工厂里应该怎样分工？", prompt)
+        self.assertIn("边缘计算和云计算各自适合什么样的业务场景？", prompt)  # shown to the model so it writes something else
+        self.assertNotIn("物联网设备的安全为什么总是难以保障？", prompt)
         self.assertEqual(bridge.call_count, 1)  # the board is read once, not per question
+        self.assertFalse(JOBS)
+
+    def test_daily_limit_and_cap_hold_back_jobs(self):
+        for n in range(10):  # ten answers already posted today
+            self.app._record_post(1000091138, "answer", "q", "a", n)
+        with self.assertRaises(HttpError) as refused:
+            self.app.start_job({"platform": "zhs", "course": "shared-1000091138", "type": "qa", "limit": 5})
+        self.assertIn("明天再来", str(refused.exception))
+        self.app.platforms["zhs"].client.score_earned.return_value = {"qa": {"questions": 8, "answers": 0}}
+        self.app.platforms["zhs"].cache.clear()  # the score the first try read
+        room = self.app.qa_posts("zhs", "shared-1000091138")["room"]
+        self.assertEqual((room["ask"], room["answer"]), (2, 0))  # 10 questions score, 8 already count
+        with self.assertRaises(HttpError) as refused:
+            self.app.start_job({"platform": "zhs", "course": "shared-1000091138", "type": "ask", "texts": [DRAFT, LONG[:20] + "为什么？", "云计算的弹性扩展为什么会让成本难以预估？"]})
+        self.assertIn("还能发 2 条", str(refused.exception))
         self.assertFalse(JOBS)
 
     def test_drafting_waits_for_slow_models_without_testing_first(self):

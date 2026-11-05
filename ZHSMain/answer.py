@@ -97,17 +97,28 @@ def download_images(images, get=requests.get):
     """[(name, mime, bytes)] for a question's pictures, or None if any is unusable."""
     result = []
     for name, url in images.items():
+        response = None
         try:
-            response = get(url, timeout=(5, 15), allow_redirects=False)
+            response = get(url, timeout=(5, 15), allow_redirects=False, stream=True)
+            mime = (response.headers.get("Content-Type") or "").split(";")[0].strip()
+            if response.status_code != 200 or not mime.startswith("image/"):
+                logger.warning("题目图片不可用 %s：HTTP %s %s", name, response.status_code, mime)
+                return None
+            content = bytearray()
+            for chunk in response.iter_content(chunk_size=65536):
+                content.extend(chunk)
+                if len(content) > IMAGE_LIMIT:
+                    logger.warning("题目图片过大 %s", name)
+                    return None
+            if not content:
+                return None
+            result.append((name, mime, bytes(content)))
         except requests.RequestException as exc:
-            logger.warning("下载题目图片失败 %s：%s", name, exc)
+            logger.warning("下载题目图片失败 %s（%s）", name, type(exc).__name__)
             return None
-        mime = (response.headers.get("Content-Type") or "").split(";")[0].strip()
-        if (response.status_code != 200 or not mime.startswith("image/")
-                or len(response.content) > IMAGE_LIMIT):
-            logger.warning("题目图片不可用 %s：HTTP %s %s", name, response.status_code, mime)
-            return None
-        result.append((name, mime, response.content))
+        finally:
+            if response is not None:
+                response.close()
     return result
 
 

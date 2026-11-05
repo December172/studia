@@ -10,6 +10,7 @@ lxml（不新增解析依赖），选择器含义保持一致：
 """
 import json
 import re
+from html import escape
 
 from lxml import etree
 from lxml import html as lxml_html
@@ -307,22 +308,50 @@ def decode_questions_info(html_text):
     questions = []
     for div in _all(forms[0], "div", "singleQuesId"):
         question = _process_question(div, decoder)
-        if question is not None:
-            questions.append(question)
+        if question is None:
+            raise ValueError("作业包含无法解析的题目，未保存；请到平台核对")
+        key = "answer" + question["id"]
+        value = form.get(key)
+        other_answers = [node.get("name") for node in div.xpath(".//*[@name]")
+                         if node.get("name", "").startswith("answer")
+                         and node.get("name") not in (key, "answertype" + question["id"])]
+        if isinstance(value, list):
+            filled = [part for part in value if part.strip()]
+            if len(filled) <= 1:
+                value = filled[0] if filled else ""
+            elif question["type"] == "multiple" and all(
+                    part in {o["value"] for o in question["options"]} for part in filled):
+                value = "".join(sorted(filled))
+            else:
+                value = None  # conflicting controls: do not guess which one the platform will use
+        if other_answers:
+            value = None  # e.g. a multi-blank/editor variant whose serialization is not understood yet
+        question["existing_answer"] = value
+        if value is not None:
+            form[key] = value
+        questions.append(question)
     form["questions"] = questions
     form["answerwqbid"] = ",".join(question["id"] for question in questions) + ","
     return form
 
 
 def _extract_form(form_node):
-    """表单里除答案字段外的隐藏参数，交卷时原样带回。"""
+    """Keep successful controls, including existing answers; unselected choices are not answers."""
     data = {}
-    for node in form_node.xpath(".//input"):
+    for node in form_node.xpath(".//input | .//textarea"):
         name = node.get("name")
-        if not name or "answer" in name:
+        kind = (node.get("type") or "text").lower()
+        if not name or "disabled" in node.attrib or kind in ("submit", "button", "reset", "image", "file"):
             continue
-        data[name] = node.get("value", "")
-    return data
+        values = data.setdefault(name, [])
+        if kind in ("radio", "checkbox") and "checked" not in node.attrib:
+            continue
+        if kind in ("radio", "checkbox") and "value" not in node.attrib:
+            raise ValueError("已有选项缺少提交值，未保存；请到平台核对")
+        value = node.text_content() if node.tag == "textarea" else node.get("value", "")
+        if value not in values:
+            values.append(value)
+    return {name: values[0] if len(values) == 1 else values if values else "" for name, values in data.items()}
 
 
 def _process_question(div_tag, decoder=None):
@@ -350,7 +379,15 @@ def _title_text(element, decoder=None):
     for child in element:
         _walk(child, parts)
     text = _TITLE_NOISE.sub("", "".join(parts))
-    return decoder.decode(text) if decoder else text
+    return _decode_text(text, decoder)
+
+
+def _decode_text(text, decoder):
+    if decoder is None:
+        return text
+    # Font substitution applies to question text, never to image URLs or media markers.
+    return "".join(part if part.startswith("<") else decoder.decode(part)
+                   for part in re.split(r"(<(?:img|audio|video|iframe|svg)\b[^>]*>)", text))
 
 
 def _walk(node, parts):
@@ -360,7 +397,9 @@ def _walk(node, parts):
             parts.append(node.tail)
         return
     if node.tag == "img":
-        parts.append('<img src="%s">' % (node.get("src") or ""))
+        parts.append(_image_marker(node))
+    elif node.tag in ("audio", "video", "iframe", "svg"):
+        parts.append("<%s>" % node.tag)
     elif node.text:
         parts.append(node.text)
     for child in node:
@@ -372,14 +411,20 @@ def _walk(node, parts):
 def _choice_list(div_tag, decoder=None):
     lists = div_tag.xpath(".//ul")
     choices = []
-    for item in lists[0].xpath("./li") if lists else []:
+    for index, item in enumerate(lists[0].xpath("./li") if lists else []):
         choice = _choice_text(item, decoder)
         if choice:
-            choices.append(choice)
+            controls = item.xpath('.//input[@type="radio" or @type="checkbox"]/@value')
+            native = next((v for v in controls if len(v) == 1 and "A" <= v <= "Z"), None)
+            label = native or _choice_label(index, choice)
+            choices.append({"label": label, "value": native or (label if choice.startswith("<") else choice[:1]),
+                            "text": choice})
     # 超星页面里的选项按字母顺序给出，但题面顺序偶尔会乱，排序后与提交顺序一致。
-    choices.sort()
-    return [{"label": _choice_label(index, text), "value": text[:1], "text": text}
-            for index, text in enumerate(choices)]
+    return sorted(choices, key=lambda option: option["label"])
+
+
+def _image_marker(node):
+    return '<img src="%s">' % escape(node.get("src") or node.get("data-src") or "", quote=True)
 
 
 def _choice_label(index, text):
@@ -389,12 +434,20 @@ def _choice_label(index, text):
 
 def _choice_text(element, decoder=None):
     # aria-label 是超星给读屏软件准备的纯文本，比正文更干净（修复 #474 的思路）。
-    choice = element.get("aria-label") or "".join(element.itertext())
+    choice = element.get("aria-label")
+    if choice:
+        choice += "".join(_image_marker(node) for node in element.xpath(".//img"))
+        choice += "".join("<%s>" % node.tag for node in element.xpath(".//audio | .//video | .//iframe"))
+    else:
+        parts = [element.text or ""]
+        for child in element:
+            _walk(child, parts)
+        choice = "".join(parts)
     if not choice:
         return ""
     choice = _CHOICE_NOISE.sub("", choice)
     if decoder:
-        choice = decoder.decode(choice)
+        choice = _decode_text(choice, decoder)
     choice = choice.strip()
     if choice.endswith("选择"):
         choice = choice[:-2].rstrip()
