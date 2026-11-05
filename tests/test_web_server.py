@@ -47,7 +47,7 @@ class WebServerTest(unittest.TestCase):
         status, body = self.request("GET", "/api/state")
         self.assertEqual(status, 200)
         state = json.loads(body)
-        self.assertEqual([p["id"] for p in state["platforms"]], ["mooc", "cx", "zhs"])
+        self.assertEqual([p["id"] for p in state["platforms"]], ["mooc", "zhs", "cx"])
         self.assertFalse(any(p["logged_in"] for p in state["platforms"]))
         self.assertEqual(state["jobs"], [])
 

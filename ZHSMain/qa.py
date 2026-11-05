@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import json
+import random
+import re
 import time
 
 from MoocMain.log import Logger
@@ -53,11 +55,13 @@ async ({courseId, recruitId, maxAnswers, limit, pageSize}) => {
       {courseId, recruitId, pageIndex, pageSize});
     const list = (j.rt && j.rt.questionInfoList) || [];
     if (!list.length) break;
+    const me = document.querySelector('#app').__vue__.$store.state.baseData.userId;
     for (const q of list) {
       if (q.answerNum <= maxAnswers) {
         out.push({id: q.questionId, content: q.content, answers: q.answerNum,
                   user: (q.userDto || {}).username || '', time: q.timeStr || '',
-                  chapter: q.chapterName || ''});
+                  chapter: q.chapterName || '', asker: q.questionUserId, at: q.createTime,
+                  mine: q.questionUserId === me});
       }
     }
     pageIndex = (j.rt && j.rt.pageIndex) || pageIndex + list.length;
@@ -224,7 +228,9 @@ def answer_questions(qa, ai, *, max_answers=1, limit=10, interval=60, state_path
                 seen = set(json.load(handle))
         except (OSError, ValueError):
             seen = set()
-    items = [q for q in qa.questions(max_answers=max_answers, limit=limit * 3) if q["id"] not in seen][:limit]
+    # 多取很多再筛：最新的提问大多是刷帖和水帖，回答它们会随它们被删，白费一条。
+    items = [q for q in worth_answering(qa.questions(max_answers=max_answers, limit=limit * 30))
+             if q["id"] not in seen][:limit]
     stats = {"answered": 0, "skipped": 0, "failed": 0, "ids": []}
     on_event("begin", "问答区答题", "running")
     for index, item in enumerate(items, 1):
@@ -233,6 +239,8 @@ def answer_questions(qa, ai, *, max_answers=1, limit=10, interval=60, state_path
         title = item["content"]
         try:
             answer = ai.answer({"type": "问答题", "title": title}).get("answer")
+            # 规则：回答开头不要加「答案：」「回答：」这类词。
+            answer = re.sub(r"^\s*(?:答案|回答|答)\s*[:：]\s*", "", answer) if isinstance(answer, str) else answer
             if not isinstance(answer, str) or len(answer.strip()) < 30:
                 raise ValueError("AI 回答为空或过短")
             answer_id = qa.publish(item["id"], answer.strip()[:1000])
@@ -260,27 +268,81 @@ def answer_questions(qa, ai, *, max_answers=1, limit=10, interval=60, state_path
     return stats
 
 
+# 智慧树问答规则（wiki-wenda.zhihuishu.com「问答规则」）：有效提问每条 5 分、最多 10 条；
+# 有效回答每条 2 分、最多 20 条；自己的提问下有 5 个有效回答再 1 分、最多 10 条；
+# 合计再乘课程互动分占比。数据次日上午更新。封顶以后再发不加分，只多一分被判刷帖的风险。
+QUESTION_CAP, ANSWER_CAP = 10, 20
+# 每门课每天最多发这么多：规则说短时间内连发、同一句式连发会被删帖，第三方刷帖整学期禁言。
+DAILY_QUESTIONS, DAILY_ANSWERS = 5, 10
+
 # 让模型的「问答题」能力产出提问正文：它只需把问题写成答案，答卷格式不变。
 QUESTION_RULES = (
-    "只输出问题本身：一到两句话，具体到可以讨论；不要称呼老师、同学或「大家」，"
-    "不要「请问」「想请教」「想问一下」这类客套，"
-    "不要「作为大学生」「我们」这种身份和立场铺垫，不要自我介绍，"
-    "不要序号和 Markdown，不要自己作答。"
+    "要求：只输出提问本身，一句话，20 到 60 个字，以一个问号结尾，中间不要再出现问号；"
+    "结合这一节讲的内容，问原因、比较、影响，或者提出自己的看法请大家讨论；"
+    "不要问能直接搜到固定答案的事实（谁、哪一年、什么时候），"
+    "不要写成名词解释（什么是、是什么意思、指什么）或是非题（是不是、对不对、有没有、能不能、是否、……吗）；"
+    "不要用「请问」开头，不要称呼老师同学，不要「作为大学生」「我们」这类铺垫；"
+    "不要带括号、下划线、序号、选项、答案、链接。"
 )
-QUESTION_PROMPT = (
-    "这门课是「%s」。请围绕「%s」写第 %d 个用于课程问答区的问题。\n" + QUESTION_RULES
-)
-# 出题的选题池：问答区里回答数最少的那些提问，让模型挑一个还没问透的方向。
-QUESTION_FROM_REFERENCE = (
-    "这门课是「%s」。课程问答区里回答较少的提问有：\n%s\n"
-    "请从中挑一个还没问透的方向，写第 %d 个新的提问；"
-    "不要重复上面任何一条，也不要换个说法问同一件事。\n" + QUESTION_RULES
-)
+QUESTION_PROMPT = "这门课是「%s」。请围绕课程里「%s」这一节的内容，写一个发到课程问答区的提问。\n" + QUESTION_RULES
+QUESTION_AVOID = "\n问答区里已经有这些提问，不要重复，也不要换个说法问同一件事：\n%s"
+QUESTION_REDO = "\n上一次写的「%s」不合格：%s。请重写。"
 MIN_QUESTION, MAX_QUESTION = 8, 200
-QA_PACE = (45, 90)         # 两条之间随机隔几秒，每次重抽：间隔一样像脚本；网页和终端共用
+QA_PACE = (60, 180)        # 两条回答之间随机隔几秒，每次重抽：间隔一样像脚本；网页和终端共用
+# 提问隔得更开：同一个人几分钟里连发几条，正是问答区清理刷帖的样子（实测满屏都是这种帖）。
+ASK_PACE = (600, 1200)
 REFERENCE_ANSWERS = 1      # 参考题目只取回答数为 0–1 的
 MAX_REFERENCES = 8         # 塞进提示词的参考题目数量上限
 MAX_REFERENCE_CHARS = 70   # 每条参考题目截到这个长度
+
+# 规则和「什么是无效提问」「审核会删哪些帖」两篇里点名会被判无效或删掉的写法。
+QUESTION_FLAWS = (
+    (r"^请问", "不要用「请问」开头"),
+    (r"^\s*(?:\d+|[一二三四五六七八九十]+)\s*[、.．)）]", "不要加序号"),
+    (r"[()（）\[\]【】_＿]", "不要带括号或下划线"),
+    (r"https?://|www\.|[Qq][Qq]|微信|公众号", "不要带链接或联系方式"),
+    (r"(?:^|[^A-Za-z])[A-D][.．、]", "不要写成选择题"),
+    (r"(?<!为)什么是|是什么意思|是什么[?？]$|指什么|指的是什么|的含义|的定义|名词解释", "名词解释类提问会被判无效"),
+    (r"是不是|对不对|好不好|有没有|能不能|会不会|可不可以|是否|吗[?？]$", "是非题会被判无效"),
+    (r"是谁|哪一年|什么时候|何时", "问人物、时间这类固定答案会被判无效"),
+)
+BURST = (3, 10 * 60 * 1000)   # 同一个人 10 分钟内发 3 条以上，多半是刷帖，迟早被删
+OLDEST = 180 * 24 * 3600 * 1000  # 往期学期的提问，回答也算无效
+
+
+def question_flaw(text):
+    """按智慧树问答规则会被判无效或删掉的毛病；没有返回 None。"""
+    text = str(text or "").strip()
+    if sum(text.count(mark) for mark in "?？") != 1 or text[-1:] not in ("?", "？"):
+        return "要以一个问号结尾，中间不能再有问号"
+    for pattern, reason in QUESTION_FLAWS:
+        if re.search(pattern, text):
+            return reason
+    if not MIN_QUESTION <= len(text) <= MAX_QUESTION:
+        return "要 %d–%d 个字" % (MIN_QUESTION, MAX_QUESTION)
+    return None
+
+
+def worth_answering(items, now=None):
+    """问答区里值得回答的提问。水帖、刷帖、自问自答和往期的提问会被删，回答它们的也一并作废。"""
+    now = now or time.time() * 1000
+    times = {}
+    for item in items:
+        if item.get("asker") is not None and item.get("at"):
+            times.setdefault(item["asker"], []).append(item["at"])
+    count, window = BURST
+    bursty = {asker for asker, stamps in times.items()
+              if any(len([t for t in stamps if 0 <= t - start <= window]) >= count for start in stamps)}
+    return [item for item in items
+            if not item.get("mine") and item.get("asker") not in bursty
+            and not (item.get("at") and now - item["at"] > OLDEST)
+            and question_flaw(item.get("content")) is None]
+
+
+def qa_room(valid, posted_today, cap, daily):
+    """还能发几条：离封顶还差多少、今天还剩多少，取小的。valid 是平台记的有效数，次日才算上今天发的。"""
+    return max(0, min(cap - int(valid or 0) - posted_today, daily - posted_today))
+
 
 # 模型仍可能开头带称呼或客套，发布前再剥一层。长前缀先匹配；True 直接去掉，
 # False 要求后面紧跟标点——否则「老师布置的作业」会被削成「布置的作业」。
@@ -311,49 +373,48 @@ def _strip_lead_ins(text):
 
 
 def _clean_question(text):
-    """只留问题本身：去掉称呼、客套、引号、序号和多余空白。"""
+    """只留问题本身：去掉称呼、客套、引号、序号和多余空白；结尾的英文问号换成中文问号。"""
     text = " ".join(str(text or "").split()).strip("\"'“”‘’` ")
     if len(text) > 2 and text[0].isdigit() and text[1] in ".、)）":
         text = text[2:].lstrip()
-    return _strip_lead_ins(text)
+    text = _strip_lead_ins(text)
+    return text[:-1] + "？" if text.endswith("?") else text
 
 
-def write_questions(ai, reference, count, *, course_name="", on_progress=None):
-    """参考回答较少的提问，让模型写 count 条新提问。
+def write_questions(ai, reference, count, *, course_name="", topics=(), on_progress=None):
+    """让模型写 count 条新提问，每条围绕课程里的一节（topics，小节名）谈原因、比较或看法。
 
-    reference 是问答区里回答数较少的提问正文；为空时退回到课程主题。
-    与参考题目重复（或模型自己重复）的跳过。on_progress(序号, 总数) 在每次请求前调用。
+    reference 是问答区已有的提问，只用来让模型避开：规则说相似度 98% 以上算无效。
+    写出来按 question_flaw 检查，不合格带着原因再写，每条最多三次；和已有的重复也重写。
+    on_progress(序号, 总数) 在每条开始前调用。
     """
     reference = [str(text).strip()[:MAX_REFERENCE_CHARS]
                  for text in (reference or []) if str(text).strip()][:MAX_REFERENCES]
-    bullets = "\n".join("- " + text for text in reference)
+    avoid = QUESTION_AVOID % "\n".join("- " + text for text in reference) if reference else ""
+    topics = [str(t) for t in dict.fromkeys(topics or ()) if str(t).strip()]
+    order = random.sample(topics, len(topics)) if topics else []
     total = max(1, int(count))
     texts = []
     for index in range(1, total + 1):
-        if reference:
-            prompt = QUESTION_FROM_REFERENCE % (course_name or "这门课", bullets, index)
-        else:
-            prompt = QUESTION_PROMPT % (course_name or "这门课", "课程的核心概念", index)
+        topic = order[(index - 1) % len(order)] if order else "课程的核心内容"
+        base = QUESTION_PROMPT % (course_name or "这门课", topic) + avoid
         if on_progress is not None:
             on_progress(index, total)
-        try:
-            answer = ai.answer({"type": "问答题", "title": prompt}).get("answer")
-        except AIResponseError:
-            # 推理模型偶尔只回思考、正文为空或被截断：再要一次，还不行就跳过这条。超时等其他错误照常抛出，不再多等一轮。
-            logger.warning("AI 第 %d 条提问的回复不完整，重试一次", index)
+        redo = ""
+        for _ in range(3):
             try:
-                answer = ai.answer({"type": "问答题", "title": prompt}).get("answer")
+                answer = ai.answer({"type": "问答题", "title": base + redo}).get("answer")
             except AIResponseError:
-                logger.warning("AI 第 %d 条提问的回复仍不完整，已跳过", index)
+                # 推理模型偶尔只回思考、正文为空或被截断：再要一次。超时等其他错误照常抛出。
+                logger.warning("AI 第 %d 条提问的回复不完整，重试", index)
                 continue
-        text = _clean_question(answer)
-        if not MIN_QUESTION <= len(text) <= MAX_QUESTION:
-            logger.warning("AI 给出的第 %d 条提问不可用：%s", index, text[:40])
-            continue
-        if text in texts or text in reference:
-            logger.warning("AI 重复了已有的提问，已跳过：%s", text[:40])
-            continue
-        texts.append(text)
+            text = _clean_question(answer)
+            flaw = question_flaw(text) or ("和已有的提问重复" if text in texts or text in reference else None)
+            if flaw is None:
+                texts.append(text)
+                break
+            logger.warning("AI 给出的第 %d 条提问不合格（%s）：%s", index, flaw, text[:40])
+            redo = QUESTION_REDO % (text[:60], flaw)
     return texts
 
 

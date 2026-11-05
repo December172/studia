@@ -5,21 +5,22 @@
 - 交给答题服务的题干先去掉题号和「（1.0 分）」后缀；
 - 覆盖率达到阈值才真正提交（``pyFlag`` 为空），否则只保存（``pyFlag=1``），
   避免拿没答完的卷子消耗作业机会；
-- 一次交卷请求失败就是失败，不自动重发同一份答案。
-
-与源码的差异（有意为之）：源码在拿不到答案时随机选一个来凑覆盖率。这里不猜：
-AI 没给出的题留空并计入未覆盖，覆盖率不够就只保存，留给人工补答。
+- 一次交卷请求失败就是失败，不自动重发同一份答案；
+- 默认保留页面已填答案，只补空题；无法识别已有答案控件时不保存。
 """
 import re
 import threading
 import time
+from html import unescape
+from urllib.parse import urljoin
 
 from ai.client import AIError, AIServiceError
-from ChaoxingMain.api import ChaoxingError, WorkUnavailable
+from ChaoxingMain.api import BASE_URL, ChaoxingError, WorkUnavailable
 from ChaoxingMain.decode import decode_questions_info
 from ChaoxingMain.font import FontDecodeError
 from MoocMain.log import Logger
 from reporting import Reporter
+from ZHSMain.answer import IMAGE, download_images
 
 logger = Logger(__name__).get_log()
 
@@ -34,7 +35,7 @@ TYPE_NAMES = {
 
 TRUE_WORDS = {"true", "正确", "对", "是", "√", "t", "yes", "y"}
 FALSE_WORDS = {"false", "错误", "错", "否", "×", "不对", "不正确", "f", "no", "n"}
-MEDIA = re.compile(r"<(?:img|audio|video|iframe|svg)\b", re.I)
+MEDIA = re.compile(r"<(?:audio|video|iframe|svg)\b", re.I)
 _OPTION_LABEL_PREFIX = re.compile(r"^[A-Za-z][.、,，:：)）]\s*")
 _TITLE_NUMBER = re.compile(r"^\d+(?:[.、．)）]|\s)\s*")
 _TITLE_SCORE = re.compile(r"（\d+(?:\.\d+)?分）$")
@@ -53,11 +54,28 @@ def prompt_body(text):
     return _OPTION_LABEL_PREFIX.sub("", text or "").strip()
 
 
-def model_question(question):
+def model_question(question, images=None):
+    images = images if images is not None else {}
+    by_url = {}
+
+    def text(value):
+        def image(match):
+            if not match.group(1).strip():
+                raise ValueError("题目图片缺少下载地址")
+            url = urljoin(BASE_URL + "/mooc-ans/api/work", unescape(match.group(1)))
+            if url not in by_url:
+                by_url[url] = "cx-image-%d" % (len(by_url) + 1)
+                images[by_url[url]] = url
+            return " [图片:%s] " % by_url[url]
+        rendered = IMAGE.sub(image, value)
+        if re.search(r"<img\b", rendered, re.I):
+            raise ValueError("题目图片缺少可下载地址，需要人工处理")
+        return rendered
+
     return {
         "type": TYPE_NAMES.get(question["type"], "题目"),
-        "title": prompt_title(question["title"]),
-        "options": [{"label": option["label"], "text": prompt_body(option["text"])}
+        "title": prompt_title(text(question["title"])),
+        "options": [{"label": option["label"], "text": prompt_body(text(option["text"]))}
                     for option in question["options"]],
     }
 
@@ -69,7 +87,7 @@ def unsupported_reason(question):
     if not (question["title"] or "").strip():
         return "题干为空"
     if MEDIA.search(question["title"]) or any(MEDIA.search(option["text"]) for option in question["options"]):
-        return "包含图片或音视频，需要人工处理"
+        return "包含音视频、SVG 或嵌入内容，需要人工处理"
     if question["type"] in ("single", "multiple"):
         labels = [option["label"] for option in question["options"]]
         if len(labels) < 2:
@@ -171,6 +189,8 @@ class ChaoxingExerciseRunner:
         questions = sheet["questions"]
         if not questions:
             return self._result(name, "error", "页面里没有读到题目")
+        if any(question["existing_answer"] is None for question in questions):
+            return self._result(name, "error", "无法可靠读取已有答案控件，未保存；请到平台核对")
 
         values, problems = self._answer_all(name, questions)
         if self.cancel_event.is_set():
@@ -199,6 +219,9 @@ class ChaoxingExerciseRunner:
             if self.cancel_event.is_set():
                 return values, problems
             self.reporter.questions(name, index, len(questions))
+            if (question.get("existing_answer") or "").strip():
+                values[question["id"]] = question["existing_answer"]
+                continue
             problem = unsupported_reason(question)
             if problem:
                 problems[question["id"]] = problem
@@ -207,8 +230,21 @@ class ChaoxingExerciseRunner:
             try:
                 if self.delay:
                     self.sleep(self.delay)
-                response = self.ai_client.answer(model_question(question))
-                values[question["id"]] = encode_answer(question, response["answer"])
+                images = {}
+                asked = model_question(question, images)
+                pictures = download_images(images, get=self.client.work_image) if images else None
+                if images and pictures is None:
+                    raise ValueError("题目图片无法下载或不是有效图片，需要人工处理")
+                media = {"images": pictures} if pictures else {}
+                response = self.ai_client.answer(asked, **media)
+                try:
+                    values[question["id"]] = encode_answer(question, response["answer"])
+                except ValueError as error:
+                    # 和 MOOC、智慧树一致：没把握（null）或格式不对就再问一次，要它给出最可能的答案；
+                    # 一道题空着，覆盖率不够就整份不交。
+                    logger.info("%s：第 %d 题 AI 没给出可用答案（%s），改为让它给出最可能的答案", name, index + 1, error)
+                    response = self.ai_client.answer(asked, guess=True, **media)
+                    values[question["id"]] = encode_answer(question, response["answer"])
             except AIServiceError:
                 raise
             except AIError as error:
@@ -227,8 +263,9 @@ class ChaoxingExerciseRunner:
         payload = {name: value for name, value in sheet.items() if name != "questions"}
         payload["answerwqbid"] = sheet["answerwqbid"]
         for question in questions:
-            # 保存模式下只写已答出的题，其余留空给人工补；提交模式下未答的题也留空。
-            payload["answer" + question["id"]] = values.get(question["id"], "")
+            # Answers omitted by AI retain their original successful-control value, including empty ones.
+            if question["id"] in values:
+                payload["answer" + question["id"]] = values[question["id"]]
             payload["answertype" + question["id"]] = question["type_code"]
         payload["pyFlag"] = "" if submit else "1"
         return payload
