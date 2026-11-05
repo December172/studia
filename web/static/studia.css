@@ -437,9 +437,9 @@ code { font: 12px var(--mono); padding: 1px 5px; border-radius: 3px; background:
 .slot_head { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .slot_head b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slot_foot { display: flex; align-items: center; gap: 10px; margin-top: 6px; font-size: 11.5px; color: var(--text-3); white-space: nowrap; }
-.slot.empty { place-items: center; box-shadow: none; outline: 1px dashed var(--line-2); outline-offset: -1px; color: var(--text-4); font-size: 12.5px; }
+.slot.vacant { place-content: center; box-shadow: none; outline: 1px dashed var(--line-2); outline-offset: -1px; color: var(--text-4); font-size: 12.5px; }
 .slot.drop { box-shadow: inset 3px 0 0 var(--c, var(--indigo)), 0 0 0 2px var(--indigo); }
-.slot.empty.drop { outline-color: var(--indigo); color: var(--indigo); }
+.slot.vacant.drop { outline-color: var(--indigo); color: var(--indigo); }
 .dots { display: grid; place-items: center; flex: none; width: 26px; height: 26px; margin: -4px -2px -4px 0; border-radius: 5px; color: var(--text-3); }
 @media (hover: hover) { .dots:hover { background: var(--well); color: var(--text); } }
 .board_head { display: flex; align-items: baseline; gap: 10px; margin: 18px 0 8px; font-size: 13px; font-weight: 600; color: var(--text-2); }
