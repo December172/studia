@@ -57,8 +57,9 @@ mArg={"defaults":{"ktoken":"kt","cpi":"333","knowledgeid":"123","reportTimeInter
 def question_block(question_id, type_code, title, options=()):
     items = "".join('<li aria-label="%s"></li>' % text for text in options)
     return ('<div class="singleQuesId" data="%s"><div class="TiMu" data="%s">'
+            '<input type="hidden" name="answer%s" value="">'
             '<div class="Zy_TItle"><span>%s</span></div>%s</div></div>'
-            % (question_id, type_code, title, "<ul>%s</ul>" % items if items else ""))
+            % (question_id, type_code, question_id, title, "<ul>%s</ul>" % items if items else ""))
 
 
 def work_page(*blocks):
