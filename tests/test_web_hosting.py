@@ -14,7 +14,7 @@ import web.accounts
 from web.accounts import AccountError, Accounts, Sessions, Throttle
 from settings import SettingsError
 from web.hosting import COOKIE, EncryptedSettingsStore, HostedAccess, Hub, _key_file, export_logs, load_key, main
-from web.server import JOBS, Studia, _EventLogHandler, make_handler
+from web.server import JOBS, HttpError, Studia, _EventLogHandler, make_handler
 
 
 class HostedServerTest(unittest.TestCase):
@@ -184,6 +184,110 @@ class HostedServerTest(unittest.TestCase):
         self.assertEqual([f.name for f in files], ["settings.enc"])
         self.assertNotIn("sk-alice-secret", files[0].read_text())
         self.assertEqual(oct(files[0].stat().st_mode & 0o777), "0o600")
+
+    def test_shared_model_is_opt_in_server_only_and_follows_admin_changes(self):
+        admin, admin_csrf = self.login("admin", "admin-password")
+        uid = self.hub.accounts.create_user("alice", "alice-password")
+        alice, csrf = self.login("alice", "alice-password")
+        post = lambda path, body: self.request("POST", path, body, cookie=admin, csrf=admin_csrf)
+        form = {"provider_name": "站点额度", "base_url": "https://shared.example/v1", "model": "shared-model",
+                "api_key": "synthetic-admin-secret", "api_format": "chat_completions"}
+        self.assertEqual(post("/api/admin/shared-model", form)[0], 200)
+        models = self.request("GET", "/api/settings", cookie=alice)[1]["models"]
+        shared = next(m for m in models if m["shared"])
+        self.assertFalse(shared["active"])
+        self.assertFalse(shared["deletable"])
+        self.assertEqual(shared["key_hint"], "")
+        self.assertNotIn(form["api_key"], json.dumps(models))
+        self.assertEqual(self.request("POST", "/api/settings/models/activate", {"id": shared["id"]},
+                                      cookie=alice, csrf=csrf)[0], 200)
+        app = self.hub.app(uid)
+        self.assertEqual(app.ai_config().api_key, form["api_key"])
+        self.assertNotIn(form["api_key"], json.dumps(app.store._read()))
+        encrypted = self.hub.shared_store.path
+        self.assertNotIn(form["api_key"], encrypted.read_text())
+        self.assertEqual(oct(encrypted.stat().st_mode & 0o777), "0o600")
+
+        session = Mock()
+        session.post.return_value.status_code = 200
+        session.post.return_value.json.return_value = {
+            "choices": [{"finish_reason": "stop", "message": {"content": '{"answer":"A","explanation":"ok"}'}}]}
+        with patch("ai.client.requests.Session", return_value=session):
+            ai = app._ai("需要模型")
+            ai.answer({"type": "单选", "title": "test"})
+            ai.session.close()
+        for call in session.post.call_args_list:
+            self.assertEqual(call.args[0], form["base_url"] + "/chat/completions")
+            self.assertEqual(call.kwargs["headers"]["Authorization"], "Bearer " + form["api_key"])
+        self.assertEqual(self.request("GET", "/api/settings", cookie=alice)[1]["models"][0]["health"], "ok")
+
+        # The captcha path creates its client directly rather than through _ai.
+        handler = Mock(return_value=Mock(blocked=None))
+        with patch.object(app, "client", return_value=Mock()), patch.object(app, "progress_of"), \
+                patch.dict(app.platform("zhs").spec, {"handler": handler}):
+            app._study(app.platform("zhs"), {}, 0, {"cancel": threading.Event()})
+        self.assertEqual(handler.call_args.kwargs["captcha_ai"].config.api_key, form["api_key"])
+
+        rotated = dict(form, api_key="synthetic-rotated-secret", model="new-model")
+        self.assertEqual(post("/api/admin/shared-model", rotated)[0], 200)
+        self.assertEqual(app.ai_config().api_key, rotated["api_key"])
+        restarted = Hub(self.hub.data, self.hub.public_url, key=self.hub.key)
+        self.assertEqual(restarted.app(uid).ai_config().model, "new-model")
+        self.assertTrue(restarted.app(uid).settings()["models"][0]["active"])
+
+        self.assertEqual(post("/api/admin/shared-model", {"enabled": False})[0], 200)
+        with self.assertRaisesRegex(HttpError, "已停用"):
+            app._ai("需要模型")
+        self.assertFalse(any(m["active"] for m in app.settings()["models"]))
+        default = app.settings()["models"][0]
+        self.assertEqual(self.request("POST", "/api/settings/models/activate", {"id": default["id"]},
+                                      cookie=alice, csrf=csrf)[0], 200)
+        self.assertEqual(app.ai_config(), app.store.ai_config())
+        self.assertEqual(post("/api/admin/shared-model", dict(rotated, api_key=""))[0], 200)
+        self.assertEqual(self.hub.shared_store.ai_config().api_key, rotated["api_key"])
+        # Enabling it again preserves the user's explicit choice of another model.
+        self.assertFalse(app.settings()["models"][0]["active"])
+        audit = (self.hub.data / "audit.log").read_text()
+        self.assertNotIn(form["api_key"], audit)
+        self.assertNotIn(rotated["api_key"], audit)
+
+    def test_only_admin_can_change_shared_credentials_and_invalid_edits_preserve_them(self):
+        admin, admin_csrf = self.login("admin", "admin-password")
+        uid = self.hub.accounts.create_user("alice", "alice-password")
+        alice, csrf = self.login("alice", "alice-password")
+        form = {"base_url": "https://shared.example/v1", "model": "shared-model",
+                "api_key": "synthetic-admin-secret", "api_format": "auto"}
+        endpoint = "/api/admin/shared-model"
+        self.assertEqual(self.request("GET", endpoint, cookie=alice)[0], 403)
+        self.assertEqual(self.request("POST", endpoint, form, cookie=alice, csrf=csrf)[0], 403)
+        self.assertEqual(self.request("POST", endpoint, form, cookie=admin)[0], 403)
+        status, result, _, _ = self.request("POST", endpoint, form, cookie=admin, csrf=admin_csrf)
+        self.assertEqual(status, 200)
+        self.assertNotIn(form["api_key"], json.dumps(result))
+        before = self.hub.shared_store.path.read_bytes()
+        for edit in (dict(form, base_url="https://other.example/v1", api_key=""),
+                     dict(form, api_format="bad"), dict(form, base_url="http://example.org/v1")):
+            self.assertEqual(self.request("POST", endpoint, edit, cookie=admin, csrf=admin_csrf)[0], 400)
+            self.assertEqual(self.hub.shared_store.path.read_bytes(), before)
+        shared_id = self.hub.app(uid).settings()["models"][0]["id"]
+        for suffix, body in (("", dict(form, base_url="https://attacker.example/v1")), ("/delete", {})):
+            self.assertEqual(self.request("POST", "/api/settings/models/" + shared_id + suffix, body,
+                                          cookie=alice, csrf=csrf)[0], 400)
+        self.assertEqual(self.hub.shared_store.path.read_bytes(), before)
+
+        def detect(client):
+            client.config.api_format = "responses"
+        with patch("web.server.AIClient.check_connection", autospec=True, side_effect=detect):
+            tested = self.request("POST", "/api/settings/models/" + shared_id + "/test", {}, cookie=alice, csrf=csrf)
+        self.assertEqual(tested[1]["health"], "ok")
+        self.assertEqual(self.hub.shared_store.ai_config().api_format, "responses")
+        self.assertEqual(self.hub.app(uid).settings()["models"][0]["health"], "ok")
+        self.assertEqual(self.request("POST", "/api/settings/models/activate", {"id": shared_id},
+                                      cookie=alice, csrf=csrf)[0], 200)
+        own = self.request("POST", "/api/settings/models", {"base_url": "https://own.example/v1", "model": "own",
+                           "api_key": "synthetic-own-key"}, cookie=alice, csrf=csrf)
+        self.assertEqual(own[0], 200)
+        self.assertEqual(self.hub.app(uid).ai_config().api_key, "synthetic-own-key")
 
     def test_audit_log_records_sign_ins_and_admin_actions_without_secrets(self):
         self.request("POST", "/api/auth/login", {"username": "admin", "password": "not-it"})

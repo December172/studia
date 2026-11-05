@@ -549,7 +549,7 @@ const VIEWS = {
       setPage(`${head}<div class="empty">正在读取…</div>`);
       quiet = false;
     }
-    const need = { people: ["users", "invites"], site: ["settings", "memory"], logs: [] }[tab];
+    const need = { people: ["users", "invites"], site: ["settings", "memory", "shared-model"], logs: [] }[tab];
     let data;
     try { data = Object.fromEntries(await Promise.all(need.map(async (x) => [x, await api(`/api/admin/${x}`)]))); }
     catch (error) { if (!refresh) setPage(`${head}<div class="empty">${esc(error.message)}</div>`); return; }
@@ -583,6 +583,7 @@ const VIEWS = {
           || `<div class="model plain"><span class="m1"><small class="sans">还没有邀请码</small></span></div>`}</div>`;
     } else if (tab === "site") {
       const settings = data.settings;
+      const shared = data["shared-model"];
       const kept = (name, fallback) => $(`[name="${name}"]`, page)?.value || fallback;
       state.zhsParallel = settings.zhs_parallel_study;
       body = `<div class="section"><h3>任务上限</h3></div>
@@ -591,6 +592,17 @@ const VIEWS = {
         <div class="section"><h3>智慧树</h3></div>
         <div class="models"><div class="model plain"><span class="m1"><b>多并发学习</b><span class="pill ${settings.zhs_parallel_study ? "wait" : ""}">${settings.zhs_parallel_study ? "已开启" : "已关闭"}</span></span>
           <span class="row_btns"><button class="btn small ${settings.zhs_parallel_study ? "" : "danger"}" data-zhs-parallel="${settings.zhs_parallel_study ? "off" : "on"}" ${settings.zhs_parallel_study ? "" : 'data-confirm="确认开启"'}>${settings.zhs_parallel_study ? "关闭" : "开启"}</button></span></div></div>
+        <div class="section"><h3>管理员共享模型</h3><span class="aside">${shared.enabled ? "已启用" : "未启用"}</span></div>
+        <form class="form_card" data-shared-model-form>
+          <p class="sub">用户可在「AI 模型」中选择，费用使用此 Key 的额度。请在供应商后台设置额度和模型权限。</p>
+          <div class="field"><label for="shared-provider">名称</label><input id="shared-provider" name="provider_name" value="${esc(shared.provider)}" placeholder="管理员共享模型"></div>
+          <div class="field"><label for="shared-url">服务地址</label><input id="shared-url" name="base_url" value="${esc(shared.base_url)}" placeholder="https://api.example.com/v1" required></div>
+          <div class="field"><label for="shared-model">模型</label><input id="shared-model" name="model" value="${esc(shared.model)}" placeholder="服务商提供的 Model ID" required></div>
+          <div class="field"><label for="shared-format">接口格式</label><select id="shared-format" name="api_format">${[["auto", "自动识别"], ["chat_completions", "Chat Completions"], ["responses", "Responses"]].map(([value, label]) => `<option value="${value}" ${shared.api_format === value ? "selected" : ""}>${label}</option>`).join("")}</select></div>
+          <div class="field"><label for="shared-key">API Key</label><input id="shared-key" name="api_key" type="password" autocomplete="off" ${shared.has_key ? 'placeholder="留空保留；更换服务地址时须重新填写"' : "required"}></div>
+          <p class="sub">Key 仅保存在服务器。修改或停用后，新任务采用新设置；进行中的任务请到任务页停止。</p>
+          <div class="form_btns">${shared.enabled ? '<button type="button" class="btn danger" data-disable-shared>停用共享模型</button><span class="grow"></span>' : ""}<button class="btn primary">保存并启用</button></div>
+        </form>
         <div class="section"><h3>答案记忆</h3><span class="aside">按课程共享</span></div>
         <div class="models"><div class="model plain"><span class="m1"><b>智慧树 ${data.memory.questions} 题</b><small class="sans">${data.memory.confirmed} 题已确认正确</small></span></div>
           <div class="model plain"><span class="m1"><b>MOOC ${data.memory.mooc.questions} 题</b><small class="sans">平台公布的标准答案</small></span></div></div>`;
@@ -617,6 +629,20 @@ const VIEWS = {
       catch (e) { toast(e.message); }
     });
     on("[data-save-limit]", () => act("/api/admin/settings", { max_jobs: Number($('[name="max_jobs"]', page).value) }, "已保存，马上生效"));
+    on("[data-disable-shared]", () => act("/api/admin/shared-model", { enabled: false }, "已停用共享模型"));
+    const sharedForm = $("[data-shared-model-form]", page);
+    if (sharedForm) sharedForm.onsubmit = async (event) => {
+      event.preventDefault();
+      const submit = $('button[type="submit"], button:not([type])', sharedForm);
+      submit.disabled = true;
+      try {
+        await api("/api/admin/shared-model", { method: "POST", body: Object.fromEntries(new FormData(sharedForm)) });
+        sharedForm.elements.api_key.value = "";
+        toast("共享模型已保存，用户可在 AI 模型中选择");
+        await VIEWS.admin(true, tab);
+      } catch (e) { toast(e.message); }
+      finally { submit.disabled = false; }
+    };
     on("[data-zhs-parallel]", (el) => {
       const enable = el.dataset.zhsParallel === "on";
       act("/api/admin/settings", { zhs_parallel_study: enable }, enable ? "已开启，新开的智慧树学习任务生效" : "已关闭");
@@ -908,11 +934,11 @@ function renderModels(head, models, editing = null, again = true) {
     if (editing === m.id) return form(m);
     const [cls, label] = HEALTH[m.health] || ["", "未测试"];
     return `<div class="model ai ${m.active ? "on" : ""}" data-id="${esc(m.id)}">
-      <span class="m1"><b>${esc(m.provider || "未命名服务")}</b>${m.deletable ? "" : '<span class="pill">内置</span>'}
-        <small>${esc(m.model)} · ${esc(host(m.base_url))} · ${esc(m.key_hint)}</small></span>
+      <span class="m1"><b>${esc(m.provider || "未命名服务")}</b>${m.shared ? '<span class="pill blue">管理员共享</span>' : m.deletable ? "" : '<span class="pill">内置</span>'}
+        <small>${esc(m.model)} · ${m.shared ? "使用管理员额度" : `${esc(host(m.base_url))} · ${esc(m.key_hint)}`}</small></span>
       <span class="health ${cls}" title="${esc(m.health_message)}">${label}</span>
       <span class="row_btns">${m.active ? '<span class="in_use">使用中</span>' : '<button class="btn small primary" data-activate>改用</button>'}
-        <button class="btn small" data-test>测试</button><button class="btn small" data-edit>编辑</button></span></div>`;
+        <button class="btn small" data-test>测试</button>${m.shared ? "" : '<button class="btn small" data-edit>编辑</button>'}</span></div>`;
   };
   quiet = again;
   setPage(`${head}<div class="section"><h3>${PHONE.matches ? "" : "AI 模型"}</h3><button class="link" data-add>＋ 添加模型</button></div>
@@ -929,7 +955,8 @@ function renderModels(head, models, editing = null, again = true) {
     if (use) use.onclick = async () => {
       try { await api("/api/settings/models/activate", { method: "POST", body: { id } }); toast("已切换模型"); reload(); } catch (e) { toast(e.message); }
     };
-    $("[data-edit]", rowEl).onclick = () => renderModels(head, models, id);
+    const edit = $("[data-edit]", rowEl);
+    if (edit) edit.onclick = () => renderModels(head, models, id);
     $("[data-test]", rowEl).onclick = async () => {
       const chip = $(".health", rowEl);
       chip.className = "health busy"; chip.textContent = "测试中";
