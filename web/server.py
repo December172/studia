@@ -35,7 +35,7 @@ from ChaoxingMain.exercise import ChaoxingExerciseRunner
 from ChaoxingMain.main import catalog as cx_catalog, course_units as cx_units
 from ChaoxingMain.study import ChaoxingStudyHandler
 from NewMoocMain.oauth_login import oauth_login
-from settings import DEFAULT_PROFILE_ID, SettingsError, SettingsStore
+from settings import DEFAULT_PROFILE_ID, ModelProfile, SettingsError, SettingsStore
 from task_capabilities import task_availability, task_type_label
 from task_metrics import completion_with_score, score_text
 from ZHSMain.answer import ZHSAnswerRunner, catalog
@@ -57,6 +57,7 @@ HISTORY = 20
 MAX_JOBS = 4
 # ponytail: running plus waiting jobs per person, so one browser cannot pile up threads.
 MAX_PENDING = 20
+SHARED_MODEL_ID = "admin-shared"
 # The platform's unit and paper lists take seconds to tens of seconds; reuse them for a while.
 CACHE_TTL = 600
 LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题", "qa": "问答区答题", "ask": "问答区提问",
@@ -148,8 +149,9 @@ class Studia:
     """All state behind the web UI; one running job at a time across platforms."""
 
     def __init__(self, store=None, oauth=oauth_login, *, reports_dir="ai_results", oauth_url=None, memory=None, mooc_memory=None,
-                 job_limit=None, zhs_parallel=None, peers=None):
+                 job_limit=None, zhs_parallel=None, peers=None, shared_store=None):
         self.store = store or SettingsStore()
+        self.shared_store = shared_store
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
         self.platforms = {pid: Platform(pid) for pid, spec in PLATFORMS.items() if not spec.get("hidden")}
@@ -1012,19 +1014,20 @@ class Studia:
         """An AI client for the configured model. With a timeout, each call may take at least that long
         and a model whose request format is known is not tested first: on a slow reasoning model the
         test is another minute the person sits waiting for."""
-        config = self.store.ai_config()
+        config = self.ai_config()
         if config is None:
             raise HttpError(400, cancel_message)
         ai = AIClient(replace(config, timeout=max(int(config.timeout or 0), timeout)))
         if timeout and config.api_format != "auto":
             return ai
+        store = self._health_store(config)
         try:
             ai.check_connection()
         except AIError as exc:
             ai.session.close()
-            self.store.save_ai_health(config, "error", str(exc))
+            store.save_ai_health(config, "error", str(exc))
             raise
-        self.store.save_ai_health(config, "ok")
+        store.save_ai_health(ai.config, "ok", previous_config=config)
         return ai
 
     def _study(self, platform, row, minutes, job):
@@ -1036,7 +1039,7 @@ class Studia:
         if spec["needs_ai"]:
             ai = kwargs["activity_ai"] = self._ai("MOOC 学习会自动参与讨论和评价，请先在设置里添加 AI 模型")
         elif platform.id == "zhs":
-            config = self.store.ai_config()
+            config = self.ai_config()
             if config is not None:
                 captcha_ai = kwargs["captcha_ai"] = AIClient(config)
         if minutes:
@@ -1061,7 +1064,7 @@ class Studia:
                 memory=self.memory or AnswerMemory(Path(self.store.path).parent / "zhs-answers.json"))
             result = runner.run_mastery(row)
             if result["status"] == "ai_error":
-                self.store.save_ai_health(ai.config, "error", result["message"])
+                self._health_store(ai.config).save_ai_health(ai.config, "error", result["message"])
             if result["status"] not in ("submitted", "skipped"):
                 raise HttpError(502, result["message"])
             return result["message"]
@@ -1287,18 +1290,50 @@ class Studia:
 
     # ------------------------------------------------------------ settings
 
+    def _shared_config(self):
+        if self.shared_store is not None and self.shared_store.get("enabled", False):
+            return self.shared_store.ai_config()
+        return None
+
+    def ai_config(self):
+        if self.shared_store is not None and self.store.get("use_shared_model", False):
+            config = self._shared_config()
+            if config is None:
+                raise HttpError(409, "管理员共享模型已停用，请在设置里重新选择 AI 模型")
+            return config
+        return self.store.ai_config()
+
+    def _model_profiles(self):
+        profiles = self.store.ai_profiles()
+        shared = self._shared_config()
+        selected = self.shared_store is not None and self.store.get("use_shared_model", False)
+        if selected:
+            for profile in profiles:
+                profile.active = False
+        if shared is not None:
+            profiles.insert(0, ModelProfile(SHARED_MODEL_ID, shared, selected))
+        return profiles
+
+    def _health_store(self, config):
+        shared = self._shared_config()
+        if shared is not None and self.store.ai_fingerprint(shared) == self.store.ai_fingerprint(config):
+            return self.shared_store
+        return self.store
+
     def settings(self):
         models = []
-        for profile in self.store.ai_profiles():
-            config, health = profile.config, self.store.ai_health(profile.config)
+        for profile in self._model_profiles():
+            config, health = profile.config, self._health_store(profile.config).ai_health(profile.config)
+            shared = profile.id == SHARED_MODEL_ID
             models.append({"id": profile.id, "provider": config.provider_name, "model": config.model,
-                           "base_url": config.base_url, "key_hint": key_hint(config.api_key), "active": profile.active,
+                           "base_url": config.base_url, "key_hint": "" if shared else key_hint(config.api_key),
+                           "active": profile.active, "shared": shared,
                            "health": health.get("status") or "", "health_message": health.get("message") or "",
-                           "deletable": profile.id != DEFAULT_PROFILE_ID})
+                           "deletable": profile.id not in (DEFAULT_PROFILE_ID, SHARED_MODEL_ID)})
         return {"models": models, "concurrency": self.store.concurrency()}
 
     def _profile(self, profile_id):
-        for profile in self.store.ai_profiles():
+        for profile in self._model_profiles():
             if profile.id == profile_id:
                 return profile
         raise HttpError(404, "没有找到这个模型")
@@ -1308,7 +1343,7 @@ class Studia:
         try:
             return AIConfig(str(body.get("base_url", "")), str(body.get("model", "")), key,
                             provider_name=str(body.get("provider_name", "")),
-                            api_format=previous.api_format if previous else "chat_completions")
+                            api_format=str(body.get("api_format") or (previous.api_format if previous else "chat_completions")))
         except ValueError as exc:
             raise HttpError(400, str(exc))
 
@@ -1316,13 +1351,15 @@ class Studia:
         try:
             profile_id = self.store.save_ai_profile(self._config(body))
             if body.get("activate", True):
-                self.store.activate_ai_profile(profile_id)
+                self.activate_model({"id": profile_id})
         except SettingsError as exc:
             raise HttpError(400, str(exc))
         return {"id": profile_id}
 
     def update_model(self, profile_id, body):
         profile = self._profile(profile_id)
+        if profile_id == SHARED_MODEL_ID:
+            raise HttpError(400, "共享模型由管理员统一配置")
         try:
             self.store.save_ai_profile(self._config(body, profile.config), profile_id)
         except SettingsError as exc:
@@ -1331,6 +1368,8 @@ class Studia:
 
     def delete_model(self, profile_id):
         self._profile(profile_id)
+        if profile_id == SHARED_MODEL_ID:
+            raise HttpError(400, "共享模型由管理员统一配置")
         try:
             self.store.delete_ai_profile(profile_id)
         except SettingsError as exc:
@@ -1339,20 +1378,29 @@ class Studia:
 
     def test_model(self, profile_id):
         config = self._profile(profile_id).config
+        previous = replace(config)
+        store = self.shared_store if profile_id == SHARED_MODEL_ID else self.store
         client = AIClient(config)
         try:
             client.check_connection()
         except AIError as exc:
-            self.store.save_ai_health(config, "error", str(exc))
+            store.save_ai_health(config, "error", str(exc))
             return {"health": "error", "message": str(exc)}
         finally:
             client.session.close()
-        self.store.save_ai_health(config, "ok")
+        store.save_ai_health(config, "ok", previous_config=previous)
         return {"health": "ok", "message": "连接正常"}
 
     def activate_model(self, body):
+        profile_id = str(body.get("id", ""))
+        self._profile(profile_id)
+        if profile_id == SHARED_MODEL_ID:
+            self.store.set("use_shared_model", True)
+            return {}
         try:
-            self.store.activate_ai_profile(str(body.get("id", "")))
+            self.store.activate_ai_profile(profile_id)
+            if self.shared_store is not None:
+                self.store.set("use_shared_model", None)
         except (KeyError, SettingsError, ValueError):
             raise HttpError(404, "没有找到这个模型")
         return {}

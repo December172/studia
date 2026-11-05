@@ -4,7 +4,7 @@ import json
 import tempfile
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from ai.client import AIServiceError
 from base.auth import PlatformUnavailable
@@ -223,6 +223,16 @@ class MasteryWebTest(unittest.TestCase):
         self.app.platforms["zhs"].rows = [{"zhs": {"kind": "ai", "courseId": 101}}]
         with self.assertRaises(HttpError):
             self.app.start_job({"platform": "zhs", "type": "mastery", "course": "ai-101"})
+
+    def test_mastery_health_uses_the_selected_model_store(self):
+        selected_store = Mock()
+        self.app._health_store = Mock(return_value=selected_store)
+        failed = Mock(run_mastery=Mock(return_value={"status": "ai_error", "message": "synthetic AI failure"}))
+        with patch("web.server.ZHSAnswerRunner", return_value=failed), self.assertRaises(HttpError):
+            self.app._mastery(self.app.platforms["zhs"], COURSE, {"id": "fake", "cancel": __import__("threading").Event()})
+        config = self.app._ai.return_value.config
+        self.app._health_store.assert_called_once_with(config)
+        selected_store.save_ai_health.assert_called_once_with(config, "error", "synthetic AI failure")
 
 
 if __name__ == "__main__":

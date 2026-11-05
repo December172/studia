@@ -117,6 +117,7 @@ class Hub:
         self.data.chmod(0o700)  # mkdir(parents=True) leaves the root at the umask default
         self.accounts = Accounts(self.data)
         self.sessions = Sessions(self.accounts)
+        self.shared_store = EncryptedSettingsStore(self.data / "shared-model", self.key, "site-shared-model")
         # Answers the platform has judged, shared by every user: one user's graded paper
         # spares everyone else the AI call (and the wrong answer) next time.
         self.memory = DatabaseAnswerMemory(self.accounts.path)
@@ -155,7 +156,8 @@ class Hub:
                              oauth_url=lambda pid, uid=uid: self.oauth_url(uid, pid),
                              job_limit=lambda uid=uid: self.job_limit(uid),
                              zhs_parallel=lambda: bool(self.accounts.setting("zhs_parallel_study", False)),
-                             peers=lambda course_id, recruit_id, uid=uid: self.peer_questions(uid, course_id, recruit_id))
+                             peers=lambda course_id, recruit_id, uid=uid: self.peer_questions(uid, course_id, recruit_id),
+                             shared_store=self.shared_store)
                 app.owner = (self.accounts.user(uid) or {}).get("username", uid)
                 self.apps[uid] = app
             return app
@@ -227,6 +229,13 @@ class Hub:
         return True, "职教云登录成功，正在读取课程。可以关闭这个页面，回到 Studia。"
 
     # ------------------------------------------------------------ admin helpers
+
+    def shared_model(self):
+        config = self.shared_store.ai_config()
+        return {"enabled": bool(self.shared_store.get("enabled", False)),
+                "provider": config.provider_name if config else "",
+                "base_url": config.base_url if config else "", "model": config.model if config else "",
+                "api_format": config.api_format if config else "auto", "has_key": config is not None}
 
     def site_settings(self):
         return {"max_jobs": self.default_job_limit(),
@@ -460,6 +469,23 @@ class HostedAccess:
             return {"people": hub.all_jobs()}
         if method == "GET" and path == "/api/admin/settings":
             return hub.site_settings()
+        if path == "/api/admin/shared-model":
+            if method == "GET":
+                return hub.shared_model()
+            if method == "POST":
+                with hub.lock:
+                    if body == {"enabled": False}:
+                        hub.shared_store.set("enabled", False)
+                    else:
+                        previous = hub.shared_store.ai_config()
+                        if (previous and str(body.get("base_url", "")).strip().rstrip("/") != previous.base_url
+                                and not str(body.get("api_key", "")).strip()):
+                            raise HttpError(400, "更换服务地址时请重新填写 API Key")
+                        config = hub.app(me["id"])._config(body, previous)
+                        config.provider_name = config.provider_name or "管理员共享模型"
+                        hub.shared_store.save_ai(config)
+                        hub.shared_store.set("enabled", True)
+                return hub.shared_model()
         if method == "POST" and path == "/api/admin/settings":
             if "max_jobs" in body:
                 hub.accounts.set_setting("max_jobs", _job_limit(body.get("max_jobs")))
