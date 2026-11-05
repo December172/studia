@@ -29,7 +29,8 @@ from ZHSMain.memory import DatabaseAnswerMemory
 from ai.memory import MoocDatabaseAnswerMemory
 from settings import SettingsError, SettingsStore
 from web.accounts import AccountError, Accounts, Sessions, Throttle
-from web.server import MAX_JOBS, MAX_PENDING, NOT_HANDLED, PEERS_MARKER, HttpError, Reply, Studia, _EventLogHandler, drain, make_handler
+from web.server import MAX_JOBS, MAX_PENDING, NOT_HANDLED, PEERS_MARKER, HttpError, Reply, Studia, _EventLogHandler, drain, \
+    keep_passports, make_handler
 
 COOKIE = "studia_session"
 OAUTH_TTL = 600
@@ -566,6 +567,9 @@ def serve_hosted(hub, host, port):
     print("Studia 服务器模式已启动：监听 %s:%d，对外地址 %s" % (host, server.server_address[1], hub.public_url))
     print("数据目录：%s；按 Ctrl+C 退出。" % hub.data)
     threading.Thread(target=hub.resume, daemon=True, name="studia-resume").start()
+    # Everyone with an account, not only those who opened the site since the restart: their saved logins count too.
+    threading.Thread(target=keep_passports, daemon=True, name="studia-keepalive",
+                     args=(lambda: [hub.app(user["id"]) for user in hub.accounts.users() if not user["disabled"]],)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
