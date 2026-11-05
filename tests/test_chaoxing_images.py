@@ -102,6 +102,23 @@ class ImageQuestionTest(unittest.TestCase):
             runner(client, ai).run(COURSE, POINT, JOB, JOB_INFO)
         self.assertEqual(client.payloads, [])
 
+    def test_existing_picture_answer_is_not_downloaded_or_overwritten(self):
+        client = FakeClient(self.page().replace('name="answerq1" value=""', 'name="answerq1" value="B"'))
+        client.work_image = Mock()
+        ai = Mock()
+        runner(client, ai).run(COURSE, POINT, JOB, JOB_INFO)
+        self.assertEqual(client.payloads[0]["answerq1"], "B")
+        client.work_image.assert_not_called()
+        ai.answer.assert_not_called()
+
+    def test_missing_image_url_does_not_become_a_text_question(self):
+        page = work_page(question_block("q1", "0", '看图<img src="">', ["A. 甲", "B. 乙"]))
+        client, ai = FakeClient(page), Mock()
+        result = runner(client, ai).run(COURSE, POINT, JOB, JOB_INFO)
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(client.payloads, [])
+        ai.answer.assert_not_called()
+
     def test_retry_reuses_the_same_images_and_does_not_download_again(self):
         client = FakeClient(self.page())
         client.work_image = Mock(side_effect=lambda *a, **kw: response())
