@@ -50,6 +50,8 @@
 
 项目不再打包发布可执行文件，也没有自动更新。版本变更需同步 `pyproject.toml` 与 `uv.lock` 中项目自身的版本（当前 4.4.0），`StartWork.py` 从前者读取并显示。
 
+智慧树掌握度由 `ZHSApi.mastery_*` 与 `ZHSAnswerRunner.run_mastery()` 实现，网页任务类型为 `mastery`，终端复用同一 runner。官方页面为 `https://studywisdomh5.zhihuishu.com/study/mastery`，接口在 `aistudy.zhihuishu.com`：查询沿用学习接口加密，`/exam/start` 虽为 GET 仍会创建练习；`/exam/submit` 按官方页面发送明文 JSON，`knowledgeId` 与查询的 `knowledeId` 拼写不同。只有平台确认掌握度 100% 才计完成，读取目录和进度不会开卷。提交结果未知时不重试提交；该任务不会自动恢复，也不占用视频学习的互斥组。`tests/test_zhs_mastery.py` 使用合成数据覆盖上述协议与真实任务线程。
+
 ## 辅助工具
 
 ```bash

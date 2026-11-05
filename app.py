@@ -573,6 +573,27 @@ class Application:
                     ai_client.session.close()
         return results
 
+    def execute_zhs_mastery(self, client, courses, config):
+        ai = self.verify_ai(config)
+        results = []
+        try:
+            with self.view.activity("掌握度学习"):
+                runner = ZHSAnswerRunner(client, ai, auto_submit=True, on_progress=self.view.on_progress,
+                                        max_workers=self.store.concurrency()["ai"],
+                                        memory=AnswerMemory(Path(self.store.path).parent / "zhs-answers.json"))
+                for course in courses:
+                    result = runner.run_mastery(course)
+                    results.append(result)
+                    self.progress.result(course.get("courseName"), result["status"])
+                    logger.info("%s：%s", course.get("courseName"), result["message"])
+                    if result["status"] == "ai_error":
+                        self.remember(lambda: self.store.save_ai_health(config, "error", result["message"]))
+                    if result.get("stop_queue"):
+                        break
+        finally:
+            ai.session.close()
+        return results
+
     def _zhs_qa_courses(self, client, courses, run, label):
         """按课程打开问答区执行 run(qa, event)，返回 {ok, failed, skipped} 计数。
 
