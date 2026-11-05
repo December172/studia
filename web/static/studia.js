@@ -429,9 +429,10 @@ const pausedRow = (j) => `<div class="qrow"><span class="grip off"></span><span 
     ${j.hold ? "" : `<button class="btn small" data-job-act="continue" data-id="${esc(j.id)}">继续</button>`}${DOTS(j)}</div>`;
 function board(jobs, limit, owner = "") {
   const { slots, queue, incoming, paused } = boardParts(jobs, limit), open = state.pausedOpen.has(owner);
-  const empty = Math.max(0, limit - slots.length);
+  // Empty slots only matter as drop targets for the queue; otherwise 名额 n/limit in the heading says it.
+  const empty = queue.length ? Math.max(0, limit - slots.length) : 0;
   return `<div class="board" data-board data-owner="${esc(owner)}" data-incoming="${incoming}">
-    <div class="slots">${slots.map((j) => slotCard(j, owner)).join("")}${'<div class="slot empty" data-slot=""><span>空位</span></div>'.repeat(empty)}</div>
+    <div class="slots">${slots.map((j) => slotCard(j, owner)).join("")}${'<div class="slot vacant" data-slot=""><span>空位</span></div>'.repeat(empty)}</div>
     ${queue.length ? `<div class="board_head">排队<small>拖动排序，拖进格子即替换</small></div><div class="runs queue">${queue.map(queueRow).join("")}</div>` : ""}
     ${paused.length ? `<button class="board_head fold" data-paused-fold="${esc(owner)}" aria-expanded="${open}">已暂停 ${paused.length}<span class="chev_r" aria-hidden="true"></span></button>
       ${open ? `<div class="runs">${paused.map(pausedRow).join("")}</div>` : ""}` : ""}
