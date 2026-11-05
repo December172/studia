@@ -61,8 +61,11 @@ MAX_PENDING = 20
 CACHE_TTL = 600
 LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题", "qa": "问答区答题", "ask": "问答区提问"}
 # Jobs that play course content conflict with each other; answering is separate.
-GROUP = {"study": "learn", "review": "learn", "answer": "answer", "qa": "answer", "ask": "answer"}
+# Answering the board and asking on it are separate lines, so drafting questions never waits out an answering run.
+GROUP = {"study": "learn", "review": "learn", "answer": "answer", "qa": "qa", "ask": "ask"}
 QA_POSTS = 300  # posts kept per account for the web list
+PEER_ANSWERS = 5  # a question with 5 valid answers earns its asker the point; more from us adds nothing
+PEER_DELAY = 30 * 60  # seconds a classmate's question waits before people here answer it
 DRAFT_TIMEOUT = 300  # reasoning models take one to two minutes to write a single question
 # Running job id -> its Studia app. A job thread is named "studia-job-<id>" and passes that
 # name on to the helper threads it starts, so a log line can be traced back to its job.
@@ -143,7 +146,7 @@ class Studia:
     """All state behind the web UI; one running job at a time across platforms."""
 
     def __init__(self, store=None, oauth=oauth_login, *, reports_dir="ai_results", oauth_url=None, memory=None, mooc_memory=None,
-                 job_limit=None, zhs_parallel=None):
+                 job_limit=None, zhs_parallel=None, peers=None):
         self.store = store or SettingsStore()
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
@@ -157,6 +160,8 @@ class Studia:
         self.job_limit = job_limit or (lambda: MAX_JOBS)
         # Whether different Zhihuishu courses may play videos at the same time (an admin switch, off by default).
         self.zhs_parallel = zhs_parallel or (lambda: False)
+        # Hosted mode: questions other people on this site asked in the same class, answered first (Hub.peer_questions).
+        self.peers = peers or (lambda course_id, recruit_id: [])
         self.oauth_url = oauth_url
         # Hosted mode passes the site-wide memory; locally it lives next to the settings file.
         self.memory = memory
@@ -1105,8 +1110,10 @@ class Studia:
         course_id, recruit_id = z.get("courseId"), z.get("recruitId") or z.get("classId")
         if not course_id or not recruit_id:
             raise HttpError(400, "这门课没有可作答的问答区（缺少课程或班级 ID）")
-        record = lambda kind, question, text, post_id: self._record_post(course_id, kind, question, text, post_id)
-        return _Board(QaBridge(self.client(platform).access_token, course_id=course_id, recruit_id=recruit_id), record)
+        record = lambda kind, question, text, post_id, qid=None: self._record_post(
+            course_id, kind, question, text, post_id, qid=qid, recruit=recruit_id)
+        return _Board(QaBridge(self.client(platform).access_token, course_id=course_id, recruit_id=recruit_id), record,
+                      peers=lambda: self.peers(course_id, recruit_id))
 
     def _pace(self, job, pace=None):
         return lambda _interval: job["cancel"].wait(random.uniform(*(pace or QA_PACE)))  # wakes at once on stop
@@ -1169,11 +1176,11 @@ class Studia:
         counts = counts if isinstance(counts, dict) else {}
         number = lambda value: value if isinstance(value, (int, float)) else 0
         room, why = {}, {}
-        for kind, valid, cap, daily, word in (("ask", counts.get("questions"), QUESTION_CAP, DAILY_QUESTIONS, "提问"),
-                                              ("answer", counts.get("answers"), ANSWER_CAP, DAILY_ANSWERS, "回答")):
+        for kind, valid, cap, daily, word in (("ask", counts.get("questions"), QUESTION_CAP, DAILY_QUESTIONS, "问"),
+                                              ("answer", counts.get("answers"), ANSWER_CAP, DAILY_ANSWERS, "答")):
             room[kind] = qa_room(number(valid), posted[kind], cap, daily)
-            why[kind] = ("有效%s已经 %d 条，再发不加分" % (word, cap) if number(valid) + posted[kind] >= cap
-                         else "今天已经%s %d 条，明天再来" % ("提问" if kind == "ask" else "回答", posted[kind]))
+            why[kind] = ("已满 %d 条，再%s不加分" % (cap, word) if number(valid) + posted[kind] >= cap
+                         else "今天%s满了，明天再来" % word)
         return dict(room, posted=posted, why=why)
 
     def qa_draft(self, pid, body):
@@ -1226,11 +1233,12 @@ class Studia:
             return []
         return data if isinstance(data, list) else []
 
-    def _record_post(self, course_id, kind, question, text, post_id):
+    def _record_post(self, course_id, kind, question, text, post_id, qid=None, recruit=None):
         with self.lock:
             posts = self._posts()
-            posts.append({"course": course_id, "kind": kind, "question": question, "text": text,
-                          "id": post_id, "at": time.time()})
+            # recruit and qid let other people on the site find this class's questions and count who answered them.
+            posts.append({"course": course_id, "recruit": recruit, "kind": kind, "question": question, "text": text,
+                          "id": post_id, "qid": qid, "at": time.time()})
             path = self._posts_path()
             temporary = path.with_suffix(".tmp")
             temporary.write_text(json.dumps(posts[-QA_POSTS:], ensure_ascii=False), encoding="utf-8")
@@ -1429,8 +1437,8 @@ class _Board:
     """The Q&A board for one job. Picks questions nobody has answered first, then those with a few
     answers; remembers each post (question and text) so the web page can list what went out."""
 
-    def __init__(self, bridge, record):
-        self.bridge, self.record, self.asked = bridge, record, {}
+    def __init__(self, bridge, record, peers=lambda: []):
+        self.bridge, self.record, self.peers, self.asked = bridge, record, peers, {}
 
     def __enter__(self):
         self.bridge.__enter__()
@@ -1440,7 +1448,14 @@ class _Board:
         self.bridge.__exit__(*exc)
 
     def questions(self, max_answers=0, limit=10, **_):
-        found = self.bridge.questions(max_answers=0, limit=limit)
+        # Classmates on this site first: each of their questions that gets 5 valid answers earns its asker a point,
+        # and it is a real question, not one of the floods the board is full of. Not right after it went up, though:
+        # a ring of accounts answering each other within minutes is exactly what the board cleans out.
+        now = time.time()
+        found = [{"id": q["id"], "content": q["text"], "answers": q["ours"], "at": q["at"] * 1000, "peer": True}
+                 for q in self.peers() if q["ours"] < PEER_ANSWERS and now - q["at"] > PEER_DELAY][:limit]
+        have = {q["id"] for q in found}
+        found += [q for q in self.bridge.questions(max_answers=0, limit=limit) if q["id"] not in have]
         if len(found) < limit:
             # Most quiet threads on a busy board are floods or junk that answer_questions passes over;
             # an ordinary thread with a few answers still scores the same.
@@ -1452,7 +1467,7 @@ class _Board:
     def publish(self, question_id, text):
         answer_id = self.bridge.publish(question_id, text)
         if answer_id:
-            self.record("answer", self.asked.get(question_id, ""), text, answer_id)
+            self.record("answer", self.asked.get(question_id, ""), text, answer_id, qid=question_id)
         return answer_id
 
     def ask(self, text):

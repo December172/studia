@@ -91,7 +91,7 @@ const state = {
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
 const runOf = (id) => (state.runs[id] = state.runs[id] || freshRun());
 // Mirrors the server's rules (web/server.py _check_conflicts) so buttons say why before you click.
-const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "answer", ask: "answer" };
+const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "qa", ask: "ask" };
 const jobType = (j) => j.kind || { 自动学习: "study", 每日复习: "review", "AI 答题": "answer", 问答区答题: "qa", 问答区提问: "ask" }[j.title];
 // Only learning jobs fill a course's unit grid.
 const learns = (j) => GROUP[jobType(j)] === "learn";
@@ -1001,16 +1001,16 @@ function qaBody(p, c) {
     <span>提问 <b>${n(q?.questions)}</b><span class="of">/10</span></span><span>回答 <b>${n(q?.answers)}</b><span class="of">/20</span></span>
     <span>收获回答 <b>${n(q?.received)}</b></span><small class="sans">次日上午更新</small></div>`;
   const answerBlock = block || (room && !room.answer ? room.why.answer : "");
-  const answer = `<div class="model plain qa_row"><span class="m1"><b>回答提问</b><small class="sans">${esc(answerBlock ||
-      `跳过水帖和刷帖${room ? ` · 今天还能答 ${room.answer} 条` : ""}`)}</small></span>
+  const answer = `<div class="model plain qa_row"><span class="m1"><b>回答</b><small class="sans">${esc(answerBlock ||
+      (room ? `今天还能答 ${room.answer} 条` : "先答站里同学的提问"))}</small></span>
     <span class="row_btns"><span class="sizes">${QA_SIZES.map((s) => `<button class="chip" data-qa-size="${s}" aria-pressed="${s === size}" ${room && s > room.answer && s !== QA_SIZES[0] ? "disabled" : ""}>${s} 条</button>`).join("")}</span>
       <button class="btn primary" data-qa-start ${answerBlock ? "disabled" : ""}>开始</button></span></div>`;
   const texts = draft?.texts || [];
-  const askBlock = block || (room && !room.ask ? room.why.ask : "");
+  const askBlock = blocker(p.id, c.id, "ask") || (room && !room.ask ? room.why.ask : "");
   const tooMany = room && texts.length > room.ask;
-  const ask = `<div class="model plain qa_row"><span class="m1"><b>发起提问</b><small class="sans">${esc(
+  const ask = `<div class="model plain qa_row"><span class="m1"><b>提问</b><small class="sans">${esc(
       draft?.loading ? `正在出第 ${draft.loading}/${draft.total} 条…` : draft?.error || askBlock ||
-      `AI 按课程小节出题，你改好再发${room ? ` · 今天还能发 ${room.ask} 条` : ""}`)}</small></span>
+      (room ? `今天还能问 ${room.ask} 条` : "AI 出题，你改好再发"))}</small></span>
     <span class="row_btns"><span class="sizes">${ASK_SIZES.map((s) => `<button class="chip" data-ask-size="${s}" aria-pressed="${s === askSize()}" ${room && s > room.ask && s !== ASK_SIZES[0] ? "disabled" : ""}>${s} 条</button>`).join("")}</span>
       <button class="btn" data-qa-draft ${draft?.loading || askBlock ? "disabled" : ""}>${texts.length ? "换一批" : "出题"}</button></span></div>
     ${texts.map((t, i) => `<div class="model plain qa_draft"><textarea rows="2" data-qa-edit="${i}" maxlength="200">${esc(t)}</textarea>
@@ -1027,7 +1027,7 @@ function qaBody(p, c) {
         <span class="when"></span></div>
         ${x.kind === "answer" && open ? `<div class="qa_text">${esc(x.text)}</div>` : ""}`;
     }).join("")}</div>`;
-  return `<div class="section"><h3>问答互动</h3></div><div class="models">${stat}${answer}${ask}</div>
+  return `<div class="section"><h3>问答互动</h3></div><div class="models">${stat}${ask}${answer}</div>
     <div class="section"><h3>已发布</h3></div>${list}`;
 }
 const loadingPosts = new Set();
