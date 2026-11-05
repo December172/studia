@@ -14,8 +14,9 @@ from ChaoxingMain.exercise import (
 def question_block(question_id, type_code, title, options=()):
     items = "".join('<li aria-label="%s"></li>' % text for text in options)
     return ('<div class="singleQuesId" data="%s"><div class="TiMu" data="%s">'
+            '<input type="hidden" name="answer%s" value="">'
             '<div class="Zy_TItle"><span>%s</span></div>%s</div></div>'
-            % (question_id, type_code, title, "<ul>%s</ul>" % items if items else ""))
+            % (question_id, type_code, question_id, title, "<ul>%s</ul>" % items if items else ""))
 
 
 def work_page(*blocks):
@@ -285,6 +286,80 @@ class RunnerTest(unittest.TestCase):
         client = FakeClient(work_page(SINGLE))
         result = runner(client, FakeAI(), cancel_event=cancel).run(COURSE, POINT, JOB, JOB_INFO)
         self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(client.payloads, [])
+
+
+class ExistingAnswersTest(unittest.TestCase):
+    def block(self, qid, kind, control):
+        block = question_block(qid, kind, "人工题", ["A. 甲", "B. 乙", "C. 丙"])
+        return block.replace('<input type="hidden" name="answer%s" value="">' % qid, control)
+
+    def test_saved_manual_answers_survive_partial_ai_failure_for_every_supported_widget(self):
+        page = work_page(
+            self.block("s", "0", '<input type="hidden" name="answers" value="B">'),
+            self.block("m", "1", '<input type="checkbox" name="answerm" value="A">'
+                       '<input type="checkbox" name="answerm" value="C" checked>'
+                       '<input type="checkbox" name="answerm" value="B" checked>'),
+            self.block("j", "3", '<input type="radio" name="answerj" value="true">'
+                       '<input type="radio" name="answerj" value="false" checked>'),
+            self.block("f", "2", '<input name="answerf" value="人工填空">'),
+            self.block("t", "4", '<textarea name="answert">  人工\n简答 &amp; 内容  </textarea>'),
+            SINGLE, MULTIPLE)
+        client = FakeClient(page)
+        ai = FakeAI({"1+1=?": "B", "哪些是偶数？": AIResponseError("未生成")})
+        result = runner(client, ai).run(COURSE, POINT, JOB, JOB_INFO)
+        self.assertEqual(result["status"], "saved")
+        payload = client.payloads[0]
+        for key, value in {"answers": "B", "answerm": "BC", "answerj": "false", "answerf": "人工填空",
+                           "answert": "  人工\n简答 & 内容  ", "answerq1": "B", "answerq2": ""}.items():
+            self.assertEqual(payload[key], value)
+        self.assertEqual([q["title"] for q in ai.asked], ["1+1=?", "哪些是偶数？"])
+        self.assertEqual(payload["pyFlag"], "1")
+
+    def test_unchecked_options_are_empty_and_never_mistaken_for_existing_answers(self):
+        page = work_page(self.block("q1", "0", '<input type="radio" name="answerq1" value="A">'
+                                    '<input type="radio" name="answerq1" value="B">'))
+        client, ai = FakeClient(page), FakeAI({"人工题": "B"})
+        runner(client, ai).run(COURSE, POINT, JOB, JOB_INFO)
+        self.assertEqual(len(ai.asked), 1)
+        self.assertEqual(client.payloads[0]["answerq1"], "B")
+
+    def test_hidden_value_is_not_cleared_by_an_unchecked_option(self):
+        page = work_page(self.block("q1", "0", '<input type="hidden" name="answerq1" value="B">'
+                                    '<input type="radio" name="answerq1" value="A">'))
+        client, ai = FakeClient(page), FakeAI()
+        runner(client, ai).run(COURSE, POINT, JOB, JOB_INFO)
+        self.assertEqual(ai.asked, [])
+        self.assertEqual(client.payloads[0]["answerq1"], "B")
+
+    def test_unrecognised_missing_disabled_or_conflicting_controls_stop_before_ai_and_save(self):
+        controls = [
+            '<input name="answer_q1" value="B">',
+            '<div id="custom-editor">人工内容</div>',
+            '<input name="answerq1" value="B" disabled>',
+            '<input name="answerq1" value="A"><input name="answerq1" value="B">',
+            '<input name="answerq1" value=""><input name="answerq1_1" value="人工填空">',
+        ]
+        for control in controls:
+            with self.subTest(control=control):
+                client, ai = FakeClient(work_page(self.block("q1", "0", control))), FakeAI()
+                result = runner(client, ai).run(COURSE, POINT, JOB, JOB_INFO)
+                self.assertEqual(result["status"], "error")
+                self.assertIn("未保存", result["message"])
+                self.assertEqual(client.payloads, [])
+                self.assertEqual(ai.asked, [])
+
+    def test_existing_answers_count_towards_the_final_coverage(self):
+        page = work_page(self.block("old", "4", '<textarea name="answerold">人工内容</textarea>'), SINGLE)
+        client = FakeClient(page)
+        result = runner(client, FakeAI(), auto_submit=True, cover_rate=1).run(COURSE, POINT, JOB, JOB_INFO)
+        self.assertEqual(result["status"], "submitted")
+        self.assertEqual(client.payloads[0]["answerold"], "人工内容")
+
+    def test_unparseable_question_never_causes_a_partial_form_save(self):
+        client = FakeClient(work_page(SINGLE, '<div class="singleQuesId" data="other">新页面结构</div>'))
+        result = runner(client, FakeAI()).run(COURSE, POINT, JOB, JOB_INFO)
+        self.assertEqual(result["status"], "error")
         self.assertEqual(client.payloads, [])
 
 
