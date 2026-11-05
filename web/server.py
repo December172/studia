@@ -68,6 +68,10 @@ QA_POSTS = 300  # posts kept per account for the web list
 PEER_ANSWERS = 5  # a question with 5 valid answers earns its asker the point; more from us adds nothing
 PEER_DELAY = 30 * 60  # seconds a classmate's question waits before people here answer it
 PEERS_MARKER = "qa-peers.on"  # present while the person takes part in 站内互答
+# How often the Zhihuishu sign-in centre is touched for everyone signed in (Studia.keep_passport). Its ticket
+# seemed to lapse two to three hours after last use, taking the Q&A board with it; touching it inside that
+# window should keep it, and the log line each time shows whether it does.
+KEEPALIVE = 50 * 60
 DRAFT_TIMEOUT = 300  # reasoning models take one to two minutes to write a single question
 # Running job id -> its Studia app. A job thread is named "studia-job-<id>" and passes that
 # name on to the helper threads it starts, so a log line can be traced back to its job.
@@ -247,6 +251,27 @@ class Studia:
                 platform.client.close()
             platform.client, platform.rows, platform.entries, platform.cache = None, [], {}, {}
 
+    def keep_passport(self):
+        """Touch the Zhihuishu sign-in centre for this person and log the answer, with the hours since the scan:
+        the log then shows whether the ticket keeps or still lapses. True/False, None when not signed in or
+        the platform could not be reached."""
+        platform = self.platforms.get("zhs")
+        if platform is None or not self.logged_in(platform):
+            return None
+        try:
+            alive = self.client(platform).passport_alive()
+        except Exception as exc:  # a network blip says nothing about the ticket
+            logger.info("%s智慧树登录中心保活没连上：%s", self.who(), type(exc).__name__)
+            return None
+        since = self.store.get("zhs_signed_in_at")
+        age = "（扫码后 %.1f 小时）" % ((time.time() - since) / 3600) if isinstance(since, (int, float)) else ""
+        if alive:
+            logger.info("%s智慧树登录中心票据有效，已保活%s", self.who(), age)
+        else:
+            logger.warning("%s智慧树登录中心票据已失效，问答区要重新扫码才能进%s", self.who(), age)
+        self.save_sessions(platform)  # the sign-in centre may have renewed cookies
+        return alive
+
     def who(self):
         """Log prefix naming the Studia account on a hosted server; request threads carry no job tag."""
         return "%s · " % self.owner if self.owner else ""
@@ -417,6 +442,7 @@ class Studia:
                 platform.client = client
                 self.store.save_session(platform.id, client)
                 logger.info("%s%s 扫码登录成功", self.who(), name)
+                self.store.set("zhs_signed_in_at", time.time())  # the keep-alive log counts hours from here
                 self.publish({"type": "account"})  # other tabs and devices pick up the login
                 return {"status": "done", "message": "登录成功"}
             if status == 2:
@@ -1808,6 +1834,7 @@ def serve(port=0, open_browser=True, store=None):
     if open_browser:
         webbrowser.open(url)
     threading.Thread(target=app.resume, daemon=True, name="studia-resume").start()
+    threading.Thread(target=keep_passports, args=(lambda: [app],), daemon=True, name="studia-keepalive").start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1816,6 +1843,21 @@ def serve(port=0, open_browser=True, store=None):
         app.shutdown()
         drain()
         server.server_close()
+
+
+def keep_passports(apps, interval=KEEPALIVE, first=60, stop=None):
+    """Every interval (the first time after `first` seconds, so a fresh deploy shows its state soon), touch the
+    sign-in centre for everyone the apps() callable returns. Runs until stop is set; one person's error is logged
+    and the rest carry on."""
+    stop = stop or threading.Event()
+    wait = first
+    while not stop.wait(wait):
+        for app in apps():
+            try:
+                app.keep_passport()
+            except Exception:
+                logger.warning("智慧树登录中心保活出错", exc_info=True)
+        wait = interval
 
 
 def drain(timeout=20):
