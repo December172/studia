@@ -12,6 +12,7 @@ JOB = {"type": "workid", "jobid": "work-abc", "name": "1.1 章节测验", "enc":
 
 PAGE = ('<form id="form1"><input type="hidden" name="courseId" value="111">'
         '<div class="singleQuesId" data="q1"><div class="TiMu" data="0">'
+        '<input type="hidden" name="answerq1" value="">'
         '<div class="Zy_TItle"><span>1+1=?</span></div>'
         '<ul><li aria-label="A. 1"></li><li aria-label="B. 2"></li></ul></div></div></form>')
 
