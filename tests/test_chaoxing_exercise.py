@@ -332,6 +332,18 @@ class ExistingAnswersTest(unittest.TestCase):
         self.assertEqual(ai.asked, [])
         self.assertEqual(client.payloads[0]["answerq1"], "B")
 
+    def test_multiple_choice_ui_spans_preserve_the_hidden_answer(self):
+        block = self.block("old", "1", '<input type="hidden" name="answerold" value="BC">')
+        block = block.replace('</li>', '<span name="answercheckold" class="num_option_dx"></span></li>')
+        client = FakeClient(work_page(block, SINGLE))
+        ai = FakeAI({"1+1=?": "B"})
+        result = runner(client, ai).run(COURSE, POINT, JOB, JOB_INFO)
+        self.assertEqual(result["status"], "saved")
+        self.assertEqual([q["title"] for q in ai.asked], ["1+1=?"])
+        self.assertEqual(client.payloads[0]["answerold"], "BC")
+        self.assertEqual(client.payloads[0]["answerq1"], "B")
+        self.assertEqual(client.payloads[0]["pyFlag"], "1")
+
     def test_unrecognised_missing_disabled_or_conflicting_controls_stop_before_ai_and_save(self):
         controls = [
             '<input name="answer_q1" value="B">',
@@ -339,6 +351,8 @@ class ExistingAnswersTest(unittest.TestCase):
             '<input name="answerq1" value="B" disabled>',
             '<input name="answerq1" value="A"><input name="answerq1" value="B">',
             '<input name="answerq1" value=""><input name="answerq1_1" value="人工填空">',
+            '<input name="answerq1" value="B"><input name="answercheckq1" value="A">',
+            '<input name="answerq1" value="B"><span name="answerq1_1">未知控件</span>',
         ]
         for control in controls:
             with self.subTest(control=control):
