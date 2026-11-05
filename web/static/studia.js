@@ -1902,6 +1902,7 @@ async function loadMe() {
   let setup = false;
   if (!MOCK) { try { ({ mode: session.mode, setup } = await api("/api/mode")); } catch { /* old server: local */ } }
   if (MOCK && params.has("auth")) { showAuth(params.get("auth") || "login"); return; }
+  if (MOCK && params.has("hosted")) session.mode = "hosted";  // ?mock&hosted previews what a hosted site shows
   if (setup) { showAuth("setup"); return; }
   if (session.mode === "hosted" && !(await loadMe())) { showAuth(); return; }
   await refreshState();

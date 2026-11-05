@@ -161,6 +161,7 @@ export async function request(path, method, body) {
   await new Promise((resolve) => setTimeout(resolve, 200));
   let m;
   if (path === "/api/state") return { platforms, jobs: Object.values(jobs), history };
+  if (path === "/api/auth/me") return { user: { id: "mock", username: "演示", role: "member" }, csrf: "mock" };
   if ((m = path.match(/^\/api\/platforms\/(\w+)\/login(?:\?.*)?$/))) {
     const p = platforms.find((x) => x.id === m[1]);
     if (method === "POST") {
