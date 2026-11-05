@@ -1,6 +1,7 @@
 """见面课回放：复用官方播放器计时、签名和上报，回查服务端签到结果。"""
 from __future__ import annotations
 
+import json
 import math
 import threading
 from urllib.parse import urlsplit
@@ -102,24 +103,29 @@ class MeetingPlayer:
             self.error = PlatformUnavailable("见面课观看进度响应无法解析")
 
     def start(self):
-        data = self.page.evaluate("() => ({videos: videoInfo, history: watchHistoryBack})")
+        # The page replaces Map: Playwright cannot marshal objects in either direction.
+        # Cross this boundary as JSON text, leaving the platform's legacy Map intact.
+        data = json.loads(self.page.evaluate(
+            "() => JSON.stringify({videos: videoInfo.map(v => ({id: v.id, duration: v.duration})), "
+            "history: watchHistoryBack})"))
         target = resume_target(data["videos"], data["history"])
         if target is None:
             raise ZHSError("观看记录已满但平台尚未确认签到，请到平台核对")
-        self.page.evaluate("({id, index, position}) => { onPaly(id, index); seekTime = position; }", target)
+        self.page.evaluate("text => { const {id, index, position} = JSON.parse(text); "
+                           "onPaly(id, index); seekTime = position; }", json.dumps(target))
 
     def snapshot(self):
         if urlsplit(self.page.url).hostname in ("passport.zhihuishu.com", "login.zhihuishu.com"):
             raise AuthenticationExpired("智慧树登录已过期，请重新扫码")
-        return self.page.evaluate("""() => {
+        return json.loads(self.page.evaluate("""() => {
             const v = document.querySelector('#forFollowBackDiv video');
-            if (!v) return {key: null, position: 0};
+            if (!v) return JSON.stringify({key: null, position: 0});
             v.muted = true;
             v.playbackRate = 1;
             if (v.paused && !v.ended) v.play().catch(() => {});
-            return {key: String(curVideoId), position: Math.floor(v.currentTime),
-                    percent: document.querySelector('.qiandao-num')?.textContent || '0'};
-        }""")
+            return JSON.stringify({key: String(curVideoId), position: Math.floor(v.currentTime),
+                    percent: document.querySelector('.qiandao-num')?.textContent || '0'});
+        }"""))
 
     def wait(self):
         # Dispatch the player's response callbacks while waiting, including failed progress saves.
