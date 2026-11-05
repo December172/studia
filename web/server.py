@@ -66,6 +66,7 @@ GROUP = {"study": "learn", "review": "learn", "answer": "answer", "qa": "qa", "a
 QA_POSTS = 300  # posts kept per account for the web list
 PEER_ANSWERS = 5  # a question with 5 valid answers earns its asker the point; more from us adds nothing
 PEER_DELAY = 30 * 60  # seconds a classmate's question waits before people here answer it
+PEERS_MARKER = "qa-peers.on"  # present while the person takes part in 站内互答
 DRAFT_TIMEOUT = 300  # reasoning models take one to two minutes to write a single question
 # Running job id -> its Studia app. A job thread is named "studia-job-<id>" and passes that
 # name on to the helper threads it starts, so a log line can be traced back to its job.
@@ -1113,7 +1114,7 @@ class Studia:
         record = lambda kind, question, text, post_id, qid=None: self._record_post(
             course_id, kind, question, text, post_id, qid=qid, recruit=recruit_id)
         return _Board(QaBridge(self.client(platform).access_token, course_id=course_id, recruit_id=recruit_id), record,
-                      peers=lambda: self.peers(course_id, recruit_id))
+                      peers=lambda: self.peers(course_id, recruit_id) if self.sharing_qa() else [])
 
     def _pace(self, job, pace=None):
         return lambda _interval: job["cancel"].wait(random.uniform(*(pace or QA_PACE)))  # wakes at once on stop
@@ -1221,7 +1222,25 @@ class Studia:
         z = self.find_row(platform, course_id).get("zhs") or {}
         row = self.find_row(platform, course_id)
         mine = [p for p in self._posts() if str(p.get("course")) == str(z.get("courseId"))]
-        return {"posts": mine[-50:][::-1], "room": self.qa_room(platform, row)}
+        return {"posts": mine[-50:][::-1], "room": self.qa_room(platform, row), "peers": self.sharing_qa()}
+
+    # 站内互答 is opt-in both ways: answer classmates' questions first, and let them answer mine. A marker file next
+    # to the person's records, so the site (Hub.peer_questions) can see who takes part without opening their settings.
+    def _peers_marker(self):
+        return Path(self.store.path).parent / PEERS_MARKER
+
+    def sharing_qa(self):
+        return self._peers_marker().exists()
+
+    def set_qa_peers(self, pid, body):
+        self.platform(pid)
+        marker = self._peers_marker()
+        if body.get("on") is True:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+        else:
+            marker.unlink(missing_ok=True)
+        return {"peers": self.sharing_qa()}
 
     def _posts_path(self):
         return Path(self.store.path).parent / "zhs-qa-posts.json"
@@ -1575,6 +1594,7 @@ ROUTES = [
     ("GET", r"/api/platforms/(\w+)/courses", lambda app, m, q, b: app.courses(m[1])),
     ("GET", r"/api/platforms/(\w+)/units", lambda app, m, q, b: app.units(m[1], (q.get("course") or [""])[0], (q.get("fresh") or [""])[0] == "1")),
     ("GET", r"/api/platforms/(\w+)/qa", lambda app, m, q, b: app.qa_posts(m[1], (q.get("course") or [""])[0])),
+    ("POST", r"/api/platforms/(\w+)/qa/peers", lambda app, m, q, b: app.set_qa_peers(m[1], b)),
     ("POST", r"/api/platforms/(\w+)/qa/draft", lambda app, m, q, b: app.qa_draft(m[1], b)),
     ("GET", r"/api/platforms/(\w+)/score", lambda app, m, q, b: app.score(m[1], (q.get("course") or [""])[0], (q.get("fresh") or [""])[0] == "1")),
     ("GET", r"/api/platforms/(\w+)/tasks", lambda app, m, q, b: app.tasks(m[1], (q.get("course") or [""])[0], (q.get("fresh") or [""])[0] == "1")),

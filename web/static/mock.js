@@ -71,6 +71,7 @@ const units = {
 };
 
 const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "answer", ask: "answer" };
+let qaPeersOn = false;
 const qaPosts = [{ kind: "answer", question: "云计算的三种服务模式有什么区别？", text: "IaaS 提供虚拟机等基础设施，PaaS 提供运行平台，SaaS 直接提供软件。", at: Date.now() / 1000 - 7200 }];
 function fakeJob(body) {
   const course = courses[body.platform].find((c) => c.id === body.course);
@@ -182,7 +183,8 @@ export async function request(path, method, body) {
   if ((m = path.match(/^\/api\/platforms\/(\w+)\/tasks/))) return { tasks: m[1] === "cx" ? cxTasks : tasks };
   if ((m = path.match(/^\/api\/platforms\/\w+\/units\?course=(.+)$/))) return { chapters: units[decodeURIComponent(m[1])] || [] };
   if ((m = path.match(/^\/api\/platforms\/\w+\/qa\?course=(.+)$/))) return { posts: qaPosts.slice().reverse(),
-    room: { ask: 4, answer: 7, posted: { ask: 1, answer: 3 }, why: { ask: "今天已经提问 5 条，明天再来", answer: "今天已经回答 10 条，明天再来" } } };
+    room: { ask: 4, answer: 7, posted: { ask: 1, answer: 3 }, why: { ask: "今天问满了，明天再来", answer: "今天答满了，明天再来" } }, peers: qaPeersOn };
+  if (path.match(/^\/api\/platforms\/\w+\/qa\/peers$/)) { qaPeersOn = body.on === true; return { peers: qaPeersOn }; }
   if (path.match(/^\/api\/platforms\/\w+\/qa\/draft$/)) {
     await new Promise((r) => setTimeout(r, 900));
     return { questions: ["边缘计算和云计算在工厂产线上应该怎样分工？", "RPA 和传统的脚本自动化相比，真正省下的是哪部分人力？", "企业上云以后，数据安全的责任应该怎么在云厂商和企业之间划分？", "物联网设备越来越多，个人隐私保护最难落实在哪一环？", "大模型写的代码出了事故，开发者和工具方的责任该怎么分？"].filter((q) => !(body.have || []).includes(q)).slice(0, 1) };

@@ -84,7 +84,7 @@ async function api(path, { method = "GET", body } = {}) {
 }
 
 const state = {
-  platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {}, earned: {}, qaDraft: {}, qaPosts: {}, qaRoom: {}, qaOpen: new Set(),
+  platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {}, earned: {}, qaDraft: {}, qaPosts: {}, qaRoom: {}, qaPeers: null, qaOpen: new Set(),
   jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, loginMode: {}, lastDone: null,
   current: store.get("studia-platform", ""), meOpen: false, adminTab: "people", logFilter: "all", editPassword: false, adminEdit: null, pausedOpen: new Set(),
 };
@@ -1002,7 +1002,7 @@ function qaBody(p, c) {
     <span>收获回答 <b>${n(q?.received)}</b></span><small class="sans">次日上午更新</small></div>`;
   const answerBlock = block || (room && !room.answer ? room.why.answer : "");
   const answer = `<div class="model plain qa_row"><span class="m1"><b>回答</b><small class="sans">${esc(answerBlock ||
-      (room ? `今天还能答 ${room.answer} 条` : "先答站里同学的提问"))}</small></span>
+      (room ? `今天还能答 ${room.answer} 条` : ""))}</small></span>
     <span class="row_btns"><span class="sizes">${QA_SIZES.map((s) => `<button class="chip" data-qa-size="${s}" aria-pressed="${s === size}" ${room && s > room.answer && s !== QA_SIZES[0] ? "disabled" : ""}>${s} 条</button>`).join("")}</span>
       <button class="btn primary" data-qa-start ${answerBlock ? "disabled" : ""}>开始</button></span></div>`;
   const texts = draft?.texts || [];
@@ -1027,7 +1027,11 @@ function qaBody(p, c) {
         <span class="when"></span></div>
         ${x.kind === "answer" && open ? `<div class="qa_text">${esc(x.text)}</div>` : ""}`;
     }).join("")}</div>`;
-  return `<div class="section"><h3>问答互动</h3></div><div class="models">${stat}${ask}${answer}</div>
+  // Only a hosted site has classmates to answer; the person opts in, both ways.
+  const peers = session.mode === "hosted" ? `<div class="model plain qa_row"><span class="m1"><b>站内互答</b><small class="sans">${
+      state.qaPeers ? "先答同学的提问，你的提问也给同学答" : "和站里同班的同学互相回答"}</small></span>
+    <span class="row_btns"><button class="switch ${state.qaPeers ? "on" : ""}" role="switch" aria-checked="${!!state.qaPeers}" aria-label="站内互答" data-qa-peers></button></span></div>` : "";
+  return `<div class="section"><h3>问答互动</h3></div><div class="models">${stat}${ask}${answer}${peers}</div>
     <div class="section"><h3>已发布</h3></div>${list}`;
 }
 const loadingPosts = new Set();
@@ -1035,7 +1039,7 @@ async function loadQaPosts(p, c) {
   const k = key(p.id, c.id);
   if (loadingPosts.has(k) || state.qaPosts[k]) return;
   loadingPosts.add(k);
-  try { ({ posts: state.qaPosts[k], room: state.qaRoom[k] } = await api(`/api/platforms/${p.id}/qa?course=${encodeURIComponent(c.id)}`)); }
+  try { ({ posts: state.qaPosts[k], room: state.qaRoom[k], peers: state.qaPeers } = await api(`/api/platforms/${p.id}/qa?course=${encodeURIComponent(c.id)}`)); }
   catch { state.qaPosts[k] = []; }
   finally { loadingPosts.delete(k); }
   repaint();
@@ -1179,6 +1183,15 @@ function renderCourse(p, c, tab, full = false) {
   page.querySelectorAll("[data-ask-size]").forEach((el) => (el.onclick = () => { store.set("studia-ask-size", Number(el.dataset.askSize)); renderCourse(p, c, tab); }));
   const qaStart = $("[data-qa-start]", page);
   if (qaStart) qaStart.onclick = () => startJob({ platform: p.id, course: c.id, type: "qa", limit: Math.min(qaSize(), state.qaRoom[k]?.answer ?? qaSize()) });
+  const qaPeers = $("[data-qa-peers]", page);
+  if (qaPeers) qaPeers.onclick = async () => {
+    const on = !state.qaPeers;
+    state.qaPeers = on;  // flip at once; put back if the server says no
+    renderCourse(p, c, tab);
+    try { state.qaPeers = (await api(`/api/platforms/${p.id}/qa/peers`, { method: "POST", body: { on } })).peers; toast(on ? "已开启站内互答" : "已关闭站内互答"); }
+    catch (error) { state.qaPeers = !on; toast(error.message); }
+    renderCourse(p, c, tab);
+  };
   const qaDraft = $("[data-qa-draft]", page);
   if (qaDraft) qaDraft.onclick = () => draftQuestions(p, c);
   // Edits go straight into the draft, so a background repaint writes back what was typed.

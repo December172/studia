@@ -29,7 +29,7 @@ from ZHSMain.memory import DatabaseAnswerMemory
 from ai.memory import MoocDatabaseAnswerMemory
 from settings import SettingsError, SettingsStore
 from web.accounts import AccountError, Accounts, Sessions, Throttle
-from web.server import MAX_JOBS, MAX_PENDING, NOT_HANDLED, HttpError, Reply, Studia, _EventLogHandler, drain, make_handler
+from web.server import MAX_JOBS, MAX_PENDING, NOT_HANDLED, PEERS_MARKER, HttpError, Reply, Studia, _EventLogHandler, drain, make_handler
 
 COOKIE = "studia_session"
 OAUTH_TTL = 600
@@ -167,6 +167,7 @@ class Hub:
         this person's board."""
         asked, ours = [], collections.Counter()
         for path in sorted((self.data / "users").glob("*/zhs-qa-posts.json")):
+            sharing = (path.parent / PEERS_MARKER).exists()  # only those who turned 站内互答 on offer their questions
             try:
                 posts = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -177,7 +178,7 @@ class Hub:
                     continue
                 if post.get("kind") == "answer" and post.get("qid"):
                     ours[str(post["qid"])] += 1
-                elif post.get("kind") == "ask" and post.get("id") and path.parent.name != uid:
+                elif post.get("kind") == "ask" and post.get("id") and path.parent.name != uid and sharing:
                     asked.append({"id": post["id"], "text": post.get("question") or "", "at": post.get("at") or 0})
         return [dict(q, ours=ours[str(q["id"])]) for q in sorted(asked, key=lambda q: q["at"])]
 
