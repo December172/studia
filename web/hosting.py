@@ -165,7 +165,7 @@ class Hub:
         of us have answered it ("ours"). Read from everyone's post records (Studia._record_post); the questions are
         public on the board anyway. Only records that name the class count: a question from another class is not on
         this person's board."""
-        asked, ours = [], collections.Counter()
+        asked, ours, replies = [], collections.Counter(), collections.defaultdict(list)
         for path in sorted((self.data / "users").glob("*/zhs-qa-posts.json")):
             sharing = (path.parent / PEERS_MARKER).exists()  # only those who turned 站内互答 on offer their questions
             try:
@@ -178,9 +178,10 @@ class Hub:
                     continue
                 if post.get("kind") == "answer" and post.get("qid"):
                     ours[str(post["qid"])] += 1
+                    replies[str(post["qid"])].append(post.get("text") or "")  # so the next one says it differently
                 elif post.get("kind") == "ask" and post.get("id") and path.parent.name != uid and sharing:
                     asked.append({"id": post["id"], "text": post.get("question") or "", "at": post.get("at") or 0})
-        return [dict(q, ours=ours[str(q["id"])]) for q in sorted(asked, key=lambda q: q["at"])]
+        return [dict(q, ours=ours[str(q["id"])], replies=replies[str(q["id"])][-3:]) for q in sorted(asked, key=lambda q: q["at"])]
 
     def resume(self):
         """After a restart, start again each person's jobs it interrupted (see Studia.resume)."""
