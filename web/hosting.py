@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import collections
 import datetime
 import getpass
 import hmac
@@ -153,10 +154,32 @@ class Hub:
                 app = Studia(store, reports_dir=directory / "ai_results", memory=self.memory, mooc_memory=self.mooc_memory,
                              oauth_url=lambda pid, uid=uid: self.oauth_url(uid, pid),
                              job_limit=lambda uid=uid: self.job_limit(uid),
-                             zhs_parallel=lambda: bool(self.accounts.setting("zhs_parallel_study", False)))
+                             zhs_parallel=lambda: bool(self.accounts.setting("zhs_parallel_study", False)),
+                             peers=lambda course_id, recruit_id, uid=uid: self.peer_questions(uid, course_id, recruit_id))
                 app.owner = (self.accounts.user(uid) or {}).get("username", uid)
                 self.apps[uid] = app
             return app
+
+    def peer_questions(self, uid, course_id, recruit_id):
+        """Questions the other people on this site asked in the same Zhihuishu class, oldest first, each with how many
+        of us have answered it ("ours"). Read from everyone's post records (Studia._record_post); the questions are
+        public on the board anyway. Only records that name the class count: a question from another class is not on
+        this person's board."""
+        asked, ours = [], collections.Counter()
+        for path in sorted((self.data / "users").glob("*/zhs-qa-posts.json")):
+            try:
+                posts = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            for post in posts if isinstance(posts, list) else []:
+                if not isinstance(post, dict) or str(post.get("course")) != str(course_id) \
+                        or str(post.get("recruit")) != str(recruit_id):
+                    continue
+                if post.get("kind") == "answer" and post.get("qid"):
+                    ours[str(post["qid"])] += 1
+                elif post.get("kind") == "ask" and post.get("id") and path.parent.name != uid:
+                    asked.append({"id": post["id"], "text": post.get("question") or "", "at": post.get("at") or 0})
+        return [dict(q, ours=ours[str(q["id"])]) for q in sorted(asked, key=lambda q: q["at"])]
 
     def resume(self):
         """After a restart, start again each person's jobs it interrupted (see Studia.resume)."""
