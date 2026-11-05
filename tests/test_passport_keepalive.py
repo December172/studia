@@ -63,6 +63,51 @@ class KeepPassportTest(unittest.TestCase):
         self.assertIsNotNone(self.store.session("zhs"))  # never signs anyone out
 
 
+class RescanTest(KeepPassportTest):
+    """A lapsed ticket shows on the page as a request to scan again, until a scan or sign-out clears it."""
+    def rescan(self):
+        return next(p for p in self.app.state()["platforms"] if p["id"] == "zhs")["rescan"]
+
+    def test_the_page_asks_for_a_scan_while_the_ticket_is_gone_and_hears_each_change_once(self):
+        self.app.publish = Mock()
+        self.signed_in({"return_value": True})
+        self.app.keep_passport()
+        self.assertFalse(self.rescan())
+        self.app.publish.assert_not_called()
+        self.signed_in({"return_value": False})
+        self.app.keep_passport()
+        self.app.keep_passport()
+        self.assertTrue(self.rescan())
+        self.assertEqual(self.app.publish.call_count, 1)
+        self.signed_in({"return_value": True})
+        self.app.keep_passport()
+        self.assertFalse(self.rescan())
+        self.assertEqual(self.app.publish.call_count, 2)
+        self.assertFalse(next(p for p in self.app.state()["platforms"] if p["id"] == "cx")["rescan"])
+
+    def test_a_scan_or_signing_out_clears_it(self):
+        self.signed_in({"return_value": False})
+        self.app.keep_passport()
+        self.app.logout("zhs")
+        self.assertFalse(self.rescan())
+        self.assertIsNone(self.store.get("zhs_passport_lapsed"))
+        self.signed_in({"return_value": False})
+        self.app.keep_passport()
+        scanner = Mock(access_token="new", login_qr_status=Mock(return_value={"status": 1, "oncePassword": "x"}))
+        self.platform.qr["q"] = {"client": scanner, "qr": "t", "refreshes": 0}
+        self.assertEqual(self.app.login_status("zhs", "q")["status"], "done")
+        self.assertFalse(self.rescan())
+
+    def test_a_refused_board_says_whether_a_scan_will_help(self):
+        self.signed_in({"return_value": False})
+        self.assertIn("重新扫码后问答区才能进", self.app.board_refused(self.platform))
+        self.assertTrue(self.rescan())
+        self.signed_in({"return_value": True})
+        self.assertIn("稍后重试", self.app.board_refused(self.platform))
+        self.signed_in({"side_effect": PlatformUnavailable("连不上")})
+        self.assertIn("稍后重试", self.app.board_refused(self.platform))
+
+
 class BoardCheckTest(KeepPassportTest):
     def test_the_board_check_is_logged_next_to_the_ticket(self):
         from unittest.mock import patch

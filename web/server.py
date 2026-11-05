@@ -73,6 +73,9 @@ PEERS_MARKER = "qa-peers.on"  # present while the person takes part in 站内互
 # window should keep it, and the log line each time shows whether it does.
 KEEPALIVE = 50 * 60
 BOARD_EVERY = 3  # every third round (from the first) also opens the Q&A board: does a live ticket really let us in?
+# Set while the sign-in centre says this person's ticket is gone: only a fresh scan brings the Q&A board back, and
+# nothing else tells them (studying carries on), so the page asks for one.
+PASSPORT_LAPSED = "zhs_passport_lapsed"
 DRAFT_TIMEOUT = 300  # reasoning models take one to two minutes to write a single question
 # Running job id -> its Studia app. A job thread is named "studia-job-<id>" and passes that
 # name on to the helper threads it starts, so a log line can be traced back to its job.
@@ -141,10 +144,10 @@ class Platform:
         # never registered and people scanned again and again.
         self.qr = {}
 
-    def public(self, logged_in):
+    def public(self, logged_in, rescan=False):
         spec = self.spec
         return {"id": self.id, "name": spec["name"], "short": spec["short"], "login": spec["login"],
-                "password": bool(spec.get("password")), "logged_in": logged_in,
+                "password": bool(spec.get("password")), "logged_in": logged_in, "rescan": rescan,
                 "features": {"study": spec.get("study", True), "answer": spec["answer"],
                              "review": spec["review"], "qa": bool(spec.get("qa"))}}
 
@@ -230,7 +233,9 @@ class Studia:
         return platform.client is not None or bool(self.store.session(platform.id))
 
     def state(self):
-        return {"platforms": [p.public(self.logged_in(p)) for p in self.platforms.values()],
+        lapsed = bool(self.store.get(PASSPORT_LAPSED))
+        return {"platforms": [p.public(self.logged_in(p), lapsed and p.id == "zhs" and self.logged_in(p))
+                              for p in self.platforms.values()],
                 "jobs": self._running(), "history": [_job_public(j) for j in self.history],
                 "job_limit": self.job_limit(), "zhs_parallel": self.zhs_parallel()}
 
@@ -271,6 +276,7 @@ class Studia:
             logger.info("%s智慧树登录中心票据有效，已保活%s", self.who(), age)
         else:
             logger.warning("%s智慧树登录中心票据已失效，问答区要重新扫码才能进%s", self.who(), age)
+        self.passport_seen(alive)
         if board:
             entered = self._enter_board(platform)
             if entered is not None:
@@ -278,6 +284,26 @@ class Studia:
                             "有效" if alive else "已失效", age)
         self.save_sessions(platform)  # the sign-in centre may have renewed cookies
         return alive
+
+    def passport_seen(self, alive):
+        """Remember what the sign-in centre last said; the page asks for a fresh scan while the ticket is gone.
+        Open pages hear about a change at once."""
+        if bool(self.store.get(PASSPORT_LAPSED)) == (not alive):
+            return
+        self.store.set(PASSPORT_LAPSED, None if alive else time.time())
+        self.publish({"type": "account"})
+
+    def board_refused(self, platform):
+        """The Q&A board sent us to sign in. Ask the sign-in centre why: a lapsed ticket needs a fresh scan,
+        anything else may pass on another try."""
+        try:
+            alive = self.client(platform).passport_alive()
+        except Exception:
+            alive = None
+        if alive is False:
+            self.passport_seen(False)
+            return "智慧树登录中心过期了，重新扫码后问答区才能进"
+        return "问答区没进去，稍后重试；一直不行就重新扫码智慧树"
 
     def _enter_board(self, platform):
         """Open the Q&A board of the person's first shared course and leave: True if it let us in, False if it sent
@@ -465,6 +491,7 @@ class Studia:
                 self.store.save_session(platform.id, client)
                 logger.info("%s%s 扫码登录成功", self.who(), name)
                 self.store.set("zhs_signed_in_at", time.time())  # the keep-alive log counts hours from here
+                self.store.set(PASSPORT_LAPSED, None)  # a scan hands out a new ticket
                 self.publish({"type": "account"})  # other tabs and devices pick up the login
                 return {"status": "done", "message": "登录成功"}
             if status == 2:
@@ -490,6 +517,8 @@ class Studia:
         with self.lock:  # under the lock so save_sessions() cannot write the old cookies back in between
             self.drop(platform)
             self.store.clear_session(pid)
+            if pid == "zhs":
+                self.store.set(PASSPORT_LAPSED, None)
         logger.info("%s%s 退出登录", self.who(), platform.spec["name"])
         self.publish({"type": "account"})
         return {}
@@ -1187,9 +1216,9 @@ class Studia:
                                          voice=zlib.crc32((self.owner or "local").encode()))  # one person, one voice
             return _tally("回答了 %d 条提问", stats["answered"], stats["failed"])
         except AuthenticationExpired:
-            # 问答区自己的会话比智慧树登录短，进站还要走一次单点登录跳转；被跳到登录页
-            # 不等于整个登录失效。只停下这个任务，不删登录：真过期了，学习任务会照常发现。
-            raise NeedsRetry("问答区没进去，稍后重试；一直不行就重新扫码智慧树") from None
+            # 问答区每次进站都靠登录中心的票据认人，它比业务登录短命；被跳到登录页不等于整个登录失效。
+            # 只停下这个任务，不删登录：真过期了，学习任务会照常发现。
+            raise NeedsRetry(self.board_refused(platform)) from None
         finally:
             ai.session.close()
 
@@ -1207,7 +1236,7 @@ class Studia:
                                           on_event=event, sleep=self._pace(job, ASK_PACE))
             return _tally("发布了 %d 条提问", stats["published"], stats["failed"])
         except AuthenticationExpired:
-            raise NeedsRetry("问答区没进去，稍后重试；一直不行就重新扫码智慧树") from None
+            raise NeedsRetry(self.board_refused(platform)) from None
 
     def qa_room(self, platform, row):
         """How many questions and answers this course can still take: what is left under the caps that score
@@ -1252,7 +1281,7 @@ class Studia:
             try:
                 reference = self._cached(platform, ("qa_reference", course_id), False, lambda: self._reference(platform, row))
             except AuthenticationExpired:
-                raise HttpError(409, "问答区没进去，稍后重试；一直不行就重新扫码智慧树") from None
+                raise HttpError(409, self.board_refused(platform)) from None
             try:
                 units = self._cached(platform, ("units", course_id), False, lambda: platform.spec["units"](self.client(platform), row))
             except Exception:  # without the lesson list the model asks about the course as a whole
