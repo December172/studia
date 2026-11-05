@@ -172,7 +172,7 @@ def in_course(memory, scope="ai/1"):
 def runner(client, ai, memory, auto_submit=True):
     return ZHSAnswerRunner(client, ai, auto_submit=auto_submit, memory=memory,
                            sleep=lambda seconds: None, rng=FixedRng(),
-                           heartbeat_interval=3600)
+                           heartbeat_interval=3600, max_workers=1)  # FakeAI returns answers in paper order.
 
 
 class CourseScopeTest(unittest.TestCase):
