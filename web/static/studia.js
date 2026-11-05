@@ -84,7 +84,7 @@ async function api(path, { method = "GET", body } = {}) {
 }
 
 const state = {
-  platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {}, earned: {}, qaDraft: {}, qaPosts: {}, qaOpen: new Set(),
+  platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {}, earned: {}, qaDraft: {}, qaPosts: {}, qaRoom: {}, qaOpen: new Set(),
   jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, loginMode: {}, lastDone: null,
   current: store.get("studia-platform", ""), meOpen: false, adminTab: "people", logFilter: "all", editPassword: false, adminEdit: null, pausedOpen: new Set(),
 };
@@ -987,27 +987,37 @@ const courseTab = (c, tab) => tab === "answer" ? "answer" : tab === "qa" && c.fe
 
 // Q&A tab. Where the interaction share stands, then two actions: answer a few questions now, or have
 // AI draft new ones that the person edits before they go out. Everything posted is listed below.
-const QA_SIZES = [5, 10, 20], ASK_SIZES = [1, 3, 5];
-const qaSize = () => { const n = store.get("studia-qa-size", 10); return QA_SIZES.includes(n) ? n : 10; };
+// The board's own rules (智慧树问答规则): 10 valid questions and 20 valid answers score in full, its data
+// updates the next morning, and a few a day per course keeps clear of its flood checks. The server says
+// how many are left today (room) and why when none are.
+const QA_SIZES = [3, 5, 10], ASK_SIZES = [1, 3, 5];
+const qaSize = () => { const n = store.get("studia-qa-size", 5); return QA_SIZES.includes(n) ? n : 5; };
 const askSize = () => { const n = store.get("studia-ask-size", 3); return ASK_SIZES.includes(n) ? n : 3; };
 function qaBody(p, c) {
   const k = key(p.id, c.id), earned = state.earned[k], q = earned?.qa, block = blocker(p.id, c.id, "qa");
-  const draft = state.qaDraft[k], posts = state.qaPosts[k], size = qaSize();
+  const draft = state.qaDraft[k], posts = state.qaPosts[k], room = state.qaRoom[k], size = qaSize();
   const n = (v) => (q ? v : "—");
   const stat = `<div class="qa_stat"><span class="qa_score"><b>${earned ? pts(earned.interactive) : "—"}</b><span class="of">/${c.shares?.interactive || 10}</span> 分</span>
-    <span>有效回答 <b>${n(q?.answers)}</b></span><span>有效提问 <b>${n(q?.questions)}</b></span><span>收获回答 <b>${n(q?.received)}</b></span></div>`;
-  const answer = `<div class="model plain qa_row"><span class="m1"><b>回答提问</b><small class="sans">${esc(block || `先挑没人回答的，约 ${size} 分钟发完`)}</small></span>
-    <span class="row_btns"><span class="sizes">${QA_SIZES.map((s) => `<button class="chip" data-qa-size="${s}" aria-pressed="${s === size}">${s} 条</button>`).join("")}</span>
-      <button class="btn primary" data-qa-start ${block ? "disabled" : ""}>开始</button></span></div>`;
+    <span>提问 <b>${n(q?.questions)}</b><span class="of">/10</span></span><span>回答 <b>${n(q?.answers)}</b><span class="of">/20</span></span>
+    <span>收获回答 <b>${n(q?.received)}</b></span><small class="sans">次日上午更新</small></div>`;
+  const answerBlock = block || (room && !room.answer ? room.why.answer : "");
+  const answer = `<div class="model plain qa_row"><span class="m1"><b>回答提问</b><small class="sans">${esc(answerBlock ||
+      `跳过水帖和刷帖${room ? ` · 今天还能答 ${room.answer} 条` : ""}`)}</small></span>
+    <span class="row_btns"><span class="sizes">${QA_SIZES.map((s) => `<button class="chip" data-qa-size="${s}" aria-pressed="${s === size}" ${room && s > room.answer && s !== QA_SIZES[0] ? "disabled" : ""}>${s} 条</button>`).join("")}</span>
+      <button class="btn primary" data-qa-start ${answerBlock ? "disabled" : ""}>开始</button></span></div>`;
   const texts = draft?.texts || [];
+  const askBlock = block || (room && !room.ask ? room.why.ask : "");
+  const tooMany = room && texts.length > room.ask;
   const ask = `<div class="model plain qa_row"><span class="m1"><b>发起提问</b><small class="sans">${esc(
-      draft?.loading ? `正在出第 ${draft.loading}/${draft.total} 条…` : draft?.error || "AI 从回答少的话题里出题，你改好再发")}</small></span>
-    <span class="row_btns"><span class="sizes">${ASK_SIZES.map((s) => `<button class="chip" data-ask-size="${s}" aria-pressed="${s === askSize()}">${s} 条</button>`).join("")}</span>
-      <button class="btn" data-qa-draft ${draft?.loading ? "disabled" : ""}>${texts.length ? "换一批" : "出题"}</button></span></div>
+      draft?.loading ? `正在出第 ${draft.loading}/${draft.total} 条…` : draft?.error || askBlock ||
+      `AI 按课程小节出题，你改好再发${room ? ` · 今天还能发 ${room.ask} 条` : ""}`)}</small></span>
+    <span class="row_btns"><span class="sizes">${ASK_SIZES.map((s) => `<button class="chip" data-ask-size="${s}" aria-pressed="${s === askSize()}" ${room && s > room.ask && s !== ASK_SIZES[0] ? "disabled" : ""}>${s} 条</button>`).join("")}</span>
+      <button class="btn" data-qa-draft ${draft?.loading || askBlock ? "disabled" : ""}>${texts.length ? "换一批" : "出题"}</button></span></div>
     ${texts.map((t, i) => `<div class="model plain qa_draft"><textarea rows="2" data-qa-edit="${i}" maxlength="200">${esc(t)}</textarea>
       <button class="btn small" data-qa-drop="${i}" aria-label="删掉这条">删掉</button></div>`).join("")}
-    ${texts.length ? `<div class="model plain qa_row"><span class="m1"><small class="sans">${esc(block || "发出后挂在你的账号名下")}</small></span>
-      <span class="row_btns"><button class="btn primary" data-qa-ask ${block || draft?.loading ? "disabled" : ""}>发布 ${texts.length} 条</button></span></div>` : ""}`;
+    ${texts.length ? `<div class="model plain qa_row"><span class="m1"><small class="sans">${esc(askBlock ||
+      (tooMany ? `今天还能发 ${room.ask} 条，删掉几条` : "隔 10–20 分钟发一条，免得像刷帖"))}</small></span>
+      <span class="row_btns"><button class="btn primary" data-qa-ask ${askBlock || tooMany || draft?.loading ? "disabled" : ""}>发布 ${texts.length} 条</button></span></div>` : ""}`;
   const list = !posts ? '<div class="empty">正在读取…</div>' : !posts.length ? '<div class="empty">还没在这门课发过</div>'
     : `<div class="runs">${posts.map((x) => {
       // Keyed by the post itself, so a new post on top does not move which one is open.
@@ -1025,7 +1035,7 @@ async function loadQaPosts(p, c) {
   const k = key(p.id, c.id);
   if (loadingPosts.has(k) || state.qaPosts[k]) return;
   loadingPosts.add(k);
-  try { state.qaPosts[k] = (await api(`/api/platforms/${p.id}/qa?course=${encodeURIComponent(c.id)}`)).posts; }
+  try { ({ posts: state.qaPosts[k], room: state.qaRoom[k] } = await api(`/api/platforms/${p.id}/qa?course=${encodeURIComponent(c.id)}`)); }
   catch { state.qaPosts[k] = []; }
   finally { loadingPosts.delete(k); }
   repaint();
@@ -1033,7 +1043,8 @@ async function loadQaPosts(p, c) {
 // One question per request, shown as it comes: a slow model takes a minute or two for each,
 // and one request for all of them could outlast the browser or a proxy in between.
 async function draftQuestions(p, c) {
-  const draft = state.qaDraft[key(p.id, c.id)] = { texts: [], total: askSize(), loading: 1 };
+  const room = state.qaRoom[key(p.id, c.id)];
+  const draft = state.qaDraft[key(p.id, c.id)] = { texts: [], total: Math.max(1, Math.min(askSize(), room?.ask ?? askSize())), loading: 1 };
   for (; draft.loading <= draft.total; draft.loading++) {
     repaint();
     try { draft.texts.push(...(await api(`/api/platforms/${p.id}/qa/draft`, { method: "POST", body: { course: c.id, have: draft.texts } })).questions); }
@@ -1167,7 +1178,7 @@ function renderCourse(p, c, tab, full = false) {
   page.querySelectorAll("[data-qa-size]").forEach((el) => (el.onclick = () => { store.set("studia-qa-size", Number(el.dataset.qaSize)); renderCourse(p, c, tab); }));
   page.querySelectorAll("[data-ask-size]").forEach((el) => (el.onclick = () => { store.set("studia-ask-size", Number(el.dataset.askSize)); renderCourse(p, c, tab); }));
   const qaStart = $("[data-qa-start]", page);
-  if (qaStart) qaStart.onclick = () => startJob({ platform: p.id, course: c.id, type: "qa", limit: qaSize() });
+  if (qaStart) qaStart.onclick = () => startJob({ platform: p.id, course: c.id, type: "qa", limit: Math.min(qaSize(), state.qaRoom[k]?.answer ?? qaSize()) });
   const qaDraft = $("[data-qa-draft]", page);
   if (qaDraft) qaDraft.onclick = () => draftQuestions(p, c);
   // Edits go straight into the draft, so a background repaint writes back what was typed.
@@ -1421,6 +1432,7 @@ function handleEvent(event) {
       delete state.papers[key(event.platform, event.course)];
       delete state.earned[key(event.platform, event.course)];
       delete state.qaPosts[key(event.platform, event.course)];
+      delete state.qaRoom[key(event.platform, event.course)];
       loadCourses(event.platform);
       setTimeout(repaint, 61000);
     }

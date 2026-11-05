@@ -150,7 +150,7 @@ class ResumeJobsTest(unittest.TestCase):
         class Board:
             def __enter__(self): return self
             def __exit__(self, *exc): pass
-            def questions(self, **kw): return [{"id": i, "content": "问题 %d" % i} for i in range(3)]
+            def questions(self, **kw): return [{"id": i, "content": "第 %d 节的分层设计为什么更好维护？" % i} for i in range(3)]
             def publish(self, qid, text): posted.set(); return 100 + qid
 
         app._ai = Mock(return_value=Mock(answer=Mock(return_value={"answer": "这是一段足够长的回答，" * 5})))
