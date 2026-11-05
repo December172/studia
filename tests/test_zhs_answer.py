@@ -187,7 +187,7 @@ class PrepareTest(unittest.TestCase):
     def test_download_images_rejects_non_images(self):
         def get(url, **kwargs):
             ok = url.endswith("ok.png")
-            return Mock(status_code=200, content=b"x",
+            return Mock(status_code=200, iter_content=Mock(return_value=iter([b"x"])),
                         headers={"Content-Type": "image/png" if ok else "text/html"})
         self.assertEqual(download_images({"ok.png": "https://h/ok.png"}, get=get),
                          [("ok.png", "image/png", b"x")])
