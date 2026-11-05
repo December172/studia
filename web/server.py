@@ -72,6 +72,7 @@ PEERS_MARKER = "qa-peers.on"  # present while the person takes part in 站内互
 # seemed to lapse two to three hours after last use, taking the Q&A board with it; touching it inside that
 # window should keep it, and the log line each time shows whether it does.
 KEEPALIVE = 50 * 60
+BOARD_EVERY = 3  # every third round (from the first) also opens the Q&A board: does a live ticket really let us in?
 DRAFT_TIMEOUT = 300  # reasoning models take one to two minutes to write a single question
 # Running job id -> its Studia app. A job thread is named "studia-job-<id>" and passes that
 # name on to the helper threads it starts, so a log line can be traced back to its job.
@@ -251,10 +252,11 @@ class Studia:
                 platform.client.close()
             platform.client, platform.rows, platform.entries, platform.cache = None, [], {}, {}
 
-    def keep_passport(self):
+    def keep_passport(self, board=False):
         """Touch the Zhihuishu sign-in centre for this person and log the answer, with the hours since the scan:
-        the log then shows whether the ticket keeps or still lapses. True/False, None when not signed in or
-        the platform could not be reached."""
+        the log then shows whether the ticket keeps or still lapses. With board, also open the Q&A board and log
+        whether it let us in, next to the ticket's state. True/False, None when not signed in or the platform
+        could not be reached."""
         platform = self.platforms.get("zhs")
         if platform is None or not self.logged_in(platform):
             return None
@@ -269,8 +271,28 @@ class Studia:
             logger.info("%s智慧树登录中心票据有效，已保活%s", self.who(), age)
         else:
             logger.warning("%s智慧树登录中心票据已失效，问答区要重新扫码才能进%s", self.who(), age)
+        if board:
+            entered = self._enter_board(platform)
+            if entered is not None:
+                logger.info("%s智慧树问答区%s（登录中心票据%s）%s", self.who(), "能进" if entered else "进不去",
+                            "有效" if alive else "已失效", age)
         self.save_sessions(platform)  # the sign-in centre may have renewed cookies
         return alive
+
+    def _enter_board(self, platform):
+        """Open the Q&A board of the person's first shared course and leave: True if it let us in, False if it sent
+        us to sign in, None when there is no such course or the page did not load."""
+        client = self.client(platform)
+        try:
+            course = next((c for c in client.shared_courses() if c.get("courseId") and c.get("recruitId")), None)
+            if course is None:
+                return None
+            with QaBridge(client.access_token, course_id=course["courseId"], recruit_id=course["recruitId"]):
+                return True
+        except AuthenticationExpired:
+            return False
+        except Exception:
+            return None
 
     def who(self):
         """Log prefix naming the Studia account on a hosted server; request threads carry no job tag."""
@@ -1850,14 +1872,15 @@ def keep_passports(apps, interval=KEEPALIVE, first=60, stop=None):
     sign-in centre for everyone the apps() callable returns. Runs until stop is set; one person's error is logged
     and the rest carry on."""
     stop = stop or threading.Event()
-    wait = first
+    wait, rounds = first, 0
     while not stop.wait(wait):
+        board = rounds % BOARD_EVERY == 0
         for app in apps():
             try:
-                app.keep_passport()
+                app.keep_passport(board=board)
             except Exception:
                 logger.warning("智慧树登录中心保活出错", exc_info=True)
-        wait = interval
+        wait, rounds = interval, rounds + 1
 
 
 def drain(timeout=20):
