@@ -15,7 +15,7 @@ from base.auth import AuthenticationExpired, PlatformUnavailable
 from MoocMain.log import Logger
 from reporting import Reporter, child_thread_name
 from task_metrics import nonnegative_number
-from ZHSMain.api import CaptchaRequired, StudyTimeLimit
+from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApiError
 from ZHSMain.memory import Scoped
 
 logger = Logger(__name__).get_log()
@@ -26,6 +26,27 @@ FILL_EXAM = "/"
 OPTION_TYPES = {1, 2, 14}
 MEDIA = re.compile(r"<(img|audio|video|iframe)\b", re.I)
 IMAGE = re.compile(r"<img\b[^>]*?\bsrc\s*=\s*['\"]?([^'\" >]+)[^>]*>", re.I)
+MASTERY_ROUNDS = 3
+
+
+def _mastery_question(raw):
+    """The mastery page supports radio, checkbox and judgement; use the existing answer codec."""
+    if not isinstance(raw, dict) or raw.get("questionId") in (None, ""):
+        raise ValueError("掌握度题目缺少 ID")
+    if _kind(raw) not in OPTION_TYPES:
+        raise ValueError("掌握度练习包含暂不支持的题型，请到平台完成")
+    return dict(raw, id=raw["questionId"], content=raw.get("questionName"), optionVos=[
+        dict(option, content=option.get("name")) for option in raw.get("optionVos") or []])
+
+
+def _mastery_rate(value):
+    try:
+        rate = float(value)
+        if not 0 <= rate <= 100:
+            raise ValueError
+        return rate
+    except (TypeError, ValueError):
+        raise PlatformUnavailable("智慧树掌握度结果缺少有效百分比，请到平台核对") from None
 
 
 def _kind(raw):
@@ -316,6 +337,131 @@ class ZHSAnswerRunner:
         self._heartbeat_error = None
 
     # ------------------------------------------------------------------ 入口
+
+    def run_mastery(self, course):
+        """Finish unmastered shared-course nodes; only the platform's confirmed 100% counts as done."""
+        z = course.get("zhs") or {}
+        if z.get("kind") != "shared":
+            raise ValueError("掌握度学习目前仅支持智慧树共享课")
+        course_id, recruit_id = z["courseId"], z["recruitId"]
+        self.memory = None if self.all_memory is None else Scoped(self.all_memory, "shared/%s" % course_id)
+        self._mastery_check_cancel()
+        nodes = self.client.mastery_nodes(course_id, recruit_id)
+        self.reporter.begin("掌握度学习", len(nodes), "个知识点")
+        if not nodes:
+            return self._result(course.get("courseName"), "skipped", "这门课没有配置掌握度知识点")
+        self._mastery_check_cancel()
+        rates = {str(item["knowledgeId"]): _mastery_rate(item.get("rate"))
+                 for item in self.client.mastery_progress(recruit_id)}
+        done, exempt, remaining = 0, 0, 0
+        for node in nodes:
+            self._mastery_check_cancel()
+            name = node.get("nodeName") or "知识点"
+            if str(node.get("freeExam")) == "1":
+                exempt += 1
+                self.reporter.result(name, "skipped")
+                continue
+            if rates.get(str(node["idHash"]), 0) >= 100:
+                done += 1
+                self.reporter.result(name, "skipped")
+                continue
+            self.reporter.detail(name)
+            result = self._mastery_point(course_id, recruit_id, node)
+            if result["status"] in ("ai_error", "submission_unknown"):
+                result["stop_queue"] = True
+                return result
+            if result["status"] == "submitted":
+                done += 1
+            elif result["status"] == "skipped":
+                exempt += 1
+            else:
+                remaining += 1
+            self.reporter.result(name, "success" if result["status"] == "submitted" else
+                                 "skipped" if result["status"] == "skipped" else "error")
+            logger.info("%s：%s", name, result["message"])
+        status = "submitted" if not remaining else "preview" if not self.auto_submit else "error"
+        return self._result(course.get("courseName"), status,
+                            "掌握度：满分 %d 个，免考/无题 %d 个，未达标 %d 个" % (done, exempt, remaining))
+
+    def _mastery_check_cancel(self):
+        if self.cancel_event.is_set():
+            raise KeyboardInterrupt
+
+    def _mastery_point(self, course_id, recruit_id, node):
+        name, knowledge_id = node.get("nodeName") or "知识点", node["idHash"]
+        for attempt in range(MASTERY_ROUNDS):
+            self._mastery_check_cancel()
+            try:
+                paper = self.client.mastery_start(course_id, recruit_id, knowledge_id)
+            except ZHSApiError as exc:
+                if exc.code == 2004:
+                    return self._result(name, "skipped", "该知识点暂无练习题，不计入掌握度")
+                if exc.code == 2019:
+                    raise StudyTimeLimit("课程学习已结束，不能提升掌握度") from None
+                raise
+            if (not isinstance(paper, dict) or not paper.get("examId")
+                    or not isinstance(paper.get("questions"), list) or not paper["questions"]):
+                raise PlatformUnavailable("智慧树掌握度试题返回格式异常")
+            try:
+                questions = [(raw, prepare(_mastery_question(raw), allow_images=True)) for raw in paper["questions"]]
+                if len({str(p["qid"]) for _, p in questions}) != len(questions):
+                    raise ValueError("掌握度试题 ID 重复")
+            except (ValueError, TypeError) as exc:
+                return self._result(name, "error", "未提交：%s" % exc)
+            answers, failure = self._ask_all(name, questions, ",")
+            if failure:
+                return failure
+            self._mastery_check_cancel()
+            if not self.auto_submit:
+                return self._result(name, "preview", "已生成练习答案，未提交")
+            payload = [{"questionId": prepared["qid"], "answer": ",".join(str(a) for a in answer)}
+                       for (_, prepared), answer in zip(questions, answers)]
+            try:
+                self.client.mastery_submit(recruit_id, knowledge_id, paper["examId"], payload)
+            except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
+                raise
+            except ZHSApiError as exc:
+                if exc.code == 2019:
+                    raise StudyTimeLimit("课程学习已结束，不能提升掌握度") from None
+                return self._result(name, "error", "平台拒绝提交：%s" % exc)
+            except Exception:
+                return self._result(name, "submission_unknown", "提交结果未知，已停止；请到平台核对后再运行")
+            # A missing result is not proof of failure: do not create or submit another attempt.
+            self._mastery_check_cancel()
+            try:
+                grade = self.client.mastery_result(recruit_id, knowledge_id, paper["examId"])
+                rate = _mastery_rate(grade.get("rate"))
+            except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
+                raise
+            except Exception:
+                return self._result(name, "submission_unknown", "已提交但掌握度结果未确认，已停止；请到平台核对")
+            logger.info("%s · 第 %d/%d 次练习，平台确认掌握度 %g%%", name, attempt + 1, MASTERY_ROUNDS, rate)
+            self._mastery_remember(recruit_id, knowledge_id, paper["examId"], name, questions, answers)
+            if rate >= 100:
+                return self._result(name, "submitted", "平台确认掌握度 100%")
+            if attempt + 1 < MASTERY_ROUNDS:
+                self.sleep(1)
+                self._mastery_check_cancel()
+        return self._result(name, "error", "已练习 %d 次，掌握度仍为 %g%%；本次不再重做" % (MASTERY_ROUNDS, rate))
+
+    def _mastery_remember(self, recruit_id, knowledge_id, exam_id, name, questions, answers):
+        self._mastery_check_cancel()
+        if self.memory is None:
+            return
+        try:
+            graded = self.client.mastery_answers(recruit_id, knowledge_id, exam_id)
+            by_id = {str(raw["questionId"]): raw for raw in graded["questions"]}
+            for (_, prepared), encoded in zip(questions, answers):
+                raw = by_id.get(str(prepared["qid"]))
+                verdict = (raw or {}).get("userAnswerVo") or {}
+                if verdict.get("isCorrect") in (1, 2):
+                    self._remember_question(prepared, encoded, _mastery_question(raw),
+                                            verdict["isCorrect"] == 1, ",")
+            self._save_memory(name)
+        except (CaptchaRequired, StudyTimeLimit, AuthenticationExpired, KeyboardInterrupt):
+            raise
+        except Exception:
+            logger.warning("%s：掌握度成绩已确认，但答案回查失败；未记录未经确认的答案", name)
 
     def run_paper(self, course, item, category):
         z = item.get("zhs") or {}
