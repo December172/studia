@@ -42,8 +42,8 @@ from ZHSMain.answer import ZHSAnswerRunner, catalog
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi, ZHSError, course_offers
 from ZHSMain.main import ZHSHandler, course_units as zhs_units
 from ZHSMain.memory import AnswerMemory
-from ZHSMain.qa import QA_PACE, REFERENCE_ANSWERS, MAX_QUESTION, MIN_QUESTION, QaBridge, _clean_question, answer_questions, \
-    publish_questions, write_questions
+from ZHSMain.qa import ANSWER_CAP, ASK_PACE, DAILY_ANSWERS, DAILY_QUESTIONS, QA_PACE, QUESTION_CAP, REFERENCE_ANSWERS, \
+    MAX_QUESTION, QaBridge, _clean_question, answer_questions, publish_questions, qa_room, question_flaw, write_questions
 from ai.memory import MoocAnswerMemory
 from ZYKMoocMain.api import ZYKMoocApi
 from ZYKMoocMain.main import ZYKMoocHandler
@@ -599,6 +599,7 @@ class Studia:
         if kind not in allowed:
             raise HttpError(400, "这个平台暂不支持该操作")
         row = self.find_row(platform, course_id)
+        room = self.qa_room(platform, row) if kind in ("qa", "ask") else None  # reads the score: before the lock
         if kind in ("review", "qa", "ask"):
             shares = (platform.cache.get(("shares", (row.get("zhs") or {}).get("courseId"))) or (0, None))[1]
             if not course_features(platform.id, row, shares)["qa" if kind == "ask" else kind]:
@@ -618,9 +619,14 @@ class Studia:
                 target = lambda: self._answer(platform, selected, bool(body.get("auto_submit")), job)
             elif kind == "qa":
                 options = _qa_options(body)
+                if not room["answer"]:
+                    raise HttpError(400, room["why"]["answer"])
+                options["limit"] = min(options["limit"], room["answer"])
                 target = lambda: self._qa(platform, row, options, job)
             elif kind == "ask":
                 texts = _ask_texts(body)
+                if len(texts) > room["ask"]:
+                    raise HttpError(400, room["why"]["ask"] if not room["ask"] else "今天还能发 %d 条提问，删掉几条再发" % room["ask"])
                 target = lambda: self._ask(platform, row, texts, job)
             else:
                 job["minutes"] = (REVIEW_MINUTES if minutes is None else minutes) if kind == "review" else 0
@@ -1102,8 +1108,8 @@ class Studia:
         record = lambda kind, question, text, post_id: self._record_post(course_id, kind, question, text, post_id)
         return _Board(QaBridge(self.client(platform).access_token, course_id=course_id, recruit_id=recruit_id), record)
 
-    def _pace(self, job):
-        return lambda _interval: job["cancel"].wait(random.uniform(*QA_PACE))  # wakes at once on stop
+    def _pace(self, job, pace=None):
+        return lambda _interval: job["cancel"].wait(random.uniform(*(pace or QA_PACE)))  # wakes at once on stop
 
     def _qa(self, platform, row, options, job):
         """问答区：取题目 → AI 写回答 → 发布。只在平台返回 200 后计数。"""
@@ -1140,10 +1146,35 @@ class Studia:
         try:
             with self._board(platform, row) as board:
                 stats = publish_questions(board, texts, interval=1, should_stop=job["cancel"].is_set,
-                                          on_event=event, sleep=self._pace(job))
+                                          on_event=event, sleep=self._pace(job, ASK_PACE))
             return _tally("发布了 %d 条提问", stats["published"], stats["failed"])
         except AuthenticationExpired:
             raise NeedsRetry("问答区没进去，稍后重试；一直不行就重新扫码智慧树") from None
+
+    def qa_room(self, platform, row):
+        """How many questions and answers this course can still take: what is left under the caps that score
+        and today's share of the daily limit. The platform counts yesterday's posts by this morning; today's
+        come from our own record."""
+        z = row.get("zhs") or {}
+        today = _beijing_day(time.time())
+        posted = {"ask": 0, "answer": 0}
+        for post in self._posts():
+            if str(post.get("course")) == str(z.get("courseId")) and _beijing_day(post.get("at") or 0) == today:
+                posted[post.get("kind")] = posted.get(post.get("kind"), 0) + 1
+        try:
+            counts = self._cached(platform, ("earned", z.get("courseId")), False,
+                                  lambda: self.client(platform).score_earned(z["courseId"], z["recruitId"]))["qa"]
+        except Exception:  # without the score the daily limit still holds
+            counts = {}
+        counts = counts if isinstance(counts, dict) else {}
+        number = lambda value: value if isinstance(value, (int, float)) else 0
+        room, why = {}, {}
+        for kind, valid, cap, daily, word in (("ask", counts.get("questions"), QUESTION_CAP, DAILY_QUESTIONS, "提问"),
+                                              ("answer", counts.get("answers"), ANSWER_CAP, DAILY_ANSWERS, "回答")):
+            room[kind] = qa_room(number(valid), posted[kind], cap, daily)
+            why[kind] = ("有效%s已经 %d 条，再发不加分" % (word, cap) if number(valid) + posted[kind] >= cap
+                         else "今天已经%s %d 条，明天再来" % ("提问" if kind == "ask" else "回答", posted[kind]))
+        return dict(room, posted=posted, why=why)
 
     def qa_draft(self, pid, body):
         """AI drafts new questions for one course, picking up threads its board has barely answered.
@@ -1164,7 +1195,13 @@ class Studia:
                 reference = self._cached(platform, ("qa_reference", course_id), False, lambda: self._reference(platform, row))
             except AuthenticationExpired:
                 raise HttpError(409, "问答区没进去，稍后重试；一直不行就重新扫码智慧树") from None
-            return {"questions": write_questions(ai, have + reference, 1, course_name=row.get("courseName") or "这门课")}
+            try:
+                units = self._cached(platform, ("units", course_id), False, lambda: platform.spec["units"](self.client(platform), row))
+            except Exception:  # without the lesson list the model asks about the course as a whole
+                units = []
+            topics = [unit["name"] for chapter in units for unit in chapter.get("units", [])]
+            return {"questions": write_questions(ai, have + reference, 1, course_name=row.get("courseName") or "这门课",
+                                                 topics=topics)}
         finally:
             ai.session.close()
 
@@ -1175,8 +1212,9 @@ class Studia:
     def qa_posts(self, pid, course_id):
         platform = self.platform(pid)
         z = self.find_row(platform, course_id).get("zhs") or {}
+        row = self.find_row(platform, course_id)
         mine = [p for p in self._posts() if str(p.get("course")) == str(z.get("courseId"))]
-        return {"posts": mine[-50:][::-1]}
+        return {"posts": mine[-50:][::-1], "room": self.qa_room(platform, row)}
 
     def _posts_path(self):
         return Path(self.store.path).parent / "zhs-qa-posts.json"
@@ -1361,29 +1399,35 @@ def _qa_number(body, name, default, low, high):
     return value
 
 
+def _beijing_day(stamp):
+    """The platform's day (Beijing time), whatever the server's time zone: daily limits and its morning update follow it."""
+    return time.strftime("%Y-%m-%d", time.gmtime(stamp + 8 * 3600))
+
+
 def _qa_options(body):
     """问答区答题只让人选一次发几条（1–50）；挑哪些题、隔多久由 _Board 和 QA_PACE 决定。"""
     return {"limit": _qa_number(body, "limit", 10, 1, 50)}
 
 
 def _ask_texts(body):
-    """要发布的提问：1–5 条，每条清理后 MIN_QUESTION–MAX_QUESTION 个字，不重复。"""
+    """要发布的提问：1–5 条，每条清理后按问答区规则检查（question_flaw），不重复。"""
     raw = body.get("texts")
     if not isinstance(raw, list) or not 1 <= len(raw) <= 5:
         raise HttpError(400, "一次发布 1–5 条提问")
     texts = []
-    for item in raw:
+    for number, item in enumerate(raw, 1):
         text = _clean_question(item if isinstance(item, str) else "")
-        if not MIN_QUESTION <= len(text) <= MAX_QUESTION:
-            raise HttpError(400, "每条提问要 %d–%d 个字" % (MIN_QUESTION, MAX_QUESTION))
+        flaw = question_flaw(text)
+        if flaw:  # the board's own rules: it would be judged invalid or deleted, and the answers under it too
+            raise HttpError(400, "第 %d 条%s" % (number, flaw))
         if text not in texts:
             texts.append(text)
     return texts
 
 
 class _Board:
-    """The Q&A board for one job. Picks questions nobody has answered first, then those with one
-    answer; remembers each post (question and text) so the web page can list what went out."""
+    """The Q&A board for one job. Picks questions nobody has answered first, then those with a few
+    answers; remembers each post (question and text) so the web page can list what went out."""
 
     def __init__(self, bridge, record):
         self.bridge, self.record, self.asked = bridge, record, {}
@@ -1398,8 +1442,10 @@ class _Board:
     def questions(self, max_answers=0, limit=10, **_):
         found = self.bridge.questions(max_answers=0, limit=limit)
         if len(found) < limit:
+            # Most quiet threads on a busy board are floods or junk that answer_questions passes over;
+            # an ordinary thread with a few answers still scores the same.
             have = {q["id"] for q in found}
-            found += [q for q in self.bridge.questions(max_answers=1, limit=limit) if q["id"] not in have]
+            found += [q for q in self.bridge.questions(max_answers=5, limit=limit) if q["id"] not in have]
         self.asked.update((q["id"], q["content"]) for q in found)
         return found[:limit]
 

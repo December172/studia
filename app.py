@@ -630,7 +630,7 @@ class Application:
             ai = self.verify_ai(config)
             try:
                 def run(qa, event):
-                    answer_questions(qa, ai, max_answers=1, limit=limit, state_path=state_path,
+                    answer_questions(qa, ai, max_answers=5, limit=limit, state_path=state_path,
                                      on_event=event, sleep=_qa_pause)
 
                 totals = self._zhs_qa_courses(client, courses, run, "发布")
@@ -640,7 +640,7 @@ class Application:
                 "skipped": totals["skipped"]}
 
     def generate_zhs_questions(self, client, courses, config, options):
-        """从回答较少的提问里挑方向，让 AI 写新提问；要读一次问答区列表。"""
+        """让 AI 围绕课程里的小节写新提问；读一次问答区列表，只为避开已有的提问。"""
         from dataclasses import replace
 
         from ai.client import AIClient
@@ -668,8 +668,13 @@ class Application:
                               else "问答区还没有回答较少的提问，按课程主题出题。")
             else:
                 self.view.log(f"{name}：没有可读取的问答区，按课程主题出题。", "warning")
+            try:  # 每条提问围绕课程里的一节：贴着课程内容，审核才不当成无关水帖
+                from ZHSMain.main import course_units
+                topics = [unit["name"] for chapter in course_units(client, row) for unit in chapter.get("units", [])]
+            except Exception:
+                topics = []
             return write_questions(
-                ai, reference, count, course_name=name,
+                ai, reference, count, course_name=name, topics=topics,
                 on_progress=lambda index, total: self.view.log(f"正在生成第 {index}/{total} 条提问…"))
         finally:
             ai.session.close()
@@ -682,7 +687,7 @@ class Application:
             self.progress.begin("问答区提问", len(texts) * len(courses), "条")
 
             def run(qa, event):
-                publish_questions(qa, texts, on_event=event, sleep=_qa_pause)
+                publish_questions(qa, texts, on_event=event, sleep=_ask_pause)
 
             totals = self._zhs_qa_courses(client, courses, run, "发布提问")
         return {"published": totals["ok"], "failed": totals["failed"]}
@@ -748,3 +753,9 @@ def _qa_pause(_seconds):
     """问答区两条之间随机停一会儿（和网页一样），不用 answer_questions 给的固定间隔。"""
     from ZHSMain.qa import QA_PACE
     time.sleep(random.uniform(*QA_PACE))
+
+
+def _ask_pause(_seconds):
+    """两条提问之间停得更久（ZHSMain.qa.ASK_PACE）：短时间连发提问会被当成刷帖。"""
+    from ZHSMain.qa import ASK_PACE
+    time.sleep(random.uniform(*ASK_PACE))
