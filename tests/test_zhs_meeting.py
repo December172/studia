@@ -4,6 +4,7 @@ import json
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 from rich.console import Console
@@ -60,6 +61,33 @@ class MeetingApiTest(unittest.TestCase):
 
 
 class ReplayTest(unittest.TestCase):
+    def test_start_and_snapshot_work_when_page_overwrites_map(self):
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as pw:
+            if not Path(pw.chromium.executable_path).exists():
+                self.skipTest("Chromium 未安装")
+            browser = pw.chromium.launch()
+            try:
+                page = browser.new_page()
+                page.set_content('''<div id="forFollowBackDiv"><video></video></div><script>
+                    window.Map = function LegacyMap() {};
+                    window.videoInfo = [{id: 20, duration: 61}, {id: 21, duration: 125}];
+                    window.watchHistoryBack = ['1', '2', '3'];
+                    window.curVideoId = 20;
+                    window.onPaly = (id, index) => { window.curVideoId = id; };
+                    document.querySelector('video').play = () => Promise.resolve();
+                </script>''')
+                player = MeetingPlayer(Mock(access_token="[]"), MEETING)
+                player.page = page
+                player.start()
+                self.assertEqual(page.evaluate("() => seekTime"), 60)
+                self.assertEqual(player.snapshot()["key"], "21")
+                page.evaluate("() => document.querySelector('video').remove()")
+                self.assertEqual(player.snapshot(), {"key": None, "position": 0})
+            finally:
+                browser.close()
+
     def test_resume_rounds_each_video_to_minutes_and_preserves_holes(self):
         videos = [{"id": 20, "duration": 61}, {"id": 21, "duration": 125}]
         self.assertEqual(resume_target(videos, ["1", "2", "3", "5"]),
