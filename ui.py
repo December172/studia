@@ -1358,11 +1358,13 @@ class TerminalUI:
         except Back:
             return None
 
-    def settings_menu(self, path, ai_status="已配置 · 未测试", *, message="", concurrency=None):
+    def settings_menu(self, path, ai_status="已配置 · 未测试", *, message="", concurrency=None, zhs_speedup=False):
         concurrency = concurrency or {'ai': 8, 'study': 8}
         return self.choice("本机设置", [
             (1, "模型配置", "添加、编辑、切换 · " + ai_status),
             (2, "并发设置", f"AI 答题 {concurrency['ai']} · 自动学习 {concurrency['study']} · 可设 1–8"),
+            (7, "智慧树 1.5 倍速 · " + ("开启" if zhs_speedup else "关闭"),
+             "默认关闭；只影响自动学习，每日复习保持 1 倍速"),
             (3, "退出 MOOC 登录", "下次浏览器登录先退出共享 SSO，可切换账号"),
             (4, "退出资源库登录", "下次浏览器登录先退出共享 SSO；MOOC 本机登录保留"),
             (5, "退出智慧树登录", "下次使用智慧树时重新扫码"),

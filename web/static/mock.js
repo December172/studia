@@ -39,6 +39,7 @@ const cxTasks = [
 ];
 const jobs = {};
 let polls = 0;
+let zhsSpeedup = false;
 const models = [
   { id: "builtin-default", provider: "默认供应商", model: "gemini-3.8-flash", base_url: "https://mochif.com/v1", key_hint: "sk-…gTjW", active: true, health: "ok", health_message: "", deletable: false },
   { id: "legacy", provider: "mochif", model: "gemini-3.8-flash", base_url: "https://mochif.com/v1", key_hint: "sk-…PJlj", active: false, health: "", health_message: "", deletable: true },
@@ -165,7 +166,7 @@ export function subscribe(listener) { listeners.add(listener); }
 export async function request(path, method, body) {
   await new Promise((resolve) => setTimeout(resolve, 200));
   let m;
-  if (path === "/api/state") return { platforms, jobs: Object.values(jobs), history };
+  if (path === "/api/state") return { platforms, jobs: Object.values(jobs), history, zhs_speedup: zhsSpeedup };
   if (path === "/api/auth/me") return { user: { id: "mock", username: "演示", role: "member" }, csrf: "mock" };
   if ((m = path.match(/^\/api\/platforms\/(\w+)\/login(?:\?.*)?$/))) {
     const p = platforms.find((x) => x.id === m[1]);
@@ -209,7 +210,11 @@ export async function request(path, method, body) {
     const stopped = Object.assign({}, job, { state: "stopped", summary: "已停止", ended: Date.now() / 1000 });
     history.unshift(stopped); emit(stopped); return {};
   }
-  if (path === "/api/settings") return { models, concurrency: { ai: 8, study: 8 } };
+  if (path === "/api/settings") return { models, concurrency: { ai: 8, study: 8 }, zhs_speedup: zhsSpeedup };
+  if (path === "/api/settings/study" && method === "POST") {
+    zhsSpeedup = body.zhs_speedup === true;
+    return { zhs_speedup: zhsSpeedup };
+  }
   if (path === "/api/settings/models/activate") { models.forEach((x) => (x.active = x.id === body.id)); return {}; }
   if ((m = path.match(/^\/api\/settings\/models\/([\w-]+)\/test$/))) {
     const x = models.find((y) => y.id === m[1]);

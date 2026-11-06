@@ -660,8 +660,8 @@ body.signed-out .app, body.signed-out .player { display: none; }
 button.switch { border: 0; padding: 0; cursor: pointer; }
 .switch.on { background: var(--indigo); }
 .switch.on::after { transform: translateX(16px); }
-:root[data-theme="night"] .switch { background: var(--indigo); }
-:root[data-theme="night"] .switch::after { transform: translateX(16px); }
+:root[data-theme="night"] [data-toggle-theme] .switch { background: var(--indigo); }
+:root[data-theme="night"] [data-toggle-theme] .switch::after { transform: translateX(16px); }
 .me_out { width: 100%; height: 46px; margin-top: 24px; }
 
 /* Phones: the sidebar gives way to a top bar and tabs at the bottom. */

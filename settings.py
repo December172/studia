@@ -98,6 +98,14 @@ class SettingsStore:
             raise SettingsError(str(exc)) from None
         self.set("concurrency", options)
 
+    def zhs_speedup(self):
+        return self.get("zhs_speedup", False) is True
+
+    def save_zhs_speedup(self, enabled):
+        if not isinstance(enabled, bool):
+            raise SettingsError("1.5 倍速开关必须是开启或关闭")
+        self.set("zhs_speedup", enabled)
+
     def _write(self, data):
         data["version"] = 1
         temporary = None

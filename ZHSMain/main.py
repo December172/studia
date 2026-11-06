@@ -111,10 +111,11 @@ def course_units(client, row):
 
 class ZHSHandler:
     def __init__(self, *, client, course_rows, on_progress=None, max_workers=1,
-                 cancel_event=None, sleep=time.sleep, rng=None, review_minutes=0, captcha_ai=None):
+                 cancel_event=None, sleep=time.sleep, rng=None, review_minutes=0, captcha_ai=None, speedup=False):
         self.client = client
         self.captcha_ai = captcha_ai
         self.review_seconds = int(review_minutes) * 60
+        self.speed = 1.5 if speedup is True else 1.0
         self.course_rows = course_rows or []
         self.progress = Reporter(on_progress)
         # 仅为与其他平台签名一致：智慧树同一账号同时看多个视频会被判定为多窗口，
@@ -439,10 +440,7 @@ class ZHSHandler:
         self.log.info("%s · %s：%s（%s）", course, "开始复习" if review else "开始播放",
                       video["name"], self._mmss(end))
 
-        def pace():
-            return 1.0 if review else 1.5 + self.rng.uniform(-0.15, 0.15)
-
-        speed = pace()
+        speed = 1.0 if review else self.speed
         interval = 30 + self.rng.randint(-5, 5)
         elapsed = 0
         paused_until = 0
@@ -482,7 +480,6 @@ class ZHSHandler:
                 if report():
                     failures = 0
                     force = False
-                    speed = pace()
                     interval = 30 + self.rng.randint(-5, 5)
                 else:
                     failures += 1
@@ -618,15 +615,18 @@ class ZHSHandler:
             self.client.ai_report(course_id, class_id, file_id, knowledge_id, length)
             self.log.info("%s · 播放完成：%s", course, name)
             return
-        # 1.5x of the time that really passed, so request latency is not lost; a
-        # long stall (sleep, network) is capped instead of turning into a jump.
+        # Count elapsed playback at the selected rate; cap long stalls instead
+        # of turning them into a jump. The first report also waits for playback.
         played = float(position)
         last = time.monotonic()
         while True:
             if self.cancel_event.is_set():
                 raise KeyboardInterrupt
+            self.sleep(2)
+            if self.cancel_event.is_set():
+                raise KeyboardInterrupt
             now = time.monotonic()
-            played = min(played + 1.5 * min(max(now - last, 2), 5), length)
+            played = min(played + self.speed * min(max(now - last, 0), 5), length)
             last = now
             position = int(played)
             attempts = 0
@@ -641,7 +641,6 @@ class ZHSHandler:
                     if attempts >= 3:
                         raise ZHSError("智慧课程进度上报失败：%s" % error) from error
                     self.sleep(1)
-            self.sleep(2)
             self.progress.detail(f"{course} · {name} · {self._mmss(position)}/{self._mmss(length)}")
             if position == length:
                 break

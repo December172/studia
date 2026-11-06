@@ -85,7 +85,7 @@ async function api(path, { method = "GET", body } = {}) {
 
 const state = {
   platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {}, earned: {}, qaDraft: {}, qaPosts: {}, qaRoom: {}, qaPeers: null, qaOpen: new Set(),
-  jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, loginMode: {}, returnTo: "", lastDone: null,
+  jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, zhsSpeedup: false, history: [], view: "", loginToken: { cancelled: true }, loginMode: {}, returnTo: "", lastDone: null,
   current: store.get("studia-platform", ""), meOpen: false, adminTab: "people", logFilter: "all", editPassword: false, adminEdit: null, pausedOpen: new Set(),
 };
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
@@ -863,8 +863,24 @@ function paintSettings(tab, head, data, again) {
         <output>${data.concurrency[k]}</output><button class="btn small" data-step="${k}" data-d="1" aria-label="增加" ${data.concurrency[k] >= 8 ? "disabled" : ""}>＋</button></span></div>`;
     quiet = again;
     setPage(`${head}<div class="section"><h3>并发数量</h3><span class="aside">1–8</span></div>
-      <div class="models">${row("ai", "AI 答题", "同时作答的题数")}${row("study", "自动学习", "同时学的资源数，智慧树固定 1 个")}</div>`);
+      <div class="models">${row("ai", "AI 答题", "同时作答的题数")}${row("study", "自动学习", "同时学的资源数，智慧树固定 1 个")}</div>
+      <div class="section"><h3>播放速度</h3></div>
+      <div class="models"><div class="model plain qa_switch"><span class="m1"><b>智慧树 1.5 倍速</b>
+        <small class="sans">默认关闭，按 1 倍速播放。只影响之后开始的自动学习；每日复习保持 1 倍速。</small></span>
+        <span class="row_btns"><button class="switch ${data.zhs_speedup ? "on" : ""}" role="switch" aria-checked="${data.zhs_speedup === true}" aria-label="智慧树 1.5 倍速" data-study-speedup></button></span></div></div>`);
     quiet = false;
+    const speedup = $("[data-study-speedup]", page);
+    speedup.onclick = async () => {
+      speedup.disabled = true;
+      try {
+        const result = await api("/api/settings/study", { method: "POST", body: { zhs_speedup: !data.zhs_speedup } });
+        state.settings.zhs_speedup = result.zhs_speedup;
+        state.zhsSpeedup = result.zhs_speedup;
+        paintSettings(tab, head, state.settings, true);
+        toast("已保存，下次自动学习生效");
+      } catch (error) { toast(error.message); }
+      finally { speedup.disabled = false; }
+    };
     page.querySelectorAll("[data-step]").forEach((el) => (el.onclick = () => {
       const c = state.settings.concurrency, k = el.dataset.step;
       c[k] = Math.max(1, Math.min(8, c[k] + Number(el.dataset.d)));
@@ -991,7 +1007,8 @@ function coverHtml(p, c) {
 // where the course's assessment rule gives them points.
 function studyActions(p, c) {
   const f = c.features || {};
-  const study = p.id === "zhs" ? (c.kind === "shared" ? "1.5 倍速看完剩下的视频，弹题自动答" : "完成文档、课件和视频")
+  const speed = state.zhsSpeedup ? "1.5" : "1";
+  const study = p.id === "zhs" ? (c.kind === "shared" ? `${speed} 倍速看完剩下的视频，弹题自动答` : `${speed} 倍速播放视频，完成文档和课件`)
     : p.id === "mooc" ? "学完课件和视频，自动讨论和评价"
     : p.id === "cx" ? "视频、文档、阅读任务点：章节并行，视频先尝试直接完成"
     : "学完资源库里的资源";
@@ -1683,6 +1700,7 @@ async function refreshState(catchUp = false) {
     state.history = data.history || [];
     state.jobLimit = data.job_limit || state.jobLimit;
     state.zhsParallel = Boolean(data.zhs_parallel);
+    state.zhsSpeedup = data.zhs_speedup === true;
     const live = data.jobs || [];
     for (const job of live) {
       // The server's tally is the truth for a page opened mid-run or one that missed events while away.

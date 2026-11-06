@@ -238,7 +238,8 @@ class Studia:
     def state(self):
         return {"platforms": [p.public(self.logged_in(p), *self.passport(p)) for p in self.platforms.values()],
                 "jobs": self._running(), "history": [_job_public(j) for j in self.history],
-                "job_limit": self.job_limit(), "zhs_parallel": self.zhs_parallel()}
+                "job_limit": self.job_limit(), "zhs_parallel": self.zhs_parallel(),
+                "zhs_speedup": self.store.zhs_speedup()}
 
     def client(self, platform):
         with self.lock:
@@ -1113,6 +1114,7 @@ class Studia:
         if spec["needs_ai"]:
             ai = kwargs["activity_ai"] = self._ai("MOOC 学习会自动参与讨论和评价，请先在设置里添加 AI 模型")
         elif platform.id == "zhs":
+            kwargs["speedup"] = self.store.zhs_speedup()
             config = self.store.ai_config()
             if config is not None:
                 captcha_ai = kwargs["captcha_ai"] = AIClient(config)
@@ -1357,7 +1359,7 @@ class Studia:
                            "base_url": config.base_url, "key_hint": key_hint(config.api_key), "active": profile.active,
                            "health": health.get("status") or "", "health_message": health.get("message") or "",
                            "deletable": profile.id != DEFAULT_PROFILE_ID})
-        return {"models": models, "concurrency": self.store.concurrency()}
+        return {"models": models, "concurrency": self.store.concurrency(), "zhs_speedup": self.store.zhs_speedup()}
 
     def _profile(self, profile_id):
         for profile in self.store.ai_profiles():
@@ -1425,6 +1427,13 @@ class Studia:
         except SettingsError as exc:
             raise HttpError(400, str(exc))
         return {}
+
+    def save_study(self, body):
+        try:
+            self.store.save_zhs_speedup(body.get("zhs_speedup"))
+        except SettingsError as exc:
+            raise HttpError(400, str(exc))
+        return {"zhs_speedup": self.store.zhs_speedup()}
 
 
 class _EventLogHandler(logging.Handler):
@@ -1694,6 +1703,7 @@ ROUTES = [
     ("POST", r"/api/settings/models/([\w-]+)/delete", lambda app, m, q, b: app.delete_model(m[1])),
     ("POST", r"/api/settings/models/([\w-]+)/test", lambda app, m, q, b: app.test_model(m[1])),
     ("POST", r"/api/settings/concurrency", lambda app, m, q, b: app.save_concurrency(b)),
+    ("POST", r"/api/settings/study", lambda app, m, q, b: app.save_study(b)),
 ]
 
 

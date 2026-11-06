@@ -334,6 +334,7 @@ class Application:
             activity_ai = self.verify_ai(self.ai_configuration())
             inject['activity_ai'] = activity_ai
         elif version == 2:
+            inject['speedup'] = self.store.zhs_speedup()
             config = self.store.ai_config()
             if config is not None:
                 captcha_ai = AIClient(config)
@@ -346,11 +347,12 @@ class Application:
                 note = ("超星学习：最多 %d 个章节同时处理，章节内的视频、文档、阅读任务点并行完成；"
                         "视频先尝试直接完成，不通过再按真实时间累计。" % max_workers)
             elif version == 2:
-                note = ("智慧树学习：逐个视频实时播放（约 1.5 倍速），同一账号不能同时观看多个视频；"
-                        "遇到验证码或当日学习时长上限会停止。")
+                speed = "1.5" if inject['speedup'] else "1"
+                note = ("智慧树学习：逐个视频实时播放（%s 倍速），同一账号不能同时观看多个视频；"
+                        "遇到验证码或当日学习时长上限会停止。" % speed)
             else:
                 note = f"自动学习：最多 {max_workers} 项同时处理，完成即更新进度"
-            if inject:
+            if activity_ai is not None:
                 note += "；并按主题自动参与课程讨论、提交五星课程评价，无需逐条确认"
             self.view.note(note)
             with self.view.activity("处理课程"):
@@ -719,7 +721,7 @@ class Application:
         while True:
             try:
                 action = self.view.settings_menu(self.store.path, self.ai_status_text(), message=message,
-                                                 concurrency=self.store.concurrency())
+                                                 concurrency=self.store.concurrency(), zhs_speedup=self.store.zhs_speedup())
                 message = ""
             except Back:
                 return False
@@ -733,6 +735,10 @@ class Application:
             elif action == 2:
                 if self.manage_concurrency():
                     message = '并发设置已保存，下次运行生效。'
+            elif action == 7:
+                enabled = not self.store.zhs_speedup()
+                if self.remember(lambda: self.store.save_zhs_speedup(enabled)):
+                    message = '智慧树 1.5 倍速已%s，下次自动学习生效。' % ('开启' if enabled else '关闭')
             elif action in (3, 4, 5, 6):
                 platform = {3: "mooc", 4: "zyk", 5: "zhs", 6: "cx"}[action]
                 if self.remember(lambda: self.store.clear_session(platform)):
