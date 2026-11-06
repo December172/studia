@@ -13,6 +13,7 @@ from ai.memory import learn as learn_answers, remembered_value, scope as answer_
 from ai.client import AIError, AIServiceError
 from ai.concurrency import ParallelAnswers, prepared_items
 from base.concurrency import validate_workers
+from base.quiet_hours import checkpoint
 from ai.questions import answer_record, model_question, question_fingerprint
 from task_capabilities import task_availability
 
@@ -31,17 +32,25 @@ class AttemptClock:
     def start(self):
         if self.enabled:
             self.thread = threading.Thread(target=self._loop, daemon=True, name=child_thread_name('exam-clock'))
+            self.thread.studia_stop = self.stop_event
             self.thread.start()
         return self
 
     def _loop(self):
         previous = self.started
         while not self.stop_event.wait(10):
-            now = time.monotonic()
             try:
+                before = time.monotonic()
+                checkpoint()
+                now = time.monotonic()
+                previous += now - before  # An overnight wait is not time spent answering.
+                if self.stop_event.is_set():
+                    return
                 self.check()
                 self.api.heartbeat(self.course, self.exam_id, self.task_id, int(now - previous))
                 previous = now
+            except KeyboardInterrupt:
+                return
             except ExamError as exc:
                 self.error = exc
                 return
