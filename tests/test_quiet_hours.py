@@ -12,7 +12,7 @@ from ai.runner import AttemptClock
 from base.quiet_hours import BEIJING, CHECKPOINTS, quiet_hours
 from reporting import child_thread_name
 from settings import SettingsStore
-from web.server import HttpError, JOBS, Studia, drain, keep_passports, watch_quiet_hours
+from web.server import HttpError, JOBS, LABEL, Studia, drain, keep_passports, watch_quiet_hours
 from ZHSMain.api import ZHSApi
 from ZHSMain.answer import ZHSAnswerRunner
 from ZHSMain.qa import QaBridge
@@ -102,7 +102,7 @@ class QuietJobsTest(unittest.TestCase):
         for app in (self.app(), self.app()):
             app.find_row = Mock(side_effect=AssertionError("must reject before reading the platform"))
             self.night()
-            for kind in ("study", "review", "meeting", "answer", "mastery", "qa", "ask"):
+            for kind in LABEL:
                 with self.subTest(kind=kind), self.assertRaises(HttpError) as error:
                     self.start(app, kind=kind)
                 self.assertEqual(error.exception.status, 409)
