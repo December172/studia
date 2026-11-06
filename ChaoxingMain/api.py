@@ -12,6 +12,7 @@ import random
 import re
 import threading
 import time
+from urllib.parse import urlsplit
 
 import requests
 from Crypto.Cipher import AES
@@ -816,6 +817,24 @@ class ChaoxingApi:
         return "success"
 
     # ------------------------------------------------------------------ 作业
+
+    def work_image(self, url, **kwargs):
+        """Only send the restored (domainless) login cookies to Chaoxing's HTTPS image hosts."""
+        try:
+            parts = urlsplit(url)
+            host = parts.hostname or ""
+            trusted = any(host == domain or host.endswith("." + domain)
+                          for domain in ("chaoxing.com", "chaoxing.net"))
+            if (parts.scheme != "https" or not trusted or parts.port not in (None, 443)
+                    or parts.username is not None or parts.password is not None):
+                raise ValueError
+        except ValueError:
+            raise requests.RequestException("图片地址不是受支持的超星 HTTPS 来源") from None
+        kwargs["allow_redirects"] = False  # a CDN redirect must not take the domainless cookies to another host
+        try:
+            return self.session.get(url, headers={"Referer": BASE_URL + "/"}, **kwargs)
+        except requests.RequestException:
+            raise requests.RequestException("超星题目图片暂时无法下载") from None
 
     def work_page(self, course, job, job_info):
         """打开（或恢复）这份作业的答题页，返回 HTML。
