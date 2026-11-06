@@ -18,6 +18,7 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 
 from base.auth import AuthenticationExpired, PlatformUnavailable
+from base.quiet_hours import checkpoint
 from base.util import create_session
 from ChaoxingMain.decode import (
     decode_course_folder,
@@ -327,6 +328,7 @@ class ChaoxingApi:
     # ------------------------------------------------------------------ 请求
 
     def _request(self, method, url, *, params=None, data=None, headers=None, check_login=True):
+        checkpoint()
         merged = dict(HEADERS)
         merged.update(headers or {})
         try:

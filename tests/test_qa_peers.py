@@ -82,5 +82,12 @@ class AskWhileAnsweringTest(unittest.TestCase):
         self.assertEqual(sorted(h["kind"] for h in app.history), ["ask", "qa"])
 
 
+def setUpModule():
+    # Task tests have a daytime clock; curfew boundaries live in test_quiet_hours.py.
+    daytime = unittest.mock.patch("web.server.quiet_hours", return_value={"active": False})
+    daytime.start()
+    unittest.addModuleCleanup(daytime.stop)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@ import copy
 
 from MoocMain.log import Logger
 from base.auth import AuthenticationExpired
+from base.quiet_hours import checkpoint
 from base.util import create_session, parse_response
 
 logger = Logger(__name__).get_log()
@@ -41,6 +42,7 @@ class BaseAPIClient:
         self.session.close()
 
     def _request(self, method, endpoint, base_url=None, origin_response=False, **kwargs):
+        checkpoint()
         response = None
         try:
             response = getattr(self.session, method)(
