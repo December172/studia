@@ -85,19 +85,21 @@ async function api(path, { method = "GET", body } = {}) {
 
 const state = {
   platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {}, earned: {}, qaDraft: {}, qaPosts: {}, qaRoom: {}, qaPeers: null, qaOpen: new Set(),
-  jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, loginMode: {}, returnTo: "", lastDone: null,
+  jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, quietHours: null, history: [], view: "", loginToken: { cancelled: true }, loginMode: {}, returnTo: "", lastDone: null,
   current: store.get("studia-platform", ""), meOpen: false, adminTab: "people", logFilter: "all", editPassword: false, adminEdit: null, pausedOpen: new Set(),
 };
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
 const runOf = (id) => (state.runs[id] = state.runs[id] || freshRun());
 // Mirrors the server's rules (web/server.py _check_conflicts) so buttons say why before you click.
-const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "qa", ask: "ask" };
-const jobType = (j) => j.kind || { 自动学习: "study", 每日复习: "review", "AI 答题": "answer", 问答区答题: "qa", 问答区提问: "ask" }[j.title];
+const GROUP = { study: "learn", review: "learn", meeting: "learn", answer: "answer", mastery: "answer", qa: "qa", ask: "ask" };
+const jobType = (j) => j.kind || { 自动学习: "study", 每日复习: "review", 见面课: "meeting", "AI 答题": "answer", 掌握度学习: "mastery", 问答区答题: "qa", 问答区提问: "ask" }[j.title];
 // Only learning jobs fill a course's unit grid.
 const learns = (j) => GROUP[jobType(j)] === "learn";
 // A job in the list that is not running: waiting for a slot, or paused by an administrator.
 const WAIT_WORD = { queued: "排队中", paused: "已暂停" };
+const quietMessage = () => state.quietHours?.active ? state.quietHours.message : "";
 function blocker(pid, cid, type) {
+  if (quietMessage()) return quietMessage();
   for (const o of state.jobs) {
     if (GROUP[jobType(o)] !== GROUP[type] || o.platform !== pid) continue;
     if (o.course === cid) return o.state === "running" ? `正在${o.title}…` : `${WAIT_WORD[o.state]}（${o.title}）`;
@@ -323,7 +325,7 @@ function setPage(html) {
   if (on && (on.offsetLeft < nav.scrollLeft || on.offsetLeft + on.offsetWidth > nav.scrollLeft + nav.clientWidth)) nav.scrollLeft = on.offsetLeft - 16;
 }
 
-const LABEL = { study: "自动学习", review: "每日复习", answer: "AI 答题", qa: "问答区答题", ask: "问答区提问" };
+const LABEL = { study: "自动学习", review: "每日复习", meeting: "见面课", answer: "AI 答题", mastery: "掌握度学习", qa: "问答区答题", ask: "问答区提问" };
 const TYPE_OF = Object.fromEntries(Object.entries(LABEL).map(([k, v]) => [v, k]));
 const STATE_WORD = { done: "完成", error: "失败", waiting: "等你操作", stopped: "已停止", running: "进行中", queued: "排队中", paused: "已暂停" };
 
@@ -438,13 +440,14 @@ const queueRow = (j, i) => `<div class="qrow" data-drag="${esc(j.id)}">
     ${j.hold ? '<span class="grip off"></span>' : `<span class="grip" data-grip aria-hidden="true">${ICON.grip}</span>`}<span class="place mono">${i + 1}</span>
     <span class="t1">${esc(j.course_name)}<small>${esc(j.title)}${j.hold ? " · 正在让位" : ""}</small></span>${DOTS(j)}</div>`;
 const pausedRow = (j) => `<div class="qrow"><span class="grip off"></span><span class="place"></span>
-    <span class="t1">${esc(j.course_name)}<small>${esc(j.title)}${j.hold ? " · 正在暂停" : ""}</small></span>
-    ${j.hold ? "" : `<button class="btn small" data-job-act="continue" data-id="${esc(j.id)}">继续</button>`}${DOTS(j)}</div>`;
+    <span class="t1">${esc(j.course_name)}<small>${esc(j.title)}${j.night_paused ? " · 夜间暂停，07:00 后自动继续" : j.hold ? " · 正在暂停" : ""}</small></span>
+    ${j.hold || j.night_paused || quietMessage() ? "" : `<button class="btn small" data-job-act="continue" data-id="${esc(j.id)}">继续</button>`}${DOTS(j)}</div>`;
 function board(jobs, limit, owner = "") {
   const { slots, queue, incoming, paused } = boardParts(jobs, limit), open = state.pausedOpen.has(owner);
   // Empty slots only matter as drop targets for the queue; otherwise 名额 n/limit in the heading says it.
   const empty = queue.length ? Math.max(0, limit - slots.length) : 0;
   return `<div class="board" data-board data-owner="${esc(owner)}" data-incoming="${incoming}">
+    ${quietMessage() ? `<p role="status">${esc(quietMessage())}</p>` : ""}
     <div class="slots">${slots.map((j) => slotCard(j, owner)).join("")}${'<div class="slot vacant" data-slot=""><span>空位</span></div>'.repeat(empty)}</div>
     ${queue.length ? `<div class="board_head">排队<small>拖动排序，拖进格子即替换</small></div><div class="runs queue">${queue.map(queueRow).join("")}</div>` : ""}
     ${paused.length ? `<button class="board_head fold" data-paused-fold="${esc(owner)}" aria-expanded="${open}">已暂停 ${paused.length}<span class="chev_r" aria-hidden="true"></span></button>
@@ -475,7 +478,7 @@ function openJobMenu(button) {
     owner ? "" : `<button class="menu_row" role="menuitem" data-open="${esc(id)}"><span class="grow">查看</span></button>`,
     j.state === "queued" && !j.hold ? row("move", "移到最前", 'data-to="0"') : "",
     !j.hold && (j.state === "queued" || (inSlot(j) && learns(j))) ? row("pause", "暂停") : "",
-    j.state === "paused" ? row("continue", "继续") : "",
+    j.state === "paused" && !j.night_paused && !quietMessage() ? row("continue", "继续") : "",
     row("stop", "停止", 'data-confirm="确认停止"'),
   ].join("");
   jobMenu.hidden = false;
@@ -562,7 +565,7 @@ const VIEWS = {
       setPage(`${head}<div class="empty">正在读取…</div>`);
       quiet = false;
     }
-    const need = { people: ["users", "invites"], site: ["settings", "memory"], logs: [] }[tab];
+    const need = { people: ["users", "invites"], site: ["settings", "memory", "shared-model"], logs: [] }[tab];
     let data;
     try { data = Object.fromEntries(await Promise.all(need.map(async (x) => [x, await api(`/api/admin/${x}`)]))); }
     catch (error) { if (!refresh) setPage(`${head}<div class="empty">${esc(error.message)}</div>`); return; }
@@ -596,6 +599,7 @@ const VIEWS = {
           || `<div class="model plain"><span class="m1"><small class="sans">还没有邀请码</small></span></div>`}</div>`;
     } else if (tab === "site") {
       const settings = data.settings;
+      const shared = data["shared-model"];
       const kept = (name, fallback) => $(`[name="${name}"]`, page)?.value || fallback;
       state.zhsParallel = settings.zhs_parallel_study;
       body = `<div class="section"><h3>任务上限</h3></div>
@@ -604,6 +608,17 @@ const VIEWS = {
         <div class="section"><h3>智慧树</h3></div>
         <div class="models"><div class="model plain"><span class="m1"><b>多并发学习</b><span class="pill ${settings.zhs_parallel_study ? "wait" : ""}">${settings.zhs_parallel_study ? "已开启" : "已关闭"}</span></span>
           <span class="row_btns"><button class="btn small ${settings.zhs_parallel_study ? "" : "danger"}" data-zhs-parallel="${settings.zhs_parallel_study ? "off" : "on"}" ${settings.zhs_parallel_study ? "" : 'data-confirm="确认开启"'}>${settings.zhs_parallel_study ? "关闭" : "开启"}</button></span></div></div>
+        <div class="section"><h3>管理员共享模型</h3><span class="aside">${shared.enabled ? "已启用" : "未启用"}</span></div>
+        <form class="form_card" data-shared-model-form>
+          <p class="sub">用户可在「AI 模型」中选择，费用使用此 Key 的额度。请在供应商后台设置额度和模型权限。</p>
+          <div class="field"><label for="shared-provider">名称</label><input id="shared-provider" name="provider_name" value="${esc(shared.provider)}" placeholder="管理员共享模型"></div>
+          <div class="field"><label for="shared-url">服务地址</label><input id="shared-url" name="base_url" value="${esc(shared.base_url)}" placeholder="https://api.example.com/v1" required></div>
+          <div class="field"><label for="shared-model">模型</label><input id="shared-model" name="model" value="${esc(shared.model)}" placeholder="服务商提供的 Model ID" required></div>
+          <div class="field"><label for="shared-format">接口格式</label><select id="shared-format" name="api_format">${[["auto", "自动识别"], ["chat_completions", "Chat Completions"], ["responses", "Responses"]].map(([value, label]) => `<option value="${value}" ${shared.api_format === value ? "selected" : ""}>${label}</option>`).join("")}</select></div>
+          <div class="field"><label for="shared-key">API Key</label><input id="shared-key" name="api_key" type="password" autocomplete="off" ${shared.has_key ? 'placeholder="留空保留；更换服务地址时须重新填写"' : "required"}></div>
+          <p class="sub">Key 仅保存在服务器。修改或停用后，新任务采用新设置；进行中的任务请到任务页停止。</p>
+          <div class="form_btns">${shared.enabled ? '<button type="button" class="btn danger" data-disable-shared>停用共享模型</button><span class="grow"></span>' : ""}<button class="btn primary">保存并启用</button></div>
+        </form>
         <div class="section"><h3>答案记忆</h3><span class="aside">按课程共享</span></div>
         <div class="models"><div class="model plain"><span class="m1"><b>智慧树 ${data.memory.questions} 题</b><small class="sans">${data.memory.confirmed} 题已确认正确</small></span></div>
           <div class="model plain"><span class="m1"><b>MOOC ${data.memory.mooc.questions} 题</b><small class="sans">平台公布的标准答案</small></span></div></div>`;
@@ -630,6 +645,20 @@ const VIEWS = {
       catch (e) { toast(e.message); }
     });
     on("[data-save-limit]", () => act("/api/admin/settings", { max_jobs: Number($('[name="max_jobs"]', page).value) }, "已保存，马上生效"));
+    on("[data-disable-shared]", () => act("/api/admin/shared-model", { enabled: false }, "已停用共享模型"));
+    const sharedForm = $("[data-shared-model-form]", page);
+    if (sharedForm) sharedForm.onsubmit = async (event) => {
+      event.preventDefault();
+      const submit = $('button[type="submit"], button:not([type])', sharedForm);
+      submit.disabled = true;
+      try {
+        await api("/api/admin/shared-model", { method: "POST", body: Object.fromEntries(new FormData(sharedForm)) });
+        sharedForm.elements.api_key.value = "";
+        toast("共享模型已保存，用户可在 AI 模型中选择");
+        await VIEWS.admin(true, tab);
+      } catch (e) { toast(e.message); }
+      finally { submit.disabled = false; }
+    };
     on("[data-zhs-parallel]", (el) => {
       const enable = el.dataset.zhsParallel === "on";
       act("/api/admin/settings", { zhs_parallel_study: enable }, enable ? "已开启，新开的智慧树学习任务生效" : "已关闭");
@@ -925,11 +954,11 @@ function renderModels(head, models, editing = null, again = true) {
     if (editing === m.id) return form(m);
     const [cls, label] = HEALTH[m.health] || ["", "未测试"];
     return `<div class="model ai ${m.active ? "on" : ""}" data-id="${esc(m.id)}">
-      <span class="m1"><b>${esc(m.provider || "未命名服务")}</b>${m.deletable ? "" : '<span class="pill">内置</span>'}
-        <small>${esc(m.model)} · ${esc(host(m.base_url))} · ${esc(m.key_hint)}</small></span>
+      <span class="m1"><b>${esc(m.provider || "未命名服务")}</b>${m.shared ? '<span class="pill blue">管理员共享</span>' : m.deletable ? "" : '<span class="pill">内置</span>'}
+        <small>${esc(m.model)} · ${m.shared ? "使用管理员额度" : `${esc(host(m.base_url))} · ${esc(m.key_hint)}`}</small></span>
       <span class="health ${cls}" title="${esc(m.health_message)}">${label}</span>
       <span class="row_btns">${m.active ? '<span class="in_use">使用中</span>' : '<button class="btn small primary" data-activate>改用</button>'}
-        <button class="btn small" data-test>测试</button><button class="btn small" data-edit>编辑</button></span></div>`;
+        <button class="btn small" data-test>测试</button>${m.shared ? "" : '<button class="btn small" data-edit>编辑</button>'}</span></div>`;
   };
   quiet = again;
   setPage(`${head}<div class="section"><h3>${PHONE.matches ? "" : "AI 模型"}</h3><button class="link" data-add>＋ 添加模型</button></div>
@@ -946,7 +975,8 @@ function renderModels(head, models, editing = null, again = true) {
     if (use) use.onclick = async () => {
       try { await api("/api/settings/models/activate", { method: "POST", body: { id } }); toast("已切换模型"); reload(); } catch (e) { toast(e.message); }
     };
-    $("[data-edit]", rowEl).onclick = () => renderModels(head, models, id);
+    const edit = $("[data-edit]", rowEl);
+    if (edit) edit.onclick = () => renderModels(head, models, id);
     $("[data-test]", rowEl).onclick = async () => {
       const chip = $(".health", rowEl);
       chip.className = "health busy"; chip.textContent = "测试中";
@@ -996,7 +1026,9 @@ function studyActions(p, c) {
     : p.id === "cx" ? "视频、文档、阅读任务点：章节并行，视频先尝试直接完成"
     : "学完资源库里的资源";
   return [["study", ICON.play, "自动学习", study],
-    ...(f.review ? [["review", ICON.repeat, "每日复习", "重看 30 分钟攒习惯分，每天一次"]] : [])];
+    ...(p.id === "zhs" && c.kind === "shared" ? [["meeting", ICON.play, "见面课", "1 倍速续看线上回放，平台确认签到后自动停止"]] : []),
+    ...(f.review ? [["review", ICON.repeat, "每日复习", "重看 30 分钟攒习惯分，每天一次"]] : []),
+    ...(f.mastery ? [["mastery", ICON.spark, "掌握度学习", "AI 作答并提交知识点练习；满分和免考跳过，每点最多 3 次。最新成绩可能覆盖旧成绩"]] : [])];
 }
 // "#/course/p/c/<tab>": the Q&A tab only exists on courses whose assessment counts it.
 const courseTab = (c, tab) => tab === "answer" ? "answer" : tab === "qa" && c.features?.qa ? "qa"
@@ -1164,7 +1196,7 @@ function renderCourse(p, c, tab, full = false) {
       const lastOf = state.history.find((j) => j.platform === p.id && j.course === c.id && j.title === LABEL[type]);
       const block = blocker(p.id, c.id, type);
       const foot = block || (lastOf ? `上次 ${ago(lastOf.ended || lastOf.started)} · ${lastOf.summary}` : "还没有运行过");
-      return `<button class="act" data-start="${type}" ${block ? "disabled" : ""}><span class="act_head"><span class="glyph">${icon}</span>${label}</span>
+      return `<button class="act" data-start="${type}" ${type === "mastery" ? 'data-confirm="确认自动作答并提交练习"' : ""} ${block ? "disabled" : ""}><span class="act_head"><span class="glyph">${icon}</span>${label}</span>
         <p>${text}</p><span class="foot"><span>${esc(foot)}</span>${i === 0 ? '<span class="kbd">S</span>' : ""}</span></button>`;
     }).join("")}</div>
       <div class="section"><h3>学习单元</h3></div>
@@ -1323,7 +1355,7 @@ function recentCells(k) {
 }
 
 const player = $(".player"), sheet = $(".sheet");
-const LIVE_WORD = { 自动学习: "正在学习", 每日复习: "正在复习", "AI 答题": "正在答题", 问答区答题: "正在回答", 问答区提问: "正在提问" };
+const LIVE_WORD = { 自动学习: "正在学习", 每日复习: "正在复习", 见面课: "正在观看见面课", "AI 答题": "正在答题", 问答区答题: "正在回答", 问答区提问: "正在提问" };
 const recentlyDone = () => (!state.jobs.length && state.lastDone && Date.now() - state.lastDone.shownAt < 60000 ? state.lastDone : null);
 
 function renderPlayer() {
@@ -1367,7 +1399,7 @@ function renderFocus() {
   const { pct, label } = progressOf(run);
   const k = key(job.platform, job.course);
   body.style.setProperty("--c", inkOf({ id: job.course }));
-  const units = learns(job) && unitsOf(k), t = units && tally(units);
+  const units = jobType(job) !== "meeting" && learns(job) && unitsOf(k), t = units && tally(units);
   const grid = units
     ? `<div class="section"><h3>整门课</h3><span class="aside mono">${t.done}/${t.all} · ${Math.round((t.done / (t.all || 1)) * 100)}%</span></div>${gridHtml(k)}` : "";
   const spot = live && spotOf(job, run);
@@ -1419,6 +1451,7 @@ setInterval(() => {
 /* ---------------------------------------------------------------- jobs */
 
 async function startJob(body) {
+  if (quietMessage()) { toast(quietMessage()); return false; }
   try {
     const started = await api("/api/jobs", { method: "POST", body });
     if (started.id) state.focus = started.id;
@@ -1674,6 +1707,7 @@ function pumpBackground() {
 }
 
 // catchUp: events may have been missed, so also reread the grids the live jobs are filling.
+let quietTimer = null;
 async function refreshState(catchUp = false) {
   try {
     const data = await api("/api/state");
@@ -1683,6 +1717,9 @@ async function refreshState(catchUp = false) {
     state.history = data.history || [];
     state.jobLimit = data.job_limit || state.jobLimit;
     state.zhsParallel = Boolean(data.zhs_parallel);
+    state.quietHours = data.quiet_hours || null;
+    clearTimeout(quietTimer);
+    if (data.quiet_hours) quietTimer = setTimeout(() => refreshState().then(repaint), Math.max(1000, data.quiet_hours.changes_in * 1000));
     const live = data.jobs || [];
     for (const job of live) {
       // The server's tally is the truth for a page opened mid-run or one that missed events while away.

@@ -220,7 +220,7 @@ class WebServerTest(unittest.TestCase):
                "zhs": {"kind": "shared", "courseId": 7}}
         self.assertEqual(_course("zhs", row), {"id": "shared-7", "platform": "zhs", "name": "导论", "type": "共享课",
                                                "kind": "shared", "progress": 100,
-                                               "features": {"study": True, "answer": True, "review": True, "qa": True}, "shares": None})
+                                                        "features": {"study": True, "answer": True, "review": True, "qa": True, "mastery": True}, "shares": None})
         self.assertEqual(_course("mooc", {"courseName": "高数", "courseId": "a/b"})["id"], "a_b")
         self.assertIsNone(_course("zhs", {"zhs": {"kind": "ai", "courseId": 8}})["progress"])
 
@@ -312,6 +312,13 @@ class WebServerTest(unittest.TestCase):
         result = self.app.login_status("mooc")
         self.assertEqual(result["status"], "failed")
         self.assertIsNone(self.app.platforms["mooc"].login)
+
+
+def setUpModule():
+    # Task tests have a daytime clock; curfew boundaries live in test_quiet_hours.py.
+    daytime = unittest.mock.patch("web.server.quiet_hours", return_value={"active": False})
+    daytime.start()
+    unittest.addModuleCleanup(daytime.stop)
 
 
 if __name__ == "__main__":

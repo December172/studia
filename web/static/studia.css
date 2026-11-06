@@ -499,10 +499,10 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none;
 .form_card h3 { margin: 0 0 10px; font-size: 14px; }
 .field { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 10px; margin: 8px 0; }
 .field label { color: var(--text-3); }
-.field input, .inline_num, .log_range input, .log_range select, .auth_field input {
+.field input, .field select, .inline_num, .log_range input, .log_range select, .auth_field input {
   border: 0; border-radius: 5px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line-2); transition: box-shadow .15s; }
-.field input { height: 34px; padding: 0 10px; font-size: 13px; background: var(--paper); }
-:is(.field input, .inline_num, .log_range input, .log_range select, .auth_field input):focus { outline: none; box-shadow: inset 0 0 0 1.5px var(--indigo), 0 0 0 3px var(--indigo-soft); }
+.field input, .field select { height: 34px; padding: 0 10px; font-size: 13px; background: var(--paper); }
+:is(.field input, .field select, .inline_num, .log_range input, .log_range select, .auth_field input):focus { outline: none; box-shadow: inset 0 0 0 1.5px var(--indigo), 0 0 0 3px var(--indigo-soft); }
 .field input[type="number"] { width: 90px; font-family: var(--mono); }
 .form_btns { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 
@@ -613,7 +613,7 @@ body.signed-out .app, body.signed-out .player { display: none; }
   .nav_item { height: 44px; } .menu_row { padding: 11px 8px; }
   .tab { height: 44px; } .chip { height: 32px; padding: 0 12px; }
   .paper { min-height: 62px; } .run { min-height: 62px; }
-  .field input { height: 42px; font-size: 16px; }
+  .field input, .field select { height: 42px; font-size: 16px; }
   .page.enter > * { animation-name: rise; }
   .scroll, .nav, .sheet_body, .log_body { overscroll-behavior: contain; }
 }
