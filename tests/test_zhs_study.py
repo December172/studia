@@ -153,12 +153,18 @@ def ai_row(name="智慧课"):
             "zhs": {"kind": "ai", "courseId": 7, "classId": 8}}
 
 
-def run(client, rows, events=None):
-    return ZHSHandler(
-        client=client, course_rows=rows,
-        on_progress=events.append if events is not None else None,
-        sleep=lambda seconds: None, rng=FixedRng(),
-    )
+def run(client, rows, events=None, **options):
+    clock = [0.0]
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    with patch("ZHSMain.main.time.monotonic", lambda: clock[0]):
+        return ZHSHandler(
+            client=client, course_rows=rows,
+            on_progress=events.append if events is not None else None,
+            sleep=sleep, rng=FixedRng(), **options,
+        )
 
 
 def two_video_course():
@@ -180,6 +186,19 @@ def two_video_course():
 
 
 class SharedStudyTest(unittest.TestCase):
+    def test_shared_video_defaults_to_normal_speed_and_only_accelerates_when_enabled(self):
+        for options, expected in (({}, 30), ({"speedup": True}, 45)):
+            with self.subTest(options=options):
+                client = FakeClient()
+                client.videos = two_video_course()
+                client.videos["videoChapterDtos"][0]["videoLessons"][1]["videoSmallLessons"][0]["videoSec"] = 90
+                client.lesson = {"100": {"watchState": 1, "studyTotalTime": 30}}
+                client.lv = {"11": {"watchState": 0, "studyTotalTime": 0}}
+                run(client, [shared_row()], **options)
+                fields = [decode_ev(call["payload"]["sdsew"]).split(";")
+                          for call in client.args_of("shared_save_progress")]
+                self.assertEqual(int(fields[1][7]), expected)  # First report after 30 one-second ticks.
+
     def test_skip_done_and_final_report(self):
         client = FakeClient()
         client.videos = two_video_course()
@@ -252,7 +271,7 @@ class SharedReviewTest(unittest.TestCase):
         events = []
         ZHSHandler(client=client, course_rows=[shared_row(), ai_row()],
                    on_progress=events.append, sleep=lambda seconds: None,
-                   rng=FixedRng(), review_minutes=1)
+                   rng=FixedRng(), review_minutes=1, speedup=True)
 
         fields = [decode_ev(call["payload"]["sdsew"]).split(";")
                   for call in client.args_of("shared_save_progress")]
@@ -506,7 +525,7 @@ class AiStudyTest(unittest.TestCase):
                                              if client.args_of("ai_video_length") and
                                              client.args_of("ai_video_length")[0]["file_id"] == "f2"])
         positions = [args["position"] for args in client.args_of("ai_report")]
-        self.assertEqual(positions, [13, 16, 19, 20])
+        self.assertEqual(positions, [12, 14, 16, 18, 20])
         names = client.names()
         self.assertLess(names.index("ai_complete"), names.index("ai_report"))
         results = [(event.name, event.status) for event in events if event.kind == "result"]
@@ -520,11 +539,25 @@ class AiStudyTest(unittest.TestCase):
             "resourcesType": 1, "resourcesDistributeType": 3,
             "resourcesFileId": "f1", "resourcesName": "video"}}
         client.ai_resources_queue = {1: [[item], [dict(item, studyStatus=1)]]}
-        clock = iter([0, 2.5, 102.5, 104.5, 106.5, 108.5])
-        with patch("ZHSMain.main.time.monotonic", lambda: next(clock)):
-            run(client, [ai_row()], [])
-        positions = [args["position"] for args in client.args_of("ai_report")]
-        self.assertEqual(positions, [3, 11, 14, 17, 20])
+        for enabled, expected in ((False, [2, 7, 9, 11, 13, 15, 17, 19, 20]),
+                                  (True, [3, 11, 14, 17, 20])):
+            with self.subTest(speedup=enabled):
+                client.calls.clear()
+                client.ai_resources_queue = {1: [[item], [dict(item, studyStatus=1)]]}
+                clock = iter([0, 2.5, 102.5, 104.5, 106.5, 108.5, 110.5, 112.5, 114.5, 116.5])
+                sleeps = []
+                original = client.ai_report
+
+                def report(*args):
+                    self.assertIn(2, sleeps)  # No progress is reported before the first playback wait.
+                    return original(*args)
+
+                with patch("ZHSMain.main.time.monotonic", lambda: next(clock)), \
+                        patch.object(client, "ai_report", side_effect=report):
+                    ZHSHandler(client=client, course_rows=[ai_row()], sleep=sleeps.append,
+                               rng=FixedRng(), speedup=enabled)
+                positions = [args["position"] for args in client.args_of("ai_report")]
+                self.assertEqual(positions, expected)
 
     def test_video_failure_continues_course(self):
         client = FakeClient()

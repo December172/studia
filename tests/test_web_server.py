@@ -40,6 +40,22 @@ class WebServerTest(unittest.TestCase):
         response = conn.getresponse()
         return response.status, response.read()
 
+    def test_study_speedup_api_defaults_off_validates_and_passes_the_saved_choice(self):
+        self.assertFalse(json.loads(self.request("GET", "/api/settings")[1])["zhs_speedup"])
+        platform = self.app.platforms["zhs"]
+        platform.client = Mock()
+        handler = Mock(return_value=Mock(blocked=None))
+        job = {"id": "speedup", "kind": "study", "cancel": threading.Event()}
+        for enabled in (False, True, False):
+            self.assertEqual(self.request("POST", "/api/settings/study", body={"zhs_speedup": enabled})[0], 200)
+            self.assertIs(json.loads(self.request("GET", "/api/state")[1])["zhs_speedup"], enabled)
+            with patch.dict(platform.spec, handler=handler), patch.object(self.app, "ai_config", return_value=None):
+                self.app._study(platform, {}, 0, job)
+            self.assertIs(handler.call_args.kwargs["speedup"], enabled)
+        for invalid in ("false", 1, None):
+            self.assertEqual(self.request("POST", "/api/settings/study", body={"zhs_speedup": invalid})[0], 400)
+        self.assertFalse(self.app.store.zhs_speedup())
+
     def test_api_requires_token_and_own_host(self):
         self.assertEqual(self.request("GET", "/api/state", token=False)[0], 403)
         self.assertEqual(self.request("GET", "/api/state", host="evil.example")[0], 403)
