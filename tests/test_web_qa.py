@@ -5,6 +5,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+from ai.client import AIResponseError
 from settings import SettingsStore
 from web.server import JOBS, HttpError, Studia, _ask_texts, _Board, drain
 
@@ -94,6 +95,27 @@ class WebQaTest(unittest.TestCase):
         self.assertNotIn("物联网设备的安全为什么总是难以保障？", prompt)
         self.assertEqual(bridge.call_count, 1)  # the board is read once, not per question
         self.assertFalse(JOBS)
+
+    def test_draft_retries_a_broken_model_answer(self):
+        ai = Mock()
+        ai.answer = Mock(side_effect=[AIResponseError("AI 响应不是完整的答案 JSON"),
+                                      {"answer": "边缘计算和云计算怎样分工才能降低工厂的延迟？", "explanation": "换个方向"}])
+        self.app._ai = Mock(return_value=ai)
+        with patch("web.server.QaBridge", return_value=FakeBridge()), \
+                patch("ZHSMain.qa.time.sleep"):
+            result = self.app.qa_draft("zhs", {"course": "shared-1000091138"})
+        self.assertEqual(result["questions"], ["边缘计算和云计算怎样分工才能降低工厂的延迟？"])
+        self.assertEqual(ai.answer.call_count, 2)
+
+    def test_draft_gives_up_after_repeated_broken_responses(self):
+        ai = Mock(answer=Mock(side_effect=AIResponseError(
+            "AI 响应不是完整的答案 JSON；本题未作答（finish_reason=length）")))
+        self.app._ai = Mock(return_value=ai)
+        with patch("web.server.QaBridge", return_value=FakeBridge()):
+            result = self.app.qa_draft("zhs", {"course": "shared-1000091138"})
+        self.assertEqual(result["questions"], [])
+        self.assertEqual(ai.answer.call_count, 3)
+        ai.session.close.assert_called_once()
 
     def test_daily_limit_and_cap_hold_back_jobs(self):
         for n in range(10):  # ten answers already posted today
