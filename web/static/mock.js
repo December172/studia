@@ -2,12 +2,20 @@
 const listeners = new Set();
 const emit = (event) => listeners.forEach((listener) => listener(event));
 const platforms = [
-  { id: "mooc", name: "MOOC", short: "MOOC", login: "browser", logged_in: true, features: { answer: true, review: false } },
-  { id: "zhs", name: "智慧树", short: "智慧树", login: "qr", logged_in: true, features: { answer: true, review: true, qa: true } },
+  { id: "mooc", name: "MOOC", short: "MOOC", login: "browser", logged_in: true, features: { study: true, answer: true, review: false } },
+  // ?mock&rescan: the sign-in centre's ticket has lapsed, the Q&A board waits for a fresh scan.
+  // ?mock&soon: it runs out in 40 minutes.
+  { id: "zhs", name: "智慧树", short: "智慧树", login: "qr", logged_in: true, rescan: new URLSearchParams(location.search).has("rescan"),
+    rescan_at: new URLSearchParams(location.search).has("rescan") ? null
+      : Date.now() / 1000 + (new URLSearchParams(location.search).has("soon") ? 40 * 60 : 6 * 3600),
+    features: { study: true, answer: true, review: true, qa: true } },
+  { id: "cx", name: "超星", short: "超星", login: "qr", password: true, logged_in: true, features: { study: true, answer: true, review: false } },
 ];
 const courses = {
   mooc: [{ id: "m1", platform: "mooc", name: "大学英语（二）", type: "第 7 期开课", kind: "mooc", progress: 62 }, { id: "m2", platform: "mooc", name: "中外音乐与民族技艺实践", type: "第 3 期开课", kind: "mooc", progress: 100 }],
   zyk: [{ id: "z1", platform: "zyk", name: "Python 程序设计", type: "资源库", kind: "zyk", progress: 35 }],
+  cx: [{ id: "cx-1", platform: "cx", name: "高等数学", type: "张老师", kind: "cx", progress: null,
+      features: { study: true, answer: true, review: false } }],
   zhs: [
     { id: "shared-1", platform: "zhs", name: "新一代信息技术导论", type: "共享课", kind: "shared", progress: 100,
       features: { answer: true, review: true, qa: true }, shares: { progress: 20, habit: 20, interactive: 10, knowledge: 0, test: 10, meet: 0, final: 40 } },
@@ -23,6 +31,11 @@ const tasks = [
   { id: "t3", name: "第一章单元测试", category: "作业", status: "已满分", score: 10, available: false, reason: "已满分，无需重做。" },
   { id: "t5", name: "第十章单元测试", category: "作业", status: "已提交", score: 8, available: true, hint: "剩余重做 3 次", redo_left: 3 },
   { id: "t4", name: "新一代信息技术导论教程考试", category: "考试", status: "未开考", score: null, available: false, reason: "考试需要先在网页上手动开考" },
+];
+// 超星不提供作业提交状态，预览里保留一条「状态未知」。
+const cxTasks = [
+  { id: "work-a", name: "1.1 章节测验", category: "作业", status: "状态未知", score: null, available: true, hint: "平台不提供这份作业的提交状态；已完成的作业请不要再勾选" },
+  { id: "work-b", name: "1.2 章节作业", category: "作业", status: "状态未知", score: null, available: true, hint: "平台不提供这份作业的提交状态；已完成的作业请不要再勾选" },
 ];
 const jobs = {};
 let polls = 0;
@@ -56,12 +69,14 @@ const units = {
   m1: chapters([["第 1 章 自我介绍", 7], ["第 2 章 校园生活", 8], ["第 3 章 职场沟通", 9], ["第 4 章 产品说明", 8], ["第 5 章 安全规范", 7]], 22),
   "shared-1": chapters([["第一章 信息技术概述", 6], ["第二章 云计算", 6], ["第三章 人工智能", 7]], 99),
   "shared-2": chapters([["第一章 通信概述", 8], ["第二章 数据通信", 10]], 7),
+  "cx-1": chapters([["第一章 函数与极限", 4], ["第二章 导数与微分", 6]], 2),
   "ai-1": chapters([["广义的通信概念", 2], ["通信的发展", 5], ["现代通信的概念", 2], ["贝尔和贝尔实验室", 6], ["通信基本模型", 5], ["信息、消息与信号", 5],
     ["信息的度量", 4], ["信号基本概念和分类", 4], ["信号的变换", 4], ["信号的时域和频域特性", 4], ["通信系统一般模型", 4], ["调制与解调", 6],
     ["复用技术", 5], ["计算机网络的发展历程", 6], ["网络体系结构", 7], ["物理层", 6], ["数据链路层", 8], ["网络层", 9], ["传输层", 7], ["应用层", 6]], 66),
 };
 
 const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "answer", ask: "answer" };
+let qaPeersOn = false;
 const qaPosts = [{ kind: "answer", question: "云计算的三种服务模式有什么区别？", text: "IaaS 提供虚拟机等基础设施，PaaS 提供运行平台，SaaS 直接提供软件。", at: Date.now() / 1000 - 7200 }];
 function fakeJob(body) {
   const course = courses[body.platform].find((c) => c.id === body.course);
@@ -151,10 +166,15 @@ export async function request(path, method, body) {
   await new Promise((resolve) => setTimeout(resolve, 200));
   let m;
   if (path === "/api/state") return { platforms, jobs: Object.values(jobs), history };
+  if (path === "/api/auth/me") return { user: { id: "mock", username: "演示", role: "member" }, csrf: "mock" };
   if ((m = path.match(/^\/api\/platforms\/(\w+)\/login(?:\?.*)?$/))) {
     const p = platforms.find((x) => x.id === m[1]);
     if (method === "POST") {
       polls = 0;
+      if (p.login === "password" || (p.password && body && body.username)) {
+        p.logged_in = true;
+        return { status: "done", message: "登录成功" };
+      }
       return p.login === "qr" ? { id: "mock", qr: "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 29 29" shape-rendering="crispEdges"><rect width="29" height="29" fill="#fff"/><path d="M1 1h7v7H1zM21 1h7v7h-7zM1 21h7v7H1z" fill="none" stroke="#111"/><path d="M3 3h3v3H3zM23 3h3v3h-3zM3 23h3v3H3zM10 2h2v2h-2zM13 5h3v2h-3zM10 10h4v3h-4zM17 11h3v2h-3zM12 16h5v2h-5zM20 18h4v3h-4zM10 22h2v4h-2zM15 24h4v2h-4z" fill="#111"/></svg>') }
         : { status: "waiting", message: "已在浏览器打开职教云登录页" };
     }
@@ -162,16 +182,20 @@ export async function request(path, method, body) {
     if (polls < 3) return { status: "waiting", message: "等待扫码" };
     if (polls < 4 && p.login === "qr") return { status: "scanned", message: "已扫码" };
     p.logged_in = true;
+    p.rescan = false;
+    if (p.id === "zhs") p.rescan_at = Date.now() / 1000 + 8 * 3600;
     return { status: "done", message: "登录成功" };
   }
   if ((m = path.match(/^\/api\/platforms\/(\w+)\/logout$/))) { platforms.find((x) => x.id === m[1]).logged_in = false; return {}; }
   if ((m = path.match(/^\/api\/platforms\/(\w+)\/courses$/))) return { courses: courses[m[1]] };
-  if (path.match(/^\/api\/platforms\/(\w+)\/tasks/)) return { tasks };
+  if ((m = path.match(/^\/api\/platforms\/(\w+)\/tasks/))) return { tasks: m[1] === "cx" ? cxTasks : tasks };
   if ((m = path.match(/^\/api\/platforms\/\w+\/units\?course=(.+)$/))) return { chapters: units[decodeURIComponent(m[1])] || [] };
-  if ((m = path.match(/^\/api\/platforms\/\w+\/qa\?course=(.+)$/))) return { posts: qaPosts.slice().reverse() };
+  if ((m = path.match(/^\/api\/platforms\/\w+\/qa\?course=(.+)$/))) return { posts: qaPosts.slice().reverse(),
+    room: { ask: 4, answer: 7, posted: { ask: 1, answer: 3 }, why: { ask: "今天问满了，明天再来", answer: "今天答满了，明天再来" } }, peers: qaPeersOn };
+  if (path.match(/^\/api\/platforms\/\w+\/qa\/peers$/)) { qaPeersOn = body.on === true; return { peers: qaPeersOn }; }
   if (path.match(/^\/api\/platforms\/\w+\/qa\/draft$/)) {
     await new Promise((r) => setTimeout(r, 900));
-    return { questions: ["边缘计算会不会取代云计算？各自适合什么场景？", "RPA 和传统的脚本自动化有什么本质区别？", "企业上云时数据安全的责任应该怎么划分？", "物联网设备越来越多，个人隐私该靠谁来保护？", "大模型写的代码出了事故，责任算谁的？"].filter((q) => !(body.have || []).includes(q)).slice(0, 1) };
+    return { questions: ["边缘计算和云计算在工厂产线上应该怎样分工？", "RPA 和传统的脚本自动化相比，真正省下的是哪部分人力？", "企业上云以后，数据安全的责任应该怎么在云厂商和企业之间划分？", "物联网设备越来越多，个人隐私保护最难落实在哪一环？", "大模型写的代码出了事故，开发者和工具方的责任该怎么分？"].filter((q) => !(body.have || []).includes(q)).slice(0, 1) };
   }
   if ((m = path.match(/^\/api\/platforms\/\w+\/score\?course=(.+)$/))) return { earned: {
     "shared-1": { progress: 20, habit: 9, interactive: 2, test: 9, meet: 0, final: 0, usual: 31, total: 40, qa: { answers: 3, questions: 1, received: 2 } },
