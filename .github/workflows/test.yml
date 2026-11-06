@@ -4,7 +4,8 @@ permissions:
   contents: read
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # setup-python has no Python 3.9 build for Ubuntu 26.04 (the current ubuntu-latest).
+    runs-on: ${{ matrix.python == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     strategy:
       matrix:
         python: ['3.9', '3.12']
