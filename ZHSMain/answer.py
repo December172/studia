@@ -911,13 +911,16 @@ class ZHSAnswerRunner:
 
     def _start_heartbeat(self, test_id, paper_id):
         self._heartbeat_stop = threading.Event()
+        stop = self._heartbeat_stop
         self._heartbeat_error = None
         interval = self.heartbeat_interval
 
         def beat():
-            while not self._heartbeat_stop.wait(interval):
+            while not stop.wait(interval):
                 try:
                     self.client.exam_heartbeat(test_id, paper_id, interval)
+                except KeyboardInterrupt:
+                    return
                 except (CaptchaRequired, AuthenticationExpired) as exc:
                     self._heartbeat_error = exc
                     return
@@ -925,6 +928,7 @@ class ZHSAnswerRunner:
                     continue
 
         self._heartbeat_thread = threading.Thread(target=beat, daemon=True, name=child_thread_name('heartbeat'))
+        self._heartbeat_thread.studia_stop = stop
         self._heartbeat_thread.start()
 
     def _stop_heartbeat(self):

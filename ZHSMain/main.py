@@ -9,7 +9,7 @@ from datetime import date, timedelta
 from base.auth import AuthenticationExpired, PlatformUnavailable
 from base.concurrency import INTERACTIVE_WORKERS
 from MoocMain.log import Logger
-from reporting import Reporter
+from reporting import Reporter, child_thread_name
 from ZHSMain.api import (
     CaptchaRequired,
     StudyTimeLimit,
@@ -433,7 +433,7 @@ class ZHSHandler:
             return 0
 
         threading.Thread(
-            target=self.client.open_video, kwargs={"video_id": play_id}, daemon=True
+            target=self.client.open_video, kwargs={"video_id": play_id}, daemon=True, name=child_thread_name("video")
         ).start()
         self.client.shared_courseware(play_id)
         self.log.info("%s · %s：%s（%s）", course, "开始复习" if review else "开始播放",
@@ -611,7 +611,7 @@ class ZHSHandler:
             raise ZHSError("无法获取视频时长")
         position = int(length * schedule / 100)
         threading.Thread(
-            target=self.client.open_video, kwargs={"file_id": file_id}, daemon=True
+            target=self.client.open_video, kwargs={"file_id": file_id}, daemon=True, name=child_thread_name("video")
         ).start()
         self.log.info("%s · 开始播放：%s", course, name)
         if position >= length:

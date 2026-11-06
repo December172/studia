@@ -53,7 +53,7 @@ class ResumeJobsTest(unittest.TestCase):
         app = self.app()
         app.start_job = Mock()
         app.resume()
-        app.start_job.assert_called_once_with({"platform": "zhs", "type": "review", "course": "ai-c1"}, minutes=12, resumes=1, paused=False)
+        app.start_job.assert_called_once_with({"platform": "zhs", "type": "review", "course": "ai-c1"}, minutes=12, resumes=1, paused=False, restoring=True)
         self.assertEqual((app.history[0]["title"], app.history[0]["state"], app.history[0]["summary"]),
                          ("AI 答题", "stopped", INTERRUPTED))
 
@@ -182,6 +182,13 @@ class ResumeJobsTest(unittest.TestCase):
         app.start_job({"platform": "zhs", "type": "study", "course": "ai-c1"})
         drain(5)
         self.assertEqual(self.app().history[0]["state"], "done")
+
+
+def setUpModule():
+    # Task tests have a daytime clock; curfew boundaries live in test_quiet_hours.py.
+    daytime = unittest.mock.patch("web.server.quiet_hours", return_value={"active": False})
+    daytime.start()
+    unittest.addModuleCleanup(daytime.stop)
 
 
 if __name__ == "__main__":

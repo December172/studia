@@ -7,6 +7,7 @@ import time
 import urllib.parse
 
 import requests
+from base.quiet_hours import checkpoint
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
@@ -261,6 +262,7 @@ class ZHSApi:
 
     def _request(self, method, url, *, params=None, data=None, json_body=None,
                  allow_redirects=True, expect_json=True, origin=None):
+        checkpoint()
         headers = None
         if origin:
             headers = {"Origin": origin, "Referer": origin + "/"}
@@ -300,6 +302,7 @@ class ZHSApi:
         return result
 
     def _secure_form(self, payload, key):
+        checkpoint()  # Wait before generating the timestamp/signature, too.
         body = dict(payload or {})
         timestamp = int(time.time() * 1000)
         body["dateFormate"] = timestamp
@@ -714,6 +717,7 @@ class ZHSApi:
 
     def open_video(self, video_id=None, file_id=None):
         try:
+            checkpoint()
             if video_id:
                 response = requests.get(
                     NEWBASE + "/video/initVideo",
@@ -735,6 +739,7 @@ class ZHSApi:
                 line_url = lines[0].get("lineUrl") if lines else None
                 if not line_url:
                     return
+                checkpoint()
                 with requests.get(line_url, headers=HEADERS, stream=True, timeout=(10, 30)) as stream:
                     stream.raw.read(64 * 1024)
             elif file_id:
@@ -744,6 +749,8 @@ class ZHSApi:
                     headers=HEADERS,
                     timeout=(10, 30),
                 )
+        except KeyboardInterrupt:
+            return  # A detached prefetch has no coordinator to propagate cancellation to.
         except Exception as exc:
             logger.debug("视频流预请求失败：%s", exc)
 
