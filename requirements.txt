@@ -1,4 +1,5 @@
 # aiohttp==3.8.3
+fonttools>=4.47
 lxml==6.1.0
 numpy>=1.24
 opencv_python_headless>=4.6

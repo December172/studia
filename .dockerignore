@@ -14,3 +14,10 @@ docs/
 .claude/
 CLAUDE.local.md
 .env
+.env.*
+data/
+settings.json
+settings.enc
+secret.key
+accounts.json
+studia.db*

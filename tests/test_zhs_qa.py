@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, Mock, patch
 from rich.console import Console
 
 import theme
-from ai.client import AIResponseError
+from ai.client import AIResponseError, AITransientServiceError
 from app import Application
 from base.auth import PlatformUnavailable
 from settings import SettingsStore
@@ -50,7 +50,10 @@ class FakeAi:
 
 
 def items(count):
-    return [{"id": i, "content": "问题 %d" % i} for i in range(1, count + 1)]
+    return [{"id": i, "content": "第 %d 节讲的分层设计为什么能降低维护成本？" % i} for i in range(1, count + 1)]
+
+
+ASK = "大数据分析时，样本偏差会怎样误导企业的判断？"
 
 
 class QaQueueTest(unittest.TestCase):
@@ -142,7 +145,7 @@ class BridgeLifecycleTest(unittest.TestCase):
 class FlakyAi(FakeAi):
     """先回坏 JSON 再正常，模拟推理模型偶尔只回思考、正文为空。"""
 
-    def __init__(self, text=LONG, failures=1):
+    def __init__(self, text=ASK, failures=1):
         super().__init__(text)
         self.failures = failures
 
@@ -175,27 +178,34 @@ QUESTIONS = ["第一章里的两个概念有什么区别？", "为什么这里�
 
 class WriteQuestionsTest(unittest.TestCase):
     def test_writes_requested_questions(self):
-        ai = FakeAi(LONG)
-        self.assertEqual(write_questions(ai, QUESTIONS, 2), [LONG])  # 重复的只发一条
-        self.assertEqual(ai.calls, 2)
+        ai = FakeAi(ASK)
+        self.assertEqual(write_questions(ai, QUESTIONS, 2), [ASK])  # the second one repeats: three tries, then given up
+        self.assertEqual(ai.calls, 4)
 
-    def test_short_and_repeated_answers_are_skipped(self):
-        self.assertEqual(write_questions(FakeAi("太短"), [], 2), [])
-        self.assertEqual(len(write_questions(FakeAi(LONG), [], 3)), 1)
+    def test_a_question_the_board_would_reject_is_rewritten_with_the_reason(self):
+        ai = Mock(answer=Mock(side_effect=[{"answer": "云计算好吗？"}, {"answer": ASK}]))
+        self.assertEqual(write_questions(ai, [], 1), [ASK])
+        self.assertIn("是非题", ai.answer.call_args.args[0]["title"])
+
+    def test_gives_up_after_three_bad_tries(self):
+        ai = FakeAi("太短")
+        self.assertEqual(write_questions(ai, [], 1), [])
+        self.assertEqual(ai.calls, 3)
 
     def test_lead_ins_are_dropped(self):
-        ai = FakeAi("老师好，请问合同效力的认定标准是什么？")
-        self.assertEqual(write_questions(ai, [], 1), ["合同效力的认定标准是什么？"])
+        ai = FakeAi("老师好，请问合同效力为什么要看双方的真实意思表示？")
+        self.assertEqual(write_questions(ai, [], 1), ["合同效力为什么要看双方的真实意思表示？"])
 
     def test_address_kept_when_it_is_part_of_the_question(self):
-        text = "老师布置的作业要求和课程大纲不一致，以哪个为准？"
+        text = "老师布置的作业要求和课程大纲不一致时，应当以哪个为准？"
         self.assertEqual(write_questions(FakeAi(text), [], 1), [text])
 
-    def test_reference_questions_are_used_as_topics(self):
-        ai = FakeAi(LONG)
+    def test_existing_questions_are_only_something_to_avoid(self):
+        ai = FakeAi(ASK)
         write_questions(ai, QUESTIONS, 1, course_name="国家安全教育")
         title = ai.questions[0]["title"]
         self.assertIn("国家安全教育", title)
+        self.assertIn("不要重复", title)
         for question in QUESTIONS:
             self.assertIn(question, title)
 
@@ -203,7 +213,7 @@ class WriteQuestionsTest(unittest.TestCase):
         self.assertEqual(write_questions(FakeAi(QUESTIONS[0]), QUESTIONS, 1), [])
 
     def test_reference_is_capped(self):
-        ai = FakeAi(LONG)
+        ai = FakeAi(ASK)
         write_questions(ai, ["问题 %d 号？" % index for index in range(40)], 1)
         title = ai.questions[0]["title"]
         self.assertIn("问题 7 号？", title)
@@ -212,34 +222,118 @@ class WriteQuestionsTest(unittest.TestCase):
     def test_broken_response_is_asked_again(self):
         ai = FlakyAi()
         with patch("ZHSMain.qa.time.sleep"):
-            self.assertEqual(write_questions(ai, [], 1), [LONG])
+            self.assertEqual(write_questions(ai, [], 1), [ASK])
         self.assertEqual(ai.calls, 2)
 
-    def test_repeated_broken_response_is_raised(self):
+    def test_repeated_broken_response_gives_up_after_three_tries(self):
         ai = FlakyAi(failures=5)
-        with patch("ZHSMain.qa.time.sleep"):
-            with self.assertRaises(AIResponseError):
-                write_questions(ai, [], 1)
-        self.assertEqual(ai.calls, 2)
+        self.assertEqual(write_questions(ai, [], 1), [])
+        self.assertEqual(ai.calls, 3)
+
+    def test_broken_reply_counts_as_a_try(self):
+        broken = AIResponseError("AI 响应不是完整的答案 JSON")
+        ai = Mock(answer=Mock(side_effect=[broken, {"answer": ASK}]))
+        self.assertEqual(write_questions(ai, [], 1), [ASK])
+        ai = Mock(answer=Mock(side_effect=[broken, broken, broken, {"answer": ASK}]))
+        self.assertEqual(write_questions(ai, [], 2), [ASK])  # the first question gives up, the second still comes
+        ai = Mock(answer=Mock(side_effect=AITransientServiceError("AI 连接失败或超时")))
+        with self.assertRaises(AITransientServiceError):
+            write_questions(ai, [], 1)
+        self.assertEqual(ai.answer.call_count, 1)  # a timeout is not waited out twice
 
     def test_progress_callback_reports_each_question(self):
         seen = []
-        write_questions(FakeAi(LONG), [], 2, on_progress=lambda index, total: seen.append((index, total)))
+        write_questions(FakeAi(ASK), [], 2, on_progress=lambda index, total: seen.append((index, total)))
         self.assertEqual(seen, [(1, 2), (2, 2)])
 
-    def test_prompt_forbids_address_and_identity_framing(self):
-        ai = FakeAi(LONG)
+    def test_prompt_carries_the_board_rules(self):
+        ai = FakeAi(ASK)
         write_questions(ai, [], 1, course_name="国家安全教育")
         title = ai.questions[0]["title"]
-        for banned in ("作为大学生", "请问", "老师", "序号", "Markdown"):
-            self.assertIn(banned, title)
+        for rule in ("一个问号", "请问", "老师", "序号", "是非题", "名词解释", "括号"):
+            self.assertIn(rule, title)
 
-    def test_prompt_falls_back_to_course_topic(self):
-        ai = FakeAi(LONG)
+    def test_each_question_takes_its_own_lesson(self):
+        ai = FakeAi(ASK)
+        lessons = ["1.1 物联网的体系结构", "2.3 云计算的服务模式"]
+        write_questions(ai, [], 2, course_name="新一代信息技术导论", topics=lessons)
+        first = next(lesson for lesson in lessons if lesson in ai.questions[0]["title"])
+        second = next(lesson for lesson in lessons if lesson in ai.questions[1]["title"])
+        self.assertNotEqual(first, second)
+
+    def test_prompt_falls_back_to_the_course_as_a_whole(self):
+        ai = FakeAi(ASK)
         write_questions(ai, [], 1, course_name="国家安全教育")
-        title = ai.questions[0]["title"]
-        self.assertIn("国家安全教育", title)
-        self.assertIn("课程的核心概念", title)
+        self.assertIn("课程的核心内容", ai.questions[0]["title"])
+
+
+class ReplyVoiceTest(unittest.TestCase):
+    PLAIN = "我觉得缓冲最关键，CPU 太快外设太慢，没有它就得干等着。"
+
+    def test_a_listed_or_stock_answer_is_rewritten_as_one_plain_paragraph(self):
+        from ZHSMain.qa import write_reply
+        ai = Mock(answer=Mock(side_effect=[{"answer": "1. 处理机管理。2. 存储器管理。"},
+                                           {"answer": "主要体现在以下几个方面：效率和安全"},
+                                           {"answer": self.PLAIN}]))
+        self.assertEqual(write_reply(ai, "操作系统有哪些功能？", voice=2), self.PLAIN)
+        contexts = [call.args[0]["context"] for call in ai.answer.call_args_list]
+        self.assertIn("不要分点编号", contexts[1])
+        self.assertIn("套话", contexts[2])
+
+    def test_gives_up_after_three_tries(self):
+        from ZHSMain.qa import write_reply
+        ai = Mock(answer=Mock(return_value={"answer": "首先要看效率，其次看安全。"}))
+        with self.assertRaises(ValueError):
+            write_reply(ai, "操作系统有哪些功能？")
+        self.assertEqual(ai.answer.call_count, 3)
+
+    def test_each_account_keeps_its_voice_and_steers_clear_of_answers_already_there(self):
+        from ZHSMain.qa import REPLY_VOICES, write_reply
+        ai = FakeAi(self.PLAIN)
+        write_reply(ai, "操作系统有哪些功能？", seen=["我觉得是管好 CPU 和内存。"], voice=3)
+        context = ai.questions[0]["context"]
+        self.assertIn(REPLY_VOICES[3][0], context)
+        self.assertIn("我觉得是管好 CPU 和内存。", context)
+
+    def test_answering_uses_the_accounts_voice(self):
+        from ZHSMain.qa import REPLY_VOICES
+        ai = FakeAi(LONG)
+        answer_questions(FakeQa(items(1)), ai, limit=1, interval=0, voice=1)
+        self.assertIn(REPLY_VOICES[1][0], ai.questions[0]["context"])
+
+    def test_our_own_questions_stay_short_and_plain(self):
+        from ZHSMain.qa import own_question_flaw
+        self.assertIsNone(own_question_flaw(ASK))
+        self.assertIsNotNone(own_question_flaw("在端边协同的AI推理场景中，深度学习模型分割通常依据哪些策略划分端侧与边缘侧的计算图以平衡开销？"))
+        self.assertIsNotNone(own_question_flaw("LoRa 和 NB-IoT 哪个更省电？"))
+
+
+class RulesTest(unittest.TestCase):
+    def test_flaws_the_board_rules_name(self):
+        from ZHSMain.qa import question_flaw
+        self.assertIsNone(question_flaw(ASK))
+        self.assertIsNone(question_flaw("为什么是边缘计算而不是云计算更适合工厂产线？"))
+        for text in ("请问大数据分析会怎样误导企业判断？", "物联网安全为什么难做？？", "云计算好吗？",
+                     "什么是物联网的感知层？", "企业上云最大的阻力是什么？", "人工智能会不会取代程序员？",
+                     "5G 是哪一年开始商用的呢？", "大数据（数据集）会怎样影响企业决策？", "大数据怎样影响决策"):
+            self.assertIsNotNone(question_flaw(text), text)
+
+    def test_threads_worth_answering(self):
+        from ZHSMain.qa import worth_answering
+        now = 1_800_000_000_000
+        good = {"id": 1, "content": ASK, "asker": 7, "at": now - 3600_000}
+        burst = [{"id": 10 + i, "content": ASK, "asker": 8, "at": now - 60_000 + i * 5000} for i in range(3)]
+        mine = dict(good, id=2, mine=True)
+        old = dict(good, id=3, asker=9, at=now - 200 * 24 * 3600 * 1000)
+        junk = dict(good, id=4, asker=10, content="云计算好吗？")
+        self.assertEqual([q["id"] for q in worth_answering([good, mine, old, junk] + burst, now=now)], [1])
+
+    def test_room_is_the_smaller_of_cap_and_daily_limit(self):
+        from ZHSMain.qa import qa_room
+        self.assertEqual(qa_room(5, 0, 20, 10), 10)
+        self.assertEqual(qa_room(15, 2, 20, 10), 3)
+        self.assertEqual(qa_room(None, 10, 20, 10), 0)
+        self.assertEqual(qa_room(25, 0, 20, 10), 0)
 
 
 class PublishQuestionsTest(unittest.TestCase):
@@ -317,9 +411,10 @@ class TuiExecuteTest(unittest.TestCase):
                                input_fn=lambda: "")
         self.app = Application(self.view, self.store)
         self.app.verify_ai = Mock(return_value=FakeAi())
-        pace = patch("ZHSMain.qa.QA_PACE", (0, 0))
-        pace.start()
-        self.addCleanup(pace.stop)
+        for name in ("ZHSMain.qa.QA_PACE", "ZHSMain.qa.ASK_PACE"):
+            pace = patch(name, (0, 0))
+            pace.start()
+            self.addCleanup(pace.stop)
 
     def run_qa(self, courses, qa):
         bridge = Mock()
@@ -370,9 +465,10 @@ class TuiAskTest(unittest.TestCase):
         self.view = TerminalUI(console=Console(file=io.StringIO(), theme=theme.THEME, width=120),
                                input_fn=lambda: "")
         self.app = Application(self.view, SettingsStore(Path(self.temp.name)))
-        pace = patch("ZHSMain.qa.QA_PACE", (0, 0))
-        pace.start()
-        self.addCleanup(pace.stop)
+        for name in ("ZHSMain.qa.QA_PACE", "ZHSMain.qa.ASK_PACE"):
+            pace = patch(name, (0, 0))
+            pace.start()
+            self.addCleanup(pace.stop)
 
     def publish(self, courses, qa):
         bridge = Mock()
@@ -396,7 +492,7 @@ class TuiAskTest(unittest.TestCase):
         self.assertEqual(bridge.call_count, 1)
 
     def test_generate_reads_reference_questions(self):
-        ai = FakeAi(LONG)
+        ai = FakeAi(ASK)
         qa = FakeQa([{"id": 1, "content": QUESTIONS[0]}, {"id": 2, "content": QUESTIONS[1]}])
         bridge = Mock()
         bridge.return_value.__enter__ = Mock(return_value=qa)
@@ -405,7 +501,7 @@ class TuiAskTest(unittest.TestCase):
                 patch("ZHSMain.qa.QaBridge", bridge):
             texts = self.app.generate_zhs_questions(Mock(access_token="[]"), [COURSE], self.config(),
                                                     {"count": 1})
-        self.assertEqual(texts, [LONG])
+        self.assertEqual(texts, [ASK])
         self.assertIn(QUESTIONS[0], ai.questions[0]["title"])
         self.assertEqual(bridge.call_args.kwargs["recruit_id"], 426135)
         self.assertTrue(ai.session.close.called)
@@ -431,7 +527,7 @@ class TuiAskTest(unittest.TestCase):
             self.app.generate_zhs_questions(Mock(access_token="[]"), [{"courseName": "无问答区"}],
                                             self.config(), {"count": 1})
         bridge.assert_not_called()
-        self.assertIn("课程的核心概念", ai.questions[0]["title"])
+        self.assertIn("课程的核心内容", ai.questions[0]["title"])
 
 
 class WorkspaceTest(unittest.TestCase):
@@ -464,7 +560,20 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(view.operation_result.call_args.args[0], [])
         self.assertEqual(app.store.set.call_args.args, ("qa", {"limit": 10}))
         self.assertEqual(view.qa_menu.call_args.args[0],
-                         ["国家安全教育：互动分 2/10 · 有效回答 3 · 有效提问 1 · 收获回答 2"])
+                         ["国家安全教育：互动分 2/10 · 提问 1/10 · 回答 3/20 · 收获回答 2（次日上午更新）"])
+
+    def test_answering_stops_short_of_the_cap(self):
+        from ui import Back
+
+        view = MagicMock()
+        view.course_menu.side_effect = [4, Back()]
+        view.qa_menu.side_effect = [1, Back()]
+        view.qa_size.return_value = 10
+        workspace, app = self.workspace(view)
+        workspace.client.score_earned.return_value = {
+            "interactive": 3.6, "qa": {"answers": 18, "questions": 0, "received": 0}}
+        workspace.course_loop([COURSE])
+        self.assertEqual(app.execute_zhs_qa.call_args.args[3], {"limit": 2})  # 20 answers score, 18 already do
 
     def test_asking_publishes_what_was_kept(self):
         from ui import Back

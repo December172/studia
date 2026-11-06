@@ -14,6 +14,7 @@ import secrets
 import threading
 import time
 import webbrowser
+import zlib
 from dataclasses import asdict, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,10 +27,14 @@ from AIMoocMain.api import AIMoocApi
 from AIMoocMain.exam_api import ExamAPI, ExamError, ExamServiceError, TaskUnavailableError
 from AIMoocMain.export_questions import paper_display_name, paper_exam_id
 from AIMoocMain.main import AIMoocHandler, course_units as mooc_units
-from ai.client import AIClient, AIConfig, AIError
+from ai.client import AIClient, AIConfig, AIError, AIServiceError
 from ai.runner import AnswerRunner
 from base.concurrency import INTERACTIVE_WORKERS
 from base.auth import AuthenticationExpired, PlatformUnavailable
+from ChaoxingMain.api import ChaoxingApi, ChaoxingError, LoginError, WorkUnavailable
+from ChaoxingMain.exercise import ChaoxingExerciseRunner
+from ChaoxingMain.main import catalog as cx_catalog, course_units as cx_units
+from ChaoxingMain.study import ChaoxingStudyHandler
 from NewMoocMain.oauth_login import oauth_login
 from settings import DEFAULT_PROFILE_ID, SettingsError, SettingsStore
 from task_capabilities import task_availability, task_type_label
@@ -38,8 +43,8 @@ from ZHSMain.answer import ZHSAnswerRunner, catalog
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi, ZHSError, course_offers
 from ZHSMain.main import ZHSHandler, course_units as zhs_units
 from ZHSMain.memory import AnswerMemory
-from ZHSMain.qa import QA_PACE, REFERENCE_ANSWERS, MAX_QUESTION, MIN_QUESTION, QaBridge, _clean_question, answer_questions, \
-    publish_questions, write_questions
+from ZHSMain.qa import ANSWER_CAP, ASK_PACE, DAILY_ANSWERS, DAILY_QUESTIONS, QA_PACE, QUESTION_CAP, REFERENCE_ANSWERS, \
+    MAX_QUESTION, QaBridge, _clean_question, answer_questions, publish_questions, qa_room, question_flaw, write_questions
 from ai.memory import MoocAnswerMemory
 from ZYKMoocMain.api import ZYKMoocApi
 from ZYKMoocMain.main import ZYKMoocHandler
@@ -57,8 +62,22 @@ MAX_PENDING = 20
 CACHE_TTL = 600
 LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题", "qa": "问答区答题", "ask": "问答区提问"}
 # Jobs that play course content conflict with each other; answering is separate.
-GROUP = {"study": "learn", "review": "learn", "answer": "answer", "qa": "answer", "ask": "answer"}
+# Answering the board and asking on it are separate lines, so drafting questions never waits out an answering run.
+GROUP = {"study": "learn", "review": "learn", "answer": "answer", "qa": "qa", "ask": "ask"}
 QA_POSTS = 300  # posts kept per account for the web list
+PEER_ANSWERS = 5  # a question with 5 valid answers earns its asker the point; more from us adds nothing
+PEER_DELAY = 30 * 60  # seconds a classmate's question waits before people here answer it
+PEERS_MARKER = "qa-peers.on"  # present while the person takes part in 站内互答
+# How often the Zhihuishu sign-in centre is touched for everyone signed in (Studia.keep_passport). Its ticket
+# lapses two hours after last use, taking the Q&A board with it; touching it inside that window keeps it.
+KEEPALIVE = 50 * 60
+# ...but never past eight hours from the scan: in the keep-alive logs every ticket still held at 7.7–7.9 hours and
+# was gone by 8.5–8.8, touched or not (the sign-in centre's defaults: two hours idle, eight at most). Studying
+# carries on; the Q&A board needs a fresh scan after this.
+PASSPORT_TTL = 8 * 3600
+# Set while the sign-in centre says this person's ticket is gone: only a fresh scan brings the Q&A board back, and
+# nothing else tells them (studying carries on), so the page asks for one.
+PASSPORT_LAPSED = "zhs_passport_lapsed"
 DRAFT_TIMEOUT = 300  # reasoning models take one to two minutes to write a single question
 # Running job id -> its Studia app. A job thread is named "studia-job-<id>" and passes that
 # name on to the helper threads it starts, so a log line can be traced back to its job.
@@ -93,6 +112,9 @@ PLATFORMS = {
             "handler": ZYKMoocHandler, "units": None, "answer": False, "review": False, "needs_ai": False, "hidden": True},
     "zhs": {"name": "智慧树", "short": "智慧树", "login": "qr", "api": ZHSApi,
             "handler": ZHSHandler, "units": zhs_units, "answer": True, "review": True, "qa": True, "needs_ai": False},
+    "cx": {"name": "超星", "short": "超星", "login": "qr", "password": True, "api": ChaoxingApi,
+           "handler": ChaoxingStudyHandler, "units": cx_units, "answer": True, "review": False,
+           "needs_ai": False},
 }
 
 
@@ -124,17 +146,20 @@ class Platform:
         # never registered and people scanned again and again.
         self.qr = {}
 
-    def public(self, logged_in):
+    def public(self, logged_in, rescan=False, rescan_at=None):
         spec = self.spec
         return {"id": self.id, "name": spec["name"], "short": spec["short"], "login": spec["login"],
-                "logged_in": logged_in, "features": {"answer": spec["answer"], "review": spec["review"], "qa": bool(spec.get("qa"))}}
+                "password": bool(spec.get("password")), "logged_in": logged_in, "rescan": rescan,
+                "rescan_at": rescan_at,
+                "features": {"study": spec.get("study", True), "answer": spec["answer"],
+                             "review": spec["review"], "qa": bool(spec.get("qa"))}}
 
 
 class Studia:
     """All state behind the web UI; one running job at a time across platforms."""
 
     def __init__(self, store=None, oauth=oauth_login, *, reports_dir="ai_results", oauth_url=None, memory=None, mooc_memory=None,
-                 job_limit=None, zhs_parallel=None):
+                 job_limit=None, zhs_parallel=None, peers=None):
         self.store = store or SettingsStore()
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
@@ -148,6 +173,8 @@ class Studia:
         self.job_limit = job_limit or (lambda: MAX_JOBS)
         # Whether different Zhihuishu courses may play videos at the same time (an admin switch, off by default).
         self.zhs_parallel = zhs_parallel or (lambda: False)
+        # Hosted mode: questions other people on this site asked in the same class, answered first (Hub.peer_questions).
+        self.peers = peers or (lambda course_id, recruit_id: [])
         self.oauth_url = oauth_url
         # Hosted mode passes the site-wide memory; locally it lives next to the settings file.
         self.memory = memory
@@ -209,7 +236,7 @@ class Studia:
         return platform.client is not None or bool(self.store.session(platform.id))
 
     def state(self):
-        return {"platforms": [p.public(self.logged_in(p)) for p in self.platforms.values()],
+        return {"platforms": [p.public(self.logged_in(p), *self.passport(p)) for p in self.platforms.values()],
                 "jobs": self._running(), "history": [_job_public(j) for j in self.history],
                 "job_limit": self.job_limit(), "zhs_parallel": self.zhs_parallel()}
 
@@ -219,7 +246,10 @@ class Studia:
                 saved = self.store.session(platform.id)
                 if not saved:
                     raise HttpError(401, "请先登录%s" % platform.spec["name"])
-                platform.client = platform.spec["api"](access_token=saved["access_token"])
+                if "cookies" in saved:
+                    platform.client = platform.spec["api"](cookies=saved["cookies"])
+                else:
+                    platform.client = platform.spec["api"](access_token=saved["access_token"])
             return platform.client
 
     def drop(self, platform):
@@ -227,6 +257,71 @@ class Studia:
             if platform.client is not None and hasattr(platform.client, "close"):
                 platform.client.close()
             platform.client, platform.rows, platform.entries, platform.cache = None, [], {}, {}
+
+    def passport(self, platform):
+        """(rescan, rescan_at) for the page: whether the Q&A board waits for a fresh scan, and when the ticket
+        from the last scan runs out (None when the scan time is unknown or the ticket is already gone)."""
+        if platform.id != "zhs" or not self.logged_in(platform):
+            return False, None
+        ends = self.passport_ends()
+        if self.store.get(PASSPORT_LAPSED) or (ends is not None and time.time() >= ends):
+            return True, None
+        return False, ends
+
+    def passport_ends(self):
+        since = self.store.get("zhs_signed_in_at")
+        return since + PASSPORT_TTL if isinstance(since, (int, float)) else None
+
+    def keep_passport(self):
+        """Keep this person's Zhihuishu logins from going idle. The business login answers one light call (a
+        login it confirms gone is deleted, so the page asks for a scan). The sign-in centre is touched and the
+        answer logged with the hours since the scan, until it says the ticket is gone past the eight-hour mark:
+        then only a scan helps and asking again would fill the log. True/False for the ticket, None when not
+        signed in or the platform could not be reached."""
+        platform = self.platforms.get("zhs")
+        if platform is None or not self.logged_in(platform):
+            return None
+        self.client(platform)
+        if self.signed_in(platform) is False:  # one call now and then keeps it from going idle while nothing runs
+            self.expire(platform)
+            return None
+        ends = self.passport_ends()
+        if self.store.get(PASSPORT_LAPSED) and (ends is None or time.time() >= ends):
+            return False
+        try:
+            alive = self.client(platform).passport_alive()
+        except Exception as exc:  # a network blip says nothing about the ticket
+            logger.info("%s智慧树登录中心保活没连上：%s", self.who(), type(exc).__name__)
+            return None
+        since = self.store.get("zhs_signed_in_at")
+        age = "（扫码后 %.1f 小时）" % ((time.time() - since) / 3600) if isinstance(since, (int, float)) else ""
+        if alive:
+            logger.info("%s智慧树登录中心票据有效，已保活%s", self.who(), age)
+        else:
+            logger.warning("%s智慧树登录中心票据已失效，问答区要重新扫码才能进%s", self.who(), age)
+        self.passport_seen(alive)
+        self.save_sessions(platform)  # the sign-in centre may have renewed cookies
+        return alive
+
+    def passport_seen(self, alive):
+        """Remember what the sign-in centre last said; the page asks for a fresh scan while the ticket is gone.
+        Open pages hear about a change at once."""
+        if bool(self.store.get(PASSPORT_LAPSED)) == (not alive):
+            return
+        self.store.set(PASSPORT_LAPSED, None if alive else time.time())
+        self.publish({"type": "account"})
+
+    def board_refused(self, platform):
+        """The Q&A board sent us to sign in. Ask the sign-in centre why: a lapsed ticket needs a fresh scan,
+        anything else may pass on another try."""
+        try:
+            alive = self.client(platform).passport_alive()
+        except Exception:
+            alive = None
+        if alive is False:
+            self.passport_seen(False)
+            return "智慧树登录中心过期了，重新扫码后问答区才能进"
+        return "问答区没进去，稍后重试；一直不行就重新扫码智慧树"
 
     def who(self):
         """Log prefix naming the Studia account on a hosted server; request threads carry no job tag."""
@@ -264,11 +359,18 @@ class Studia:
 
     # ------------------------------------------------------------ login
 
-    def login_start(self, pid):
+    def login_start(self, pid, body=None):
         platform = self.platform(pid)
+        body = body or {}
+        # 扫码登录的平台也可以在网页上改用账号密码（平台支持 password 能力时）。
+        # 前端提交账号密码表单时一定带 username/password 字段；空表单也走账号密码，
+        # 由 password_login 报「请输入账号和密码」，而不是悄悄改成扫码。
+        if platform.spec["login"] == "password" or (
+                platform.spec.get("password") and ("username" in body or "password" in body)):
+            return self.password_login(platform, body)
         with self.lock:
             if platform.spec["login"] == "qr":
-                client = ZHSApi()
+                client = platform.spec["api"]()
                 qr_token, image = client.login_qr()
                 qid = secrets.token_hex(6)
                 platform.qr[qid] = {"client": client, "qr": qr_token, "refreshes": 0}
@@ -284,6 +386,42 @@ class Studia:
             platform.login = {"status": "waiting", "message": "已在浏览器打开职教云登录页，登录完成后会自动回到这里"}
             threading.Thread(target=self._browser_login, args=(platform,), daemon=True).start()
             return {"status": "waiting", "message": platform.login["message"]}
+
+    def password_login(self, platform, body):
+        """Sign in with the platform's own account form and keep the cookie jar.
+
+        The password is never stored: only the cookie the platform hands back is saved, so a
+        later request can restore the session without asking again.
+        """
+        username = str(body.get("username") or "").strip()
+        password = str(body.get("password") or "")
+        if not username or not password:
+            raise HttpError(400, "请输入%s账号和密码" % platform.spec["name"])
+        try:
+            client = platform.spec["api"](username, password)
+        except LoginError as exc:
+            raise HttpError(401, str(exc) or "账号或密码不正确")
+        except (AuthenticationExpired, PlatformUnavailable, ChaoxingError) as exc:
+            raise HttpError(502, str(exc) or "登录失败，请稍后重试")
+        try:
+            rows = client.course_list()
+        except AuthenticationExpired:
+            client.close()
+            raise HttpError(401, "%s登录已过期，请重新登录" % platform.spec["name"])
+        except (PlatformUnavailable, ChaoxingError) as exc:
+            client.close()
+            raise HttpError(502, str(exc) or "课程列表读取失败")
+        with self.lock:
+            self.drop(platform)
+            platform.client, platform.rows = client, rows
+            try:
+                self.store.save_session(platform.id, client)
+            except SettingsError:
+                # A failed write must not throw away a login that already works this session.
+                logger.warning("保存%s登录状态失败，本次登录仍可使用", platform.spec["name"], exc_info=True)
+        logger.info("%s%s 登录成功", self.who(), platform.spec["name"])
+        self.publish({"type": "account"})
+        return {"status": "done", "message": "登录成功"}
 
     def _browser_login(self, platform):
         token = self.oauth(timeout=300)
@@ -343,10 +481,11 @@ class Studia:
                     logger.exception("%s%s 扫码已确认，但登录没完成", self.who(), name)
                     client.close()
                     return {"status": "failed", "message": "扫码已确认，但登录没完成（%s），请刷新二维码重试" % (str(exc) or "平台没响应")}
-                try:
-                    client.shared_exam_sso()
-                except (AuthenticationExpired, PlatformUnavailable, ZHSError):
-                    logger.warning("考试会话初始化失败，进入共享课试卷时将重新尝试")
+                if hasattr(client, "shared_exam_sso"):  # 智慧树扫码后还要建考试会话
+                    try:
+                        client.shared_exam_sso()
+                    except (AuthenticationExpired, PlatformUnavailable, ZHSError):
+                        logger.warning("考试会话初始化失败，进入共享课试卷时将重新尝试")
                 for other in platform.qr.values():  # the other pages' codes are moot now
                     other["client"].close()
                 platform.qr.clear()
@@ -354,6 +493,9 @@ class Studia:
                 platform.client = client
                 self.store.save_session(platform.id, client)
                 logger.info("%s%s 扫码登录成功", self.who(), name)
+                if pid == "zhs":  # a scan hands out a new ticket; its eight hours count from here
+                    self.store.set("zhs_signed_in_at", time.time())
+                    self.store.set(PASSPORT_LAPSED, None)
                 self.publish({"type": "account"})  # other tabs and devices pick up the login
                 return {"status": "done", "message": "登录成功"}
             if status == 2:
@@ -361,12 +503,17 @@ class Studia:
                 if login["refreshes"] > QR_REFRESHES:
                     platform.qr.pop(qid)["client"].close()
                     return {"status": "failed", "message": "二维码多次过期，请点击刷新"}
-                login["qr"], image = login["client"].login_qr()
+                try:
+                    refresh = getattr(login["client"], "refresh_login_qr", None)
+                    login["qr"], image = refresh(login["qr"]) if refresh else login["client"].login_qr()
+                except (PlatformUnavailable, ChaoxingError, ZHSError) as exc:
+                    platform.qr.pop(qid)["client"].close()
+                    return {"status": "failed", "message": "二维码刷新失败：%s" % (str(exc) or "平台没响应")}
                 return {"status": "refreshed", "message": "二维码已过期，已自动刷新", "qr": _data_url(image)}
             if status == 3:
                 platform.qr.pop(qid)["client"].close()
-                logger.info("%s%s 在手机上取消了扫码登录", self.who(), name)
-                return {"status": "failed", "message": "已在手机上取消登录"}
+                logger.info("%s%s 扫码登录中止：%s", self.who(), name, result.get("message") or "已在手机上取消")
+                return {"status": "failed", "message": result.get("message") or "已在手机上取消登录"}
             return {"status": "waiting", "message": ""}
 
     def logout(self, pid):
@@ -374,6 +521,9 @@ class Studia:
         with self.lock:  # under the lock so save_sessions() cannot write the old cookies back in between
             self.drop(platform)
             self.store.clear_session(pid)
+            if pid == "zhs":
+                self.store.set(PASSPORT_LAPSED, None)
+                self.store.set("zhs_signed_in_at", None)
         logger.info("%s%s 退出登录", self.who(), platform.spec["name"])
         self.publish({"type": "account"})
         return {}
@@ -384,10 +534,15 @@ class Studia:
         platform = self.platform(pid)
         client = self.client(platform)
         try:
-            result = client.my_course_list(page_size=9999, strict=True) if pid != "zhs" else client.my_course_list()
+            if pid == "cx":
+                rows = client.course_list()
+            else:
+                result = client.my_course_list(page_size=9999, strict=True) if pid != "zhs" else client.my_course_list()
+                rows = result.get("rows") if isinstance(result, dict) else None
         except AuthenticationExpired:
             raise self.expire(platform)
-        rows = result.get("rows") if isinstance(result, dict) else None
+        except ChaoxingError as exc:
+            raise HttpError(502, str(exc) or "课程列表读取失败")
         if not isinstance(rows, list):
             raise PlatformUnavailable("课程列表读取失败，请稍后重试")
         shares = self._score_shares(platform, client, rows)
@@ -461,11 +616,18 @@ class Studia:
         pid = platform.id
         client = self.client(platform)
         try:
-            entries = catalog(client, row) if pid == "zhs" else _mooc_catalog(client, row)
+            if pid == "cx":
+                entries = cx_catalog(client, row)
+            elif pid == "zhs":
+                entries = catalog(client, row)
+            else:
+                entries = _mooc_catalog(client, row)
         except AuthenticationExpired:
             raise self.expire(platform)
         except CaptchaRequired as exc:
             raise HttpError(409, str(exc))
+        except ChaoxingError as exc:
+            raise HttpError(502, str(exc) or "作业列表读取失败")
         except ExamError as exc:
             raise HttpError(502, str(exc) or "试卷列表读取失败")
         listed = {}
@@ -483,7 +645,7 @@ class Studia:
                 score = None if score in ("?", "--") else score
             result.append({
                 "id": task_id,
-                "name": (item.get("name") if pid == "zhs" else paper_display_name(item)) or "未命名试卷",
+                "name": (item.get("name") if pid in ("zhs", "cx") else paper_display_name(item)) or "未命名试卷",
                 "category": "作业" if pid == "zhs" and category == 1 else "考试" if pid == "zhs" else task_type_label(item, category),
                 # A handed-in paper reads 已提交 even once closed or out of attempts; the reason says which.
                 "status": "已提交" if done else availability.label or STATUS_LABEL.get(item.get("_completion_status"), "未作答"),
@@ -510,6 +672,8 @@ class Studia:
             raise self.expire(platform)
         except CaptchaRequired as exc:
             raise HttpError(409, str(exc))
+        except ChaoxingError as exc:
+            raise HttpError(502, str(exc) or "学习单元读取失败") from None
 
     # ------------------------------------------------------------ jobs
 
@@ -517,10 +681,14 @@ class Studia:
         platform = self.platform(str(body.get("platform", "")))
         kind = body.get("type")
         course_id = str(body.get("course", ""))
-        allowed = {"study"} | ({"review"} if platform.spec["review"] else set()) | ({"answer"} if platform.spec["answer"] else set()) | ({"qa", "ask"} if platform.spec.get("qa") else set())
+        allowed = ({"study"} if platform.spec.get("study", True) else set()) | \
+                  ({"review"} if platform.spec["review"] else set()) | \
+                  ({"answer"} if platform.spec["answer"] else set()) | \
+                  ({"qa", "ask"} if platform.spec.get("qa") else set())
         if kind not in allowed:
             raise HttpError(400, "这个平台暂不支持该操作")
         row = self.find_row(platform, course_id)
+        room = self.qa_room(platform, row) if kind in ("qa", "ask") else None  # reads the score: before the lock
         if kind in ("review", "qa", "ask"):
             shares = (platform.cache.get(("shares", (row.get("zhs") or {}).get("courseId"))) or (0, None))[1]
             if not course_features(platform.id, row, shares)["qa" if kind == "ask" else kind]:
@@ -529,7 +697,8 @@ class Studia:
         with self.lock:
             self._check_conflicts(platform.id, course_id, kind)
             job = {"id": secrets.token_hex(4), "kind": kind, "title": LABEL[kind], "course": course_id,
-                   "platform": platform.id, "course_name": row.get("courseName") or "课程", "cancel": threading.Event(),
+                   "platform": platform.id, "course_name": row.get("courseName") or row.get("title") or "课程",
+                   "cancel": threading.Event(),
                    "state": "queued", "summary": "", "started": time.time(), "ended": None, "lines": [], "progress": {},
                    "resumes": resumes}
             if resumes:
@@ -539,9 +708,14 @@ class Studia:
                 target = lambda: self._answer(platform, selected, bool(body.get("auto_submit")), job)
             elif kind == "qa":
                 options = _qa_options(body)
+                if not room["answer"]:
+                    raise HttpError(400, room["why"]["answer"])
+                options["limit"] = min(options["limit"], room["answer"])
                 target = lambda: self._qa(platform, row, options, job)
             elif kind == "ask":
                 texts = _ask_texts(body)
+                if len(texts) > room["ask"]:
+                    raise HttpError(400, room["why"]["ask"] if not room["ask"] else "今天还能发 %d 条提问，删掉几条再发" % room["ask"])
                 target = lambda: self._ask(platform, row, texts, job)
             else:
                 job["minutes"] = (REVIEW_MINUTES if minutes is None else minutes) if kind == "review" else 0
@@ -552,10 +726,12 @@ class Studia:
                 job["state"] = "paused"
             self._take_turn(job)
             self._save()
-        self.publish(dict(_job_public(job), type="job"))
+        public = _job_public(job)
+        self.publish(dict(public, type="job"))
         threading.Thread(target=self._run_job, args=(job, target, platform), daemon=True,
                          name="studia-job-%s" % job["id"]).start()
-        return {"ok": True, "id": job["id"]}
+        # The page shows the job from this reply too, not only from the event stream, which a proxy may hold back.
+        return {"ok": True, "id": job["id"], "job": public}
 
     def _check_conflicts(self, pid, course_id, kind):
         if len(self.jobs) >= MAX_PENDING:
@@ -843,7 +1019,9 @@ class Studia:
                 if client is None:
                     continue
                 try:
-                    if client.access_token:
+                    # Token platforms save the access token; 超星 has none and saves its cookie jar. Only 超星
+                    # restores from cookies, so another platform's client without a token keeps its older copy.
+                    if getattr(client, "access_token", None) or platform.id == "cx":
                         self.store.save_session(platform.id, client)
                 except Exception:  # a cookie jar changing under us, a full disk: keep the older copy
                     logger.warning("保存%s登录状态失败", platform.spec["name"], exc_info=True)
@@ -956,29 +1134,43 @@ class Studia:
         ai = self._ai("请先在设置里添加 AI 模型")
         try:
             workers = self.store.concurrency()["ai"]
-            if platform.id == "zhs":
+            if platform.id == "cx":
+                runner = ChaoxingExerciseRunner(self.client(platform), ai, auto_submit=auto_submit,
+                                                on_progress=on_progress, cancel_event=cancel)
+                unit = "份作业"
+
+                def run_paper(course, item, category):
+                    return runner.run(course, item["_point"], item, item["_job_info"])
+            elif platform.id == "zhs":
                 runner = ZHSAnswerRunner(
                     self.client(platform), ai, auto_submit=auto_submit, on_progress=on_progress,
                     cancel_event=cancel, max_workers=workers,
                     memory=self.memory or AnswerMemory(Path(self.store.path).parent / "zhs-answers.json"))
+                run_paper, unit = runner.run_paper, "份试卷"
             else:
                 # No manual-answer or confirm callbacks: unanswerable papers stay unsubmitted.
                 runner = AnswerRunner(ExamAPI(self.client(platform)), ai, output_dir=self.reports_dir,
                                       auto_submit=auto_submit, on_progress=on_progress, max_workers=workers,
                                       memory=self.mooc_memory or MoocAnswerMemory(Path(self.store.path).parent / "mooc-answers.json"))
-            self.progress_event(job, "begin", "AI 答题", total=len(selected), unit="份试卷")
+                run_paper, unit = runner.run_paper, "份试卷"
+            self.progress_event(job, "begin", "AI 答题", total=len(selected), unit=unit)
             done = 0
             for course, item, category in selected:
                 if cancel.is_set():
                     break
-                name = (item.get("name") if platform.id == "zhs" else paper_display_name(item)) or "试卷"
+                name = (item.get("name") if platform.id in ("zhs", "cx") else paper_display_name(item)) \
+                    or ("作业" if platform.id == "cx" else "试卷")
                 try:
-                    result = runner.run_paper(course, item, category)
+                    result = run_paper(course, item, category)
                 except (CaptchaRequired, StudyTimeLimit):
                     self.progress_event(job, "result", name, status="waiting")
                     raise
-                except TaskUnavailableError as exc:
+                except (TaskUnavailableError, WorkUnavailable) as exc:
                     result = {"status": "skipped", "message": str(exc)}
+                except AIServiceError as exc:
+                    result = {"status": "ai_error", "message": str(exc), "stop_queue": True}
+                except ChaoxingError as exc:
+                    result = {"status": "error", "message": str(exc)}
                 except ExamError as exc:
                     result = {"status": "error", "message": str(exc), "stop_queue": isinstance(exc, ExamServiceError)}
                 status = result["status"]
@@ -991,7 +1183,7 @@ class Studia:
                 done += status in ("submitted", "saved", "preview")
                 if result.get("stop_queue") or status in ("ai_error", "submission_unknown", "submitting", "paused"):
                     break
-            return f"处理完成 {done}/{len(selected)} 份试卷"
+            return "处理完成 %d/%d %s" % (done, len(selected), unit)
         finally:
             ai.session.close()
 
@@ -1002,11 +1194,13 @@ class Studia:
         course_id, recruit_id = z.get("courseId"), z.get("recruitId") or z.get("classId")
         if not course_id or not recruit_id:
             raise HttpError(400, "这门课没有可作答的问答区（缺少课程或班级 ID）")
-        record = lambda kind, question, text, post_id: self._record_post(course_id, kind, question, text, post_id)
-        return _Board(QaBridge(self.client(platform).access_token, course_id=course_id, recruit_id=recruit_id), record)
+        record = lambda kind, question, text, post_id, qid=None: self._record_post(
+            course_id, kind, question, text, post_id, qid=qid, recruit=recruit_id)
+        return _Board(QaBridge(self.client(platform).access_token, course_id=course_id, recruit_id=recruit_id), record,
+                      peers=lambda: self.peers(course_id, recruit_id) if self.sharing_qa() else [])
 
-    def _pace(self, job):
-        return lambda _interval: job["cancel"].wait(random.uniform(*QA_PACE))  # wakes at once on stop
+    def _pace(self, job, pace=None):
+        return lambda _interval: job["cancel"].wait(random.uniform(*(pace or QA_PACE)))  # wakes at once on stop
 
     def _qa(self, platform, row, options, job):
         """问答区：取题目 → AI 写回答 → 发布。只在平台返回 200 后计数。"""
@@ -1023,12 +1217,13 @@ class Studia:
             with self._board(platform, row) as board:
                 stats = answer_questions(board, ai, max_answers=0, limit=limit, interval=1,
                                          state_path=str(Path(self.store.path).parent / "zhs-qa-answers.json"),
-                                         should_stop=job["cancel"].is_set, on_event=event, sleep=self._pace(job))
+                                         should_stop=job["cancel"].is_set, on_event=event, sleep=self._pace(job),
+                                         voice=zlib.crc32((self.owner or "local").encode()))  # one person, one voice
             return _tally("回答了 %d 条提问", stats["answered"], stats["failed"])
         except AuthenticationExpired:
-            # 问答区自己的会话比智慧树登录短，进站还要走一次单点登录跳转；被跳到登录页
-            # 不等于整个登录失效。只停下这个任务，不删登录：真过期了，学习任务会照常发现。
-            raise NeedsRetry("问答区没进去，稍后重试；一直不行就重新扫码智慧树") from None
+            # 问答区每次进站都靠登录中心的票据认人，它比业务登录短命；被跳到登录页不等于整个登录失效。
+            # 只停下这个任务，不删登录：真过期了，学习任务会照常发现。
+            raise NeedsRetry(self.board_refused(platform)) from None
         finally:
             ai.session.close()
 
@@ -1043,10 +1238,35 @@ class Studia:
         try:
             with self._board(platform, row) as board:
                 stats = publish_questions(board, texts, interval=1, should_stop=job["cancel"].is_set,
-                                          on_event=event, sleep=self._pace(job))
+                                          on_event=event, sleep=self._pace(job, ASK_PACE))
             return _tally("发布了 %d 条提问", stats["published"], stats["failed"])
         except AuthenticationExpired:
-            raise NeedsRetry("问答区没进去，稍后重试；一直不行就重新扫码智慧树") from None
+            raise NeedsRetry(self.board_refused(platform)) from None
+
+    def qa_room(self, platform, row):
+        """How many questions and answers this course can still take: what is left under the caps that score
+        and today's share of the daily limit. The platform counts yesterday's posts by this morning; today's
+        come from our own record."""
+        z = row.get("zhs") or {}
+        today = _beijing_day(time.time())
+        posted = {"ask": 0, "answer": 0}
+        for post in self._posts():
+            if str(post.get("course")) == str(z.get("courseId")) and _beijing_day(post.get("at") or 0) == today:
+                posted[post.get("kind")] = posted.get(post.get("kind"), 0) + 1
+        try:
+            counts = self._cached(platform, ("earned", z.get("courseId")), False,
+                                  lambda: self.client(platform).score_earned(z["courseId"], z["recruitId"]))["qa"]
+        except Exception:  # without the score the daily limit still holds
+            counts = {}
+        counts = counts if isinstance(counts, dict) else {}
+        number = lambda value: value if isinstance(value, (int, float)) else 0
+        room, why = {}, {}
+        for kind, valid, cap, daily, word in (("ask", counts.get("questions"), QUESTION_CAP, DAILY_QUESTIONS, "问"),
+                                              ("answer", counts.get("answers"), ANSWER_CAP, DAILY_ANSWERS, "答")):
+            room[kind] = qa_room(number(valid), posted[kind], cap, daily)
+            why[kind] = ("已满 %d 条，再%s不加分" % (cap, word) if number(valid) + posted[kind] >= cap
+                         else "今天%s满了，明天再来" % word)
+        return dict(room, posted=posted, why=why)
 
     def qa_draft(self, pid, body):
         """AI drafts new questions for one course, picking up threads its board has barely answered.
@@ -1066,14 +1286,14 @@ class Studia:
             try:
                 reference = self._cached(platform, ("qa_reference", course_id), False, lambda: self._reference(platform, row))
             except AuthenticationExpired:
-                raise HttpError(409, "问答区没进去，稍后重试；一直不行就重新扫码智慧树") from None
+                raise HttpError(409, self.board_refused(platform)) from None
             try:
-                questions = write_questions(ai, have + reference, 1,
-                                            course_name=row.get("courseName") or "这门课")
-            except AIError as exc:
-                # 模型偶尔只回思考、正文是空的或被截断；给出能重试的提示，别落成 500。
-                raise HttpError(502, "AI 没写出可用的提问：%s；再试一次" % exc) from None
-            return {"questions": questions}
+                units = self._cached(platform, ("units", course_id), False, lambda: platform.spec["units"](self.client(platform), row))
+            except Exception:  # without the lesson list the model asks about the course as a whole
+                units = []
+            topics = [unit["name"] for chapter in units for unit in chapter.get("units", [])]
+            return {"questions": write_questions(ai, have + reference, 1, course_name=row.get("courseName") or "这门课",
+                                                 topics=topics)}
         finally:
             ai.session.close()
 
@@ -1084,8 +1304,27 @@ class Studia:
     def qa_posts(self, pid, course_id):
         platform = self.platform(pid)
         z = self.find_row(platform, course_id).get("zhs") or {}
+        row = self.find_row(platform, course_id)
         mine = [p for p in self._posts() if str(p.get("course")) == str(z.get("courseId"))]
-        return {"posts": mine[-50:][::-1]}
+        return {"posts": mine[-50:][::-1], "room": self.qa_room(platform, row), "peers": self.sharing_qa()}
+
+    # 站内互答 is opt-in both ways: answer classmates' questions first, and let them answer mine. A marker file next
+    # to the person's records, so the site (Hub.peer_questions) can see who takes part without opening their settings.
+    def _peers_marker(self):
+        return Path(self.store.path).parent / PEERS_MARKER
+
+    def sharing_qa(self):
+        return self._peers_marker().exists()
+
+    def set_qa_peers(self, pid, body):
+        self.platform(pid)
+        marker = self._peers_marker()
+        if body.get("on") is True:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+        else:
+            marker.unlink(missing_ok=True)
+        return {"peers": self.sharing_qa()}
 
     def _posts_path(self):
         return Path(self.store.path).parent / "zhs-qa-posts.json"
@@ -1097,11 +1336,12 @@ class Studia:
             return []
         return data if isinstance(data, list) else []
 
-    def _record_post(self, course_id, kind, question, text, post_id):
+    def _record_post(self, course_id, kind, question, text, post_id, qid=None, recruit=None):
         with self.lock:
             posts = self._posts()
-            posts.append({"course": course_id, "kind": kind, "question": question, "text": text,
-                          "id": post_id, "at": time.time()})
+            # recruit and qid let other people on the site find this class's questions and count who answered them.
+            posts.append({"course": course_id, "recruit": recruit, "kind": kind, "question": question, "text": text,
+                          "id": post_id, "qid": qid, "at": time.time()})
             path = self._posts_path()
             temporary = path.with_suffix(".tmp")
             temporary.write_text(json.dumps(posts[-QA_POSTS:], ensure_ascii=False), encoding="utf-8")
@@ -1218,6 +1458,9 @@ STATUS_LABEL = {"submitted": "已提交", "draft": "未提交", "not_started": "
 
 
 def _task_id(pid, item, category):
+    if pid == "cx":
+        # 超星的作业 id 就是 jobid（work-<hash>），同一门课里唯一，跨章节也不会重复。
+        return re.sub(r"[^\w-]", "_", str(item.get("jobid") or item.get("id")))
     if pid == "zhs":
         return str(item["id"])
     return "%s-%s" % (category, re.sub(r"[^\w-]", "_", paper_exam_id(item)))
@@ -1267,32 +1510,38 @@ def _qa_number(body, name, default, low, high):
     return value
 
 
+def _beijing_day(stamp):
+    """The platform's day (Beijing time), whatever the server's time zone: daily limits and its morning update follow it."""
+    return time.strftime("%Y-%m-%d", time.gmtime(stamp + 8 * 3600))
+
+
 def _qa_options(body):
     """问答区答题只让人选一次发几条（1–50）；挑哪些题、隔多久由 _Board 和 QA_PACE 决定。"""
     return {"limit": _qa_number(body, "limit", 10, 1, 50)}
 
 
 def _ask_texts(body):
-    """要发布的提问：1–5 条，每条清理后 MIN_QUESTION–MAX_QUESTION 个字，不重复。"""
+    """要发布的提问：1–5 条，每条清理后按问答区规则检查（question_flaw），不重复。"""
     raw = body.get("texts")
     if not isinstance(raw, list) or not 1 <= len(raw) <= 5:
         raise HttpError(400, "一次发布 1–5 条提问")
     texts = []
-    for item in raw:
+    for number, item in enumerate(raw, 1):
         text = _clean_question(item if isinstance(item, str) else "")
-        if not MIN_QUESTION <= len(text) <= MAX_QUESTION:
-            raise HttpError(400, "每条提问要 %d–%d 个字" % (MIN_QUESTION, MAX_QUESTION))
+        flaw = question_flaw(text)
+        if flaw:  # the board's own rules: it would be judged invalid or deleted, and the answers under it too
+            raise HttpError(400, "第 %d 条%s" % (number, flaw))
         if text not in texts:
             texts.append(text)
     return texts
 
 
 class _Board:
-    """The Q&A board for one job. Picks questions nobody has answered first, then those with one
-    answer; remembers each post (question and text) so the web page can list what went out."""
+    """The Q&A board for one job. Picks questions nobody has answered first, then those with a few
+    answers; remembers each post (question and text) so the web page can list what went out."""
 
-    def __init__(self, bridge, record):
-        self.bridge, self.record, self.asked = bridge, record, {}
+    def __init__(self, bridge, record, peers=lambda: []):
+        self.bridge, self.record, self.peers, self.asked = bridge, record, peers, {}
 
     def __enter__(self):
         self.bridge.__enter__()
@@ -1302,17 +1551,27 @@ class _Board:
         self.bridge.__exit__(*exc)
 
     def questions(self, max_answers=0, limit=10, **_):
-        found = self.bridge.questions(max_answers=0, limit=limit)
+        # Classmates on this site first: each of their questions that gets 5 valid answers earns its asker a point,
+        # and it is a real question, not one of the floods the board is full of. Not right after it went up, though:
+        # a ring of accounts answering each other within minutes is exactly what the board cleans out.
+        now = time.time()
+        found = [{"id": q["id"], "content": q["text"], "answers": q["ours"], "at": q["at"] * 1000, "peer": True,
+                  "seen": q.get("replies") or []}
+                 for q in self.peers() if q["ours"] < PEER_ANSWERS and now - q["at"] > PEER_DELAY][:limit]
+        have = {q["id"] for q in found}
+        found += [q for q in self.bridge.questions(max_answers=0, limit=limit) if q["id"] not in have]
         if len(found) < limit:
+            # Most quiet threads on a busy board are floods or junk that answer_questions passes over;
+            # an ordinary thread with a few answers still scores the same.
             have = {q["id"] for q in found}
-            found += [q for q in self.bridge.questions(max_answers=1, limit=limit) if q["id"] not in have]
+            found += [q for q in self.bridge.questions(max_answers=5, limit=limit) if q["id"] not in have]
         self.asked.update((q["id"], q["content"]) for q in found)
         return found[:limit]
 
     def publish(self, question_id, text):
         answer_id = self.bridge.publish(question_id, text)
         if answer_id:
-            self.record("answer", self.asked.get(question_id, ""), text, answer_id)
+            self.record("answer", self.asked.get(question_id, ""), text, answer_id, qid=question_id)
         return answer_id
 
     def ask(self, text):
@@ -1375,6 +1634,9 @@ def _data_url(image):
 
 
 def _course_id(pid, row):
+    if pid == "cx":
+        # 同一门课可以在多个班级里，courseId + clazzId 才是唯一的。
+        return re.sub(r"[^\w-]", "_", "%s-%s" % (row.get("courseId"), row.get("clazzId")))
     if pid == "zhs":
         z = row.get("zhs") or {}
         return "%s-%s" % (z.get("kind"), z.get("courseId") or z.get("secret"))
@@ -1389,7 +1651,8 @@ def course_features(pid, row, shares=None):
     (ZHSMain.api.course_offers, shared with the terminal menu)."""
     spec = PLATFORMS[pid]
     offers = course_offers(row, shares) if pid == "zhs" else {"review": False, "qa": False}
-    return {"answer": bool(spec["answer"]),
+    return {"study": bool(spec.get("study", True)),
+            "answer": bool(spec["answer"]),
             "review": bool(spec["review"]) and offers["review"],
             "qa": bool(spec.get("qa")) and offers["qa"]}
 
@@ -1401,19 +1664,22 @@ def _course(pid, row, shares=None):
         progress = round(float(progress))
     except (TypeError, ValueError):
         progress = None
-    return {"id": _course_id(pid, row), "platform": pid, "name": row.get("courseName") or "未命名课程",
-            "type": row.get("courseInfoName") or "", "kind": z.get("kind") or pid, "progress": progress,
+    return {"id": _course_id(pid, row), "platform": pid,
+            "name": row.get("courseName") or row.get("title") or "未命名课程",
+            "type": row.get("courseInfoName") or row.get("teacher") or "",
+            "kind": z.get("kind") or pid, "progress": progress,
             "features": course_features(pid, row, shares), "shares": shares}
 
 
 ROUTES = [
     ("GET", r"/api/state", lambda app, m, q, b: app.state()),
-    ("POST", r"/api/platforms/(\w+)/login", lambda app, m, q, b: app.login_start(m[1])),
+    ("POST", r"/api/platforms/(\w+)/login", lambda app, m, q, b: app.login_start(m[1], b)),
     ("GET", r"/api/platforms/(\w+)/login", lambda app, m, q, b: app.login_status(m[1], (q.get("id") or [""])[0])),
     ("POST", r"/api/platforms/(\w+)/logout", lambda app, m, q, b: app.logout(m[1])),
     ("GET", r"/api/platforms/(\w+)/courses", lambda app, m, q, b: app.courses(m[1])),
     ("GET", r"/api/platforms/(\w+)/units", lambda app, m, q, b: app.units(m[1], (q.get("course") or [""])[0], (q.get("fresh") or [""])[0] == "1")),
     ("GET", r"/api/platforms/(\w+)/qa", lambda app, m, q, b: app.qa_posts(m[1], (q.get("course") or [""])[0])),
+    ("POST", r"/api/platforms/(\w+)/qa/peers", lambda app, m, q, b: app.set_qa_peers(m[1], b)),
     ("POST", r"/api/platforms/(\w+)/qa/draft", lambda app, m, q, b: app.qa_draft(m[1], b)),
     ("GET", r"/api/platforms/(\w+)/score", lambda app, m, q, b: app.score(m[1], (q.get("course") or [""])[0], (q.get("fresh") or [""])[0] == "1")),
     ("GET", r"/api/platforms/(\w+)/tasks", lambda app, m, q, b: app.tasks(m[1], (q.get("course") or [""])[0], (q.get("fresh") or [""])[0] == "1")),
@@ -1546,7 +1812,9 @@ def make_handler(access):
             try:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-                self.send_header("Cache-Control", "no-store")
+                self.send_header("Cache-Control", "no-store, no-transform")
+                # Nginx buffers proxied responses by default: events then reached the page in batches, or not at all.
+                self.send_header("X-Accel-Buffering", "no")
                 self.send_header("Connection", "close")  # no length: the stream ends when the socket does
                 self.end_headers()
                 while True:
@@ -1593,6 +1861,8 @@ def make_handler(access):
                 self._send(exc.status, {"error": str(exc)})
             except (PlatformUnavailable, ZHSError) as exc:
                 self._send(502, {"error": str(exc) or "平台暂时无法访问"})
+            except AIError as exc:  # e.g. drafting questions: the model timed out or the key was refused
+                self._send(502, {"error": str(exc)})
             except AuthenticationExpired:
                 self._send(401, {"error": "登录已过期，请重新登录"})
             except Exception:
@@ -1620,6 +1890,7 @@ def serve(port=0, open_browser=True, store=None):
     if open_browser:
         webbrowser.open(url)
     threading.Thread(target=app.resume, daemon=True, name="studia-resume").start()
+    threading.Thread(target=keep_passports, args=(lambda: [app],), daemon=True, name="studia-keepalive").start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1628,6 +1899,21 @@ def serve(port=0, open_browser=True, store=None):
         app.shutdown()
         drain()
         server.server_close()
+
+
+def keep_passports(apps, interval=KEEPALIVE, first=60, stop=None):
+    """Every interval (the first time after `first` seconds, so a fresh deploy shows its state soon), touch the
+    sign-in centre for everyone the apps() callable returns. Runs until stop is set; one person's error is logged
+    and the rest carry on."""
+    stop = stop or threading.Event()
+    wait = first
+    while not stop.wait(wait):
+        for app in apps():
+            try:
+                app.keep_passport()
+            except Exception:
+                logger.warning("智慧树登录中心保活出错", exc_info=True)
+        wait = interval
 
 
 def drain(timeout=20):

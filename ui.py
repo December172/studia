@@ -575,11 +575,11 @@ class TerminalUI:
             self.note("请输入当前列表的编号。" if multiple else "请输入一个课程编号。", "warning")
 
     def library(self, rows, platform, state):
-        platform_name = {1: "资源库", 2: "智慧树"}.get(platform, "MOOC / AI 优课")
+        platform_name = {1: "资源库", 2: "智慧树", 3: "超星"}.get(platform, "MOOC / AI 优课")
         if not rows:
             return self.empty_library(platform_name)
         return self.select(f"我的课程 · {platform_name}", rows,
-                           lambda x: x.get("courseName", "未知课程"),
+                           lambda x: x.get("courseName") or x.get("title") or "未知课程",
                            self.course_details,
                            multiple=False, state=state,
                            actions={"s": "设置", "t": "切换平台", "r": "刷新"})
@@ -618,10 +618,14 @@ class TerminalUI:
 
     def course_menu(self, courses, platform, offers=None):
         """offers：智慧树各项适用的课程（看考核规则）。一门都不适用的项不显示；部分适用的注明是哪几门。"""
-        title = courses[0].get("courseName", "未知课程") if len(courses) == 1 else f"已选 {len(courses)} 门课程"
+        title = ((courses[0].get("courseName") or courses[0].get("title")) if len(courses) == 1
+                 else f"已选 {len(courses)} 门课程")
         choices = [(1, "自动学习", "完成课程学习任务")]
         if platform == 0:
             choices += [(2, "AI 答题", "AI 作答并自动交卷"), (3, "导出题目", "保存题目和已有答案")]
+        elif platform == 3:
+            choices = [(1, "自动学习", "看完视频、完成文档和阅读任务点"),
+                       (2, "AI 答题", "AI 作答章节作业，可选自动交卷")]
         elif platform == 2:
             def only(rows, text):
                 if offers is None or len(rows) == len(courses):
@@ -639,7 +643,8 @@ class TerminalUI:
     def choose_platform(self, current):
         return self.choice("切换平台", [(0, "MOOC / AI 优课", "ai.icve.com.cn"),
                                         (1, "资源库", "zyk.icve.com.cn"),
-                                        (2, "智慧树", "zhihuishu.com")], default=current,
+                                        (2, "智慧树", "zhihuishu.com"),
+                                        (3, "超星", "mooc1.chaoxing.com")], default=current,
                            help_text="Esc 返回 · q 退出")
 
     def connection_problem(self, error):
@@ -671,7 +676,7 @@ class TerminalUI:
         activity_note = "讨论由AI生成，最多20字；课程评价五星，评语由AI生成" if activities else ""
         if self.native_enabled():
             from native_ui import action_page
-            names = [safe_text(c.get("courseName", "未知课程")) for c in courses]
+            names = [safe_text(c.get("courseName") or c.get("title") or "未知课程") for c in courses]
             lines = lambda: ([f"共 {len(names)} 门课程"] + ([notice] if notice else [])
                              + ([activity_note] if activities else []) + names)
             while True:
@@ -685,7 +690,8 @@ class TerminalUI:
                 if result.kind == "quit":
                     raise Cancelled()
                 return None
-        self.table(title, ["课程", "操作"], [(c.get("courseName", "未知课程"), "完成课程学习任务") for c in courses],
+        self.table(title, ["课程", "操作"],
+                   [(c.get("courseName") or c.get("title") or "未知课程", "完成课程学习任务") for c in courses],
                    "回车开始 · Esc 返回 · q 退出")
         if notice:
             self.note(notice)
@@ -695,7 +701,8 @@ class TerminalUI:
             self.note("回车开始；Esc 返回，q 退出。")
 
     def courses(self, rows):
-        return self.select("选择课程", rows, lambda x: x.get("courseName", "未知课程"), self.course_details)
+        return self.select("选择课程", rows,
+                           lambda x: x.get("courseName") or x.get("title") or "未知课程", self.course_details)
 
     def _manual_question_lines(self, question, reason, warning=""):
         rows = []
@@ -754,7 +761,7 @@ class TerminalUI:
 
     @staticmethod
     def course_details(course):
-        parts = [str(course.get("courseInfoName") or "")]
+        parts = [str(course.get("courseInfoName") or course.get("teacher") or "")]
         if course.get("studySpeed") is not None:
             parts.append(f"进度 {course['studySpeed']}%")
         return " · ".join(x for x in parts if x)
@@ -1036,7 +1043,7 @@ class TerminalUI:
                         "保存位置 · tiku/<课程名>/"]
                 for course, item, _ in selected[:5]:
                     from AIMoocMain.export_questions import paper_display_name
-                    rows.append(f"{safe_text(course.get('courseName', ''))} / "
+                    rows.append(f"{safe_text(course.get('courseName') or course.get('title') or '')} / "
                                 f"{safe_text(paper_display_name(item))}")
                 if len(selected) > 5:
                     rows.append(f"… 共 {len(selected)} 份")
@@ -1110,10 +1117,12 @@ class TerminalUI:
                 rows = [f"供应商 · {(config.provider_name or '自定义供应商') if config else '未选择'}",
                         f"模型 · {config.model if config else '未选择'}",
                         f"连接状态 · {connection_text()}",
-                        "执行方式 · " + ("答题并自动交卷" if options["auto_submit"] else "仅生成答案（不交卷，无成绩）")]
+                        "执行方式 · " + ("答题并自动交卷" if options["auto_submit"]
+                                         else "保存答案（不交卷）" if options.get("save_to_platform")
+                                         else "仅生成答案（不交卷，无成绩）")]
                 for course, item, _ in selected[:5]:
                     from AIMoocMain.export_questions import paper_display_name
-                    rows.append(f"{safe_text(course.get('courseName', ''))} / "
+                    rows.append(f"{safe_text(course.get('courseName') or course.get('title') or '')} / "
                                 f"{safe_text(paper_display_name(item))}")
                 if len(selected) > 5:
                     rows.append(f"… 共 {len(selected)} 份")
@@ -1177,10 +1186,14 @@ class TerminalUI:
                 options["connection_status"] = connection_status(config) if connection_status else "未测试"
 
     def edit_answer_options(self, options):
+        # 超星的「不交卷」会把答案暂存到平台，措辞和 MOOC 的本地报告区分开。
+        saved = options.get("save_to_platform")
         try:
-            mode = self.choice("执行方式", [(1, "仅生成答案", "不交卷，无平台成绩"),
-                                            (2, "答题并自动交卷", "全部题目通过校验后提交")],
-                               default=2 if options["auto_submit"] else 1)
+            mode = self.choice("执行方式", [
+                (1, "保存答案" if saved else "仅生成答案",
+                 "答案保存到平台但不交卷，成绩按平台规则" if saved else "不交卷，无平台成绩"),
+                (2, "答题并自动交卷", "全部题目通过校验后提交")],
+                default=2 if options["auto_submit"] else 1)
         except Back:
             return
         options["auto_submit"] = mode == 2
@@ -1243,7 +1256,7 @@ class TerminalUI:
         filters = {"f0": ("全部", lambda x: True)}
         filters.update({f"f{category}": (CATEGORY_FALLBACK[category], lambda x, c=category: x[2] == c)
                         for category in (1, 2, 3)})
-        statuses = {"submitted": "已提交", "draft": "未提交", "not_started": "未作答"}
+        statuses = {"submitted": "已提交", "draft": "未提交", "not_started": "未作答", "unknown": "状态未知"}
         single_course = bool(catalog) and all(x[0] == catalog[0][0] for x in catalog)
         def unsupported(task):
             return is_attachment_task(task[1], task[2])
@@ -1262,7 +1275,7 @@ class TerminalUI:
         return self.select("选择任务", catalog,
                            lambda x: ("[附件作业] " if unsupported(x) else "") + paper_display_name(x[1]),
                            lambda x: task_type_label(x[1], x[2]) if single_course else
-                           f"{x[0].get('courseName', '')} · {task_type_label(x[1], x[2])}",
+                           f"{x[0].get('courseName') or x[0].get('title') or ''} · {task_type_label(x[1], x[2])}",
                            filters=filters, selected=selected, state=state,
                            status=lambda x: availability(x).label or statuses.get(x[1].get("_completion_status"), "?"),
                            selectable=lambda x: availability(x).available, item_hint=hint,
@@ -1290,7 +1303,7 @@ class TerminalUI:
 
     def qa_drafts(self, texts):
         """AI 出好的提问，发之前删改。返回要发的列表；r 换一批返回 None；Esc 或删光返回 []。"""
-        from ZHSMain.qa import MAX_QUESTION, MIN_QUESTION
+        from ZHSMain.qa import _clean_question, question_flaw
         texts, warning = list(texts), ""
         while texts:
             self.table("出好的提问", ["编号", "内容"], list(enumerate(texts, 1)))
@@ -1314,11 +1327,12 @@ class TerminalUI:
             if not raw.startswith("e"):
                 texts.pop(index)
                 continue
-            text = " ".join(self.ask("改成", texts[index]).split())
-            if MIN_QUESTION <= len(text) <= MAX_QUESTION:
+            text = _clean_question(self.ask("改成", texts[index]))
+            flaw = question_flaw(text)  # 问答区规则：会被判无效或删掉的写法不让改进去
+            if flaw is None:
                 texts[index] = text
             else:
-                warning = f"提问要 {MIN_QUESTION}–{MAX_QUESTION} 个字，这条没改。"
+                warning = f"{flaw}，这条没改。"
         return []
 
     def concurrency_editor(self, current, *, message=''):
@@ -1352,6 +1366,7 @@ class TerminalUI:
             (3, "退出 MOOC 登录", "下次浏览器登录先退出共享 SSO，可切换账号"),
             (4, "退出资源库登录", "下次浏览器登录先退出共享 SSO；MOOC 本机登录保留"),
             (5, "退出智慧树登录", "下次使用智慧树时重新扫码"),
+            (6, "退出超星登录", "清除本机保存的超星 Cookie，下次使用超星时重新登录"),
             (0, "返回", "回到功能选择"),
         ], default=0, help_text=f"配置含凭证，请勿分享：{path}", message=message)
 
