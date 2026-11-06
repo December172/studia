@@ -238,6 +238,15 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("作业已提交", result["message"])
 
+    def test_below_pass_line_is_not_reported_as_submitted(self):
+        for stu_status in (5, "5"):
+            with self.subTest(stuStatus=stu_status):
+                client = FakeClient(work_page(SINGLE), confirmation={"status": True, "stuStatus": stu_status})
+                result = runner(client, FakeAI(), auto_submit=True).run(COURSE, POINT, JOB, JOB_INFO)
+                self.assertEqual(result["status"], "error")
+                self.assertIn("未达到及格线", result["message"])
+                self.assertEqual(len(client.payloads), 1)
+
     def test_http_failure_while_submitting_is_unknown(self):
         client = FakeClient(work_page(SINGLE), confirmation=ChaoxingError("连接中断"))
         result = runner(client, FakeAI(), auto_submit=True).run(COURSE, POINT, JOB, JOB_INFO)
