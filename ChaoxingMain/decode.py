@@ -307,22 +307,52 @@ def decode_questions_info(html_text):
     questions = []
     for div in _all(forms[0], "div", "singleQuesId"):
         question = _process_question(div, decoder)
-        if question is not None:
-            questions.append(question)
+        if question is None:
+            raise ValueError("作业包含无法解析的题目，未保存；请到平台核对")
+        key = "answer" + question["id"]
+        value = form.get(key)
+        other_answers = [node.get("name") for node in div.xpath(".//*[@name]")
+                         if node.get("name", "").startswith("answer")
+                         and node.get("name") not in (key, "answertype" + question["id"])
+                         # Multiple-choice spans toggle the hidden answer; they are not submitted controls.
+                         and not (node.tag == "span" and node.get("name") == "answercheck" + question["id"])]
+        if isinstance(value, list):
+            filled = [part for part in value if part.strip()]
+            if len(filled) <= 1:
+                value = filled[0] if filled else ""
+            elif question["type"] == "multiple" and all(
+                    part in {o["value"] for o in question["options"]} for part in filled):
+                value = "".join(sorted(filled))
+            else:
+                value = None  # conflicting controls: do not guess which one the platform will use
+        if other_answers:
+            value = None  # e.g. a multi-blank/editor variant whose serialization is not understood yet
+        question["existing_answer"] = value
+        if value is not None:
+            form[key] = value
+        questions.append(question)
     form["questions"] = questions
     form["answerwqbid"] = ",".join(question["id"] for question in questions) + ","
     return form
 
 
 def _extract_form(form_node):
-    """表单里除答案字段外的隐藏参数，交卷时原样带回。"""
+    """Keep successful controls, including existing answers; unselected choices are not answers."""
     data = {}
-    for node in form_node.xpath(".//input"):
+    for node in form_node.xpath(".//input | .//textarea"):
         name = node.get("name")
-        if not name or "answer" in name:
+        kind = (node.get("type") or "text").lower()
+        if not name or "disabled" in node.attrib or kind in ("submit", "button", "reset", "image", "file"):
             continue
-        data[name] = node.get("value", "")
-    return data
+        values = data.setdefault(name, [])
+        if kind in ("radio", "checkbox") and "checked" not in node.attrib:
+            continue
+        if kind in ("radio", "checkbox") and "value" not in node.attrib:
+            raise ValueError("已有选项缺少提交值，未保存；请到平台核对")
+        value = node.text_content() if node.tag == "textarea" else node.get("value", "")
+        if value not in values:
+            values.append(value)
+    return {name: values[0] if len(values) == 1 else values if values else "" for name, values in data.items()}
 
 
 def _process_question(div_tag, decoder=None):
