@@ -80,6 +80,15 @@ class HostedServerTest(unittest.TestCase):
         self.assertEqual(self.request("GET", "/")[0], 200)
         self.assertEqual(self.request("GET", "/api/mode", host="evil.example")[0], 403)
 
+    def test_study_speedup_is_saved_separately_for_each_user(self):
+        admin, csrf = self.login("admin", "admin-password")
+        self.hub.accounts.create_user("speedup-member", "member-password")
+        member, _ = self.login("speedup-member", "member-password")
+        self.assertFalse(self.request("GET", "/api/settings", cookie=admin)[1]["zhs_speedup"])
+        self.assertEqual(self.request("POST", "/api/settings/study", {"zhs_speedup": True}, cookie=admin, csrf=csrf)[0], 200)
+        self.assertTrue(self.request("GET", "/api/settings", cookie=admin)[1]["zhs_speedup"])
+        self.assertFalse(self.request("GET", "/api/settings", cookie=member)[1]["zhs_speedup"])
+
     def test_admin_sets_job_limits_and_sees_everyones_jobs(self):
         token, csrf = self.login("admin", "admin-password")
         alice = self.hub.accounts.create_user("alice", "alice-password")
