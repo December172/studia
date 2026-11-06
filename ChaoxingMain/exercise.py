@@ -209,6 +209,10 @@ class ChaoxingExerciseRunner:
         if not confirmation.get("status"):
             action = "提交" if submit else "保存"
             return self._result(name, "error", "%s失败：%s" % (action, confirmation.get("msg") or "平台未确认"))
+        if submit and str(confirmation.get("stuStatus")) == "5":
+            # 平台页面 JS 的判断：交卷成功但 stuStatus 为 5 表示「未达到及格线，请重做」。
+            # 重做页会预填这次的答案，再跑一遍只会原样重交，所以只报告、不自动重做。
+            return self._result(name, "error", "已交卷，但未达到及格线，平台要求重做；请到平台修改错题后再交")
         message = self._summary(len(values), len(questions), submit, len(problems))
         logger.info("%s：%s", name, message)
         return self._result(name, "submitted" if submit else "saved", message)
