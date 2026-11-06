@@ -209,7 +209,14 @@ class ZhsApplicationTests(unittest.TestCase):
         self.assertEqual(kwargs["course_rows"], self.courses)
         self.assertEqual(kwargs["on_progress"], self.view.on_progress)
         self.assertEqual(kwargs["max_workers"], self.store.concurrency()["study"])
+        self.assertIs(kwargs["speedup"], False)
         verify.assert_not_called()
+
+    def test_terminal_study_passes_the_saved_speedup_switch(self):
+        self.store.save_zhs_speedup(True)
+        with patch("app.ZHSHandler") as handler:
+            self.app.study(2, Mock(access_token="cookies"), self.courses)
+        self.assertIs(handler.call_args.kwargs["speedup"], True)
 
     def test_settings_option_five_clears_zhs_without_browser_logout(self):
         self.store.save_session("zhs", Mock(access_token="cookies"))

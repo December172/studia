@@ -93,8 +93,9 @@ class CourseWorkspace:
                 if mode == 1:
                     notice = ""
                     if self.platform == 2:
-                        notice = ("逐个视频实时播放，耗时约为视频时长的三分之二；"
-                                  "平台限制同一账号同时只能看一个视频。")
+                        speed = "1.5" if self.store.zhs_speedup() else "1"
+                        notice = ("按 %s 倍速逐个视频实时播放；"
+                                  "平台限制同一账号同时只能看一个视频。" % speed)
                     elif self.platform == 3:
                         notice = ("超星学习：多个章节同时处理，视频先尝试直接完成；"
                                   "章节测验在「AI 答题」里做。")

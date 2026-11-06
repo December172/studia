@@ -57,6 +57,27 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(self.store.path.read_bytes(), before)
         self.assertEqual(list(self.store.directory.glob(".settings-*")), [])
 
+    def test_study_speedup_is_opt_in_and_persists(self):
+        self.assertFalse(self.store.zhs_speedup())
+        self.store.set("concurrency", {"ai": 2, "study": 3})  # An existing configuration without the switch.
+        self.assertFalse(self.store.zhs_speedup())
+        for enabled in (True, False):
+            self.store.save_zhs_speedup(enabled)
+            self.assertIs(SettingsStore(self.store.directory).zhs_speedup(), enabled)
+        for invalid in ("false", "true", 1, None, {}):
+            self.store.set("zhs_speedup", invalid)
+            self.assertFalse(self.store.zhs_speedup())
+            with self.assertRaises(SettingsError):
+                self.store.save_zhs_speedup(invalid)
+
+    def test_terminal_settings_can_enable_and_disable_study_speedup(self):
+        self.ui.input_fn = Mock(side_effect=["7", "0"])
+        self.assertFalse(self.app.manage_settings())
+        self.assertTrue(self.store.zhs_speedup())
+        self.ui.input_fn = Mock(side_effect=["7", "0"])
+        self.assertFalse(self.app.manage_settings())
+        self.assertFalse(self.store.zhs_speedup())
+
     def test_corrupt_file_is_not_overwritten_or_echoed(self):
         self.store.directory.mkdir()
         self.store.path.write_text("secret-key BROKEN", encoding="utf-8")
