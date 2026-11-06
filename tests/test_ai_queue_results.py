@@ -156,5 +156,6 @@ class ExamFailureClassificationTests(unittest.TestCase):
         clock=AttemptClock(api,{'courseId':'c'},'exam','task',None,False)
         clock.stop_event=Mock()
         clock.stop_event.wait.return_value=False
+        clock.stop_event.is_set.return_value=False
         clock._loop()
         with self.assertRaises(exam_api.ExamServiceError):clock.check()

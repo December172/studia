@@ -31,17 +31,19 @@ from ai.client import AIClient, AIConfig, AIError, AIServiceError
 from ai.runner import AnswerRunner
 from base.concurrency import INTERACTIVE_WORKERS
 from base.auth import AuthenticationExpired, PlatformUnavailable
+from base.quiet_hours import CHECKPOINTS, QUIET_MESSAGE, quiet_hours
 from ChaoxingMain.api import ChaoxingApi, ChaoxingError, LoginError, WorkUnavailable
 from ChaoxingMain.exercise import ChaoxingExerciseRunner
 from ChaoxingMain.main import catalog as cx_catalog, course_units as cx_units
 from ChaoxingMain.study import ChaoxingStudyHandler
 from NewMoocMain.oauth_login import oauth_login
-from settings import DEFAULT_PROFILE_ID, SettingsError, SettingsStore
+from settings import DEFAULT_PROFILE_ID, ModelProfile, SettingsError, SettingsStore
 from task_capabilities import task_availability, task_type_label
 from task_metrics import completion_with_score, score_text
 from ZHSMain.answer import ZHSAnswerRunner, catalog
 from ZHSMain.api import CaptchaRequired, StudyTimeLimit, ZHSApi, ZHSError, course_offers
 from ZHSMain.main import ZHSHandler, course_units as zhs_units
+from ZHSMain.meeting import MeetingHandler
 from ZHSMain.memory import AnswerMemory
 from ZHSMain.qa import ANSWER_CAP, ASK_PACE, DAILY_ANSWERS, DAILY_QUESTIONS, QA_PACE, QUESTION_CAP, REFERENCE_ANSWERS, \
     MAX_QUESTION, QaBridge, _clean_question, answer_questions, publish_questions, qa_room, question_flaw, write_questions
@@ -58,12 +60,14 @@ HISTORY = 20
 MAX_JOBS = 4
 # ponytail: running plus waiting jobs per person, so one browser cannot pile up threads.
 MAX_PENDING = 20
+SHARED_MODEL_ID = "admin-shared"
 # The platform's unit and paper lists take seconds to tens of seconds; reuse them for a while.
 CACHE_TTL = 600
-LABEL = {"study": "自动学习", "review": "每日复习", "answer": "AI 答题", "qa": "问答区答题", "ask": "问答区提问"}
+LABEL = {"study": "自动学习", "review": "每日复习", "meeting": "见面课", "answer": "AI 答题", "qa": "问答区答题", "ask": "问答区提问",
+         "mastery": "掌握度学习"}
 # Jobs that play course content conflict with each other; answering is separate.
 # Answering the board and asking on it are separate lines, so drafting questions never waits out an answering run.
-GROUP = {"study": "learn", "review": "learn", "answer": "answer", "qa": "qa", "ask": "ask"}
+GROUP = {"study": "learn", "review": "learn", "meeting": "learn", "answer": "answer", "mastery": "answer", "qa": "qa", "ask": "ask"}
 QA_POSTS = 300  # posts kept per account for the web list
 PEER_ANSWERS = 5  # a question with 5 valid answers earns its asker the point; more from us adds nothing
 PEER_DELAY = 30 * 60  # seconds a classmate's question waits before people here answer it
@@ -159,8 +163,9 @@ class Studia:
     """All state behind the web UI; one running job at a time across platforms."""
 
     def __init__(self, store=None, oauth=oauth_login, *, reports_dir="ai_results", oauth_url=None, memory=None, mooc_memory=None,
-                 job_limit=None, zhs_parallel=None, peers=None):
+                 job_limit=None, zhs_parallel=None, peers=None, shared_store=None):
         self.store = store or SettingsStore()
+        self.shared_store = shared_store
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
         self.platforms = {pid: Platform(pid) for pid, spec in PLATFORMS.items() if not spec.get("hidden")}
@@ -238,7 +243,7 @@ class Studia:
     def state(self):
         return {"platforms": [p.public(self.logged_in(p), *self.passport(p)) for p in self.platforms.values()],
                 "jobs": self._running(), "history": [_job_public(j) for j in self.history],
-                "job_limit": self.job_limit(), "zhs_parallel": self.zhs_parallel()}
+                "job_limit": self.job_limit(), "zhs_parallel": self.zhs_parallel(), "quiet_hours": quiet_hours()}
 
     def client(self, platform):
         with self.lock:
@@ -677,24 +682,33 @@ class Studia:
 
     # ------------------------------------------------------------ jobs
 
-    def start_job(self, body, *, minutes=None, resumes=0, paused=False):
+    def start_job(self, body, *, minutes=None, resumes=0, paused=False, restoring=False):
+        if not restoring:
+            self._check_daytime()
         platform = self.platform(str(body.get("platform", "")))
         kind = body.get("type")
         course_id = str(body.get("course", ""))
         allowed = ({"study"} if platform.spec.get("study", True) else set()) | \
                   ({"review"} if platform.spec["review"] else set()) | \
                   ({"answer"} if platform.spec["answer"] else set()) | \
+                  ({"mastery", "meeting"} if platform.id == "zhs" else set()) | \
                   ({"qa", "ask"} if platform.spec.get("qa") else set())
         if kind not in allowed:
             raise HttpError(400, "这个平台暂不支持该操作")
         row = self.find_row(platform, course_id)
+        if kind == "mastery" and not course_features(platform.id, row)["mastery"]:
+            raise HttpError(400, "掌握度学习目前仅支持智慧树共享课")
         room = self.qa_room(platform, row) if kind in ("qa", "ask") else None  # reads the score: before the lock
+        if kind == "meeting" and (row.get("zhs") or {}).get("kind") != "shared":
+            raise HttpError(400, "见面课仅支持智慧树共享课")
         if kind in ("review", "qa", "ask"):
             shares = (platform.cache.get(("shares", (row.get("zhs") or {}).get("courseId"))) or (0, None))[1]
             if not course_features(platform.id, row, shares)["qa" if kind == "ask" else kind]:
                 raise HttpError(400, "这门课的考核里没有%s，不用%s" % (
                     ("学习习惯分", "每日复习") if kind == "review" else ("问答互动分", "刷问答区")))
         with self.lock:
+            if not restoring:  # Course/score reads above may have crossed 23:00.
+                self._check_daytime()
             self._check_conflicts(platform.id, course_id, kind)
             job = {"id": secrets.token_hex(4), "kind": kind, "title": LABEL[kind], "course": course_id,
                    "platform": platform.id, "course_name": row.get("courseName") or row.get("title") or "课程",
@@ -706,6 +720,8 @@ class Studia:
             if kind == "answer":
                 selected = self._selected(platform, course_id, body.get("tasks") or [])
                 target = lambda: self._answer(platform, selected, bool(body.get("auto_submit")), job)
+            elif kind == "mastery":
+                target = lambda: self._mastery(platform, row, job)
             elif kind == "qa":
                 options = _qa_options(body)
                 if not room["answer"]:
@@ -722,6 +738,7 @@ class Studia:
                 target = lambda: self._study(platform, row, job["minutes"], job)
             self.jobs[job["id"]] = job
             JOBS[job["id"]] = self
+            CHECKPOINTS["studia-job-%s" % job["id"]] = lambda stop=None: self._checkpoint(job, stop)
             if paused:  # an administrator's pause, carried over a restart
                 job["state"] = "paused"
             self._take_turn(job)
@@ -785,6 +802,7 @@ class Studia:
     def continue_job(self, job_id, who=""):
         """A paused job joins the back of the queue (the arrows move it up from there)."""
         with self.lock:
+            self._check_daytime()
             job = self._job(job_id)
             if job.get("hold") == "pause":   # still stopping: let it come back queued instead
                 job["hold"] = "queue"
@@ -804,6 +822,7 @@ class Studia:
         job_limit() jobs in line run: a learning job pushed out steps aside and later carries on from the
         platform's progress. Answering is never interrupted."""
         with self.lock:
+            self._check_daytime()
             job = self._job(job_id)
             running, queue = self._line()
             if job not in queue:
@@ -866,6 +885,42 @@ class Studia:
         self.publish({"type": "log", "text": text, "level": "", "job": job["id"]})
         self.publish(dict(_job_public(job), type="job"))
 
+    def _check_daytime(self):
+        if quiet_hours()["active"]:
+            raise HttpError(409, QUIET_MESSAGE)
+
+    def enforce_quiet_hours(self):
+        """Stop playback through its existing cancellation path; leave papers/posts in place.
+
+        Browser players must close, since blocking Python alone leaves JavaScript playing.
+        Answers wait at request boundaries instead: restarting them could repeat a submission.
+        """
+        active = quiet_hours()["active"]
+        with self.lock:
+            changed = False
+            for job in list(self.jobs.values()):
+                night = active and job["state"] != "paused" and job.get("hold") != "pause"
+                if bool(job.get("night_paused")) == night:
+                    continue
+                job["night_paused"] = night
+                changed = True
+                if night and job["state"] == "running" and GROUP[job["kind"]] == "learn" and not job["cancel"].is_set():
+                    job["hold"] = "night"
+                    job["cancel"].set()
+                self._announce(job, QUIET_MESSAGE if night else "夜间暂停时段结束，任务按原顺序继续")
+            if changed:
+                self._save()
+
+    def _checkpoint(self, job, stop=None):
+        if stop is not None and stop.is_set():
+            raise KeyboardInterrupt
+        if not quiet_hours()["active"]:
+            return
+        self.enforce_quiet_hours()
+        while quiet_hours()["active"]:
+            if job["cancel"].wait(1) or job["id"] not in self.jobs or (stop is not None and stop.is_set()):
+                raise KeyboardInterrupt
+
     def _set_aside(self, job):
         """The job's work stopped because an administrator paused it or gave its slot away (job["hold"]).
         Keep it in the list, paused or queued, for its thread to take its turn again. Returns False
@@ -901,6 +956,8 @@ class Studia:
         """Start a waiting job when this person has a free place; first come, first served, unless an
         the person or an administrator moved it (move_job). A paused job waits for continue_job.
         Call with self.lock held. Returns whether the job may run."""
+        if quiet_hours()["active"]:
+            return False
         if job["state"] == "running":
             return True
         if job["state"] == "paused":
@@ -929,8 +986,8 @@ class Studia:
         state, summary = "done", ""
         try:
             while True:
-                self._wait_turn(job)
                 try:
+                    self._wait_turn(job)
                     summary = target() or "已完成"
                 except KeyboardInterrupt:
                     if not self._set_aside(job):
@@ -969,6 +1026,7 @@ class Studia:
                 self._save()
             self.publish(dict(_job_public(job), type="job"))
             JOBS.pop(job["id"], None)
+            CHECKPOINTS.pop("studia-job-%s" % job["id"], None)
 
     # ------------------------------------------------------------ restarts
 
@@ -994,7 +1052,9 @@ class Studia:
                    "resumes": 0 if now - (j.get("running_since") or now) > STEADY else j.get("resumes", 0),
                    # Review time still owed: its length minus what it has already played.
                    "minutes": max(0, j.get("minutes", 0) - (now - j["running_since"]) / 60 if j.get("running_since") else j.get("minutes", 0)),
-                   "paused": j["state"] == "paused" or j.get("hold") == "pause"}
+                   "paused": j["state"] == "paused" or j.get("hold") == "pause",
+                   "night_paused": bool(j.get("night_paused")) or (quiet_hours()["active"] and
+                                   j["state"] != "paused" and j.get("hold") != "pause")}
                   # In queue order, so a restart starts them again in the order an administrator left them.
                   for j in sorted(self.jobs.values(), key=lambda j: (j["state"] != "running", _order(j)))]
         data = {"stopped_at": stopped_at, "saved_at": now, "active": active,
@@ -1047,15 +1107,16 @@ class Studia:
             if kind == "review" and entry.get("minutes", 0) < 1:
                 continue
             # A paused job does not run by itself, so it comes back however long the service was down.
-            paused = entry.get("paused") is True and kind in ("study", "review")
-            if kind in ("answer", "qa", "ask") or (not paused and (not fresh or entry.get("resumes", 0) >= RESUME_LIMIT)):
+            paused = entry.get("paused") is True and GROUP[kind] == "learn"
+            night = entry.get("night_paused") is True
+            if kind in ("answer", "mastery", "qa", "ask") or (not paused and not night and (not fresh or entry.get("resumes", 0) >= RESUME_LIMIT)):
                 self._record(entry, "stopped", INTERRUPTED)
                 continue
             body = {"platform": entry.get("platform"), "type": kind, "course": entry.get("course")}
             for attempt in range(3):
                 try:
                     self.start_job(body, minutes=max(1, round(entry.get("minutes", 0))),
-                                   resumes=0 if paused else entry.get("resumes", 0) + 1, paused=paused)
+                                   resumes=0 if paused or night else entry.get("resumes", 0) + 1, paused=paused, restoring=True)
                     break
                 except HttpError as exc:
                     if exc.status == 401:
@@ -1089,31 +1150,41 @@ class Studia:
         """An AI client for the configured model. With a timeout, each call may take at least that long
         and a model whose request format is known is not tested first: on a slow reasoning model the
         test is another minute the person sits waiting for."""
-        config = self.store.ai_config()
+        config = self.ai_config()
         if config is None:
             raise HttpError(400, cancel_message)
         ai = AIClient(replace(config, timeout=max(int(config.timeout or 0), timeout)))
         if timeout and config.api_format != "auto":
             return ai
+        store = self._health_store(config)
         try:
             ai.check_connection()
         except AIError as exc:
             ai.session.close()
-            self.store.save_ai_health(config, "error", str(exc))
+            store.save_ai_health(config, "error", str(exc))
             raise
-        self.store.save_ai_health(config, "ok")
+        store.save_ai_health(ai.config, "ok", previous_config=config)
         return ai
 
     def _study(self, platform, row, minutes, job):
         spec = platform.spec
         kwargs = {"client": self.client(platform), "course_rows": [row], "on_progress": self.progress_of(job),
                   "cancel_event": job["cancel"], "max_workers": self.store.concurrency()["study"]}
+        if job.get("kind") == "meeting":
+            handler = MeetingHandler(**kwargs)
+            if handler.blocked is not None:
+                raise handler.blocked
+            if handler.failed:
+                raise ZHSError(handler.summary)
+            if handler.pending:
+                raise NeedsRetry(handler.summary + "；未开放或需现场参加的课请查看日志")
+            return handler.summary
         ai = None
         captcha_ai = None
         if spec["needs_ai"]:
             ai = kwargs["activity_ai"] = self._ai("MOOC 学习会自动参与讨论和评价，请先在设置里添加 AI 模型")
         elif platform.id == "zhs":
-            config = self.store.ai_config()
+            config = self.ai_config()
             if config is not None:
                 captcha_ai = kwargs["captcha_ai"] = AIClient(config)
         if minutes:
@@ -1128,6 +1199,22 @@ class Studia:
             if captcha_ai is not None:
                 captcha_ai.session.close()
         return "今日复习完成" if minutes else "学习完成"
+
+    def _mastery(self, platform, row, job):
+        ai = self._ai("掌握度练习需要 AI，请先在设置里添加模型")
+        try:
+            runner = ZHSAnswerRunner(
+                self.client(platform), ai, auto_submit=True, on_progress=self.progress_of(job),
+                cancel_event=job["cancel"], max_workers=self.store.concurrency()["ai"],
+                memory=self.memory or AnswerMemory(Path(self.store.path).parent / "zhs-answers.json"))
+            result = runner.run_mastery(row)
+            if result["status"] == "ai_error":
+                self._health_store(ai.config).save_ai_health(ai.config, "error", result["message"])
+            if result["status"] not in ("submitted", "skipped"):
+                raise HttpError(502, result["message"])
+            return result["message"]
+        finally:
+            ai.session.close()
 
     def _answer(self, platform, selected, auto_submit, job):
         cancel, on_progress = job["cancel"], self.progress_of(job)
@@ -1349,18 +1436,50 @@ class Studia:
 
     # ------------------------------------------------------------ settings
 
+    def _shared_config(self):
+        if self.shared_store is not None and self.shared_store.get("enabled", False):
+            return self.shared_store.ai_config()
+        return None
+
+    def ai_config(self):
+        if self.shared_store is not None and self.store.get("use_shared_model", False):
+            config = self._shared_config()
+            if config is None:
+                raise HttpError(409, "管理员共享模型已停用，请在设置里重新选择 AI 模型")
+            return config
+        return self.store.ai_config()
+
+    def _model_profiles(self):
+        profiles = self.store.ai_profiles()
+        shared = self._shared_config()
+        selected = self.shared_store is not None and self.store.get("use_shared_model", False)
+        if selected:
+            for profile in profiles:
+                profile.active = False
+        if shared is not None:
+            profiles.insert(0, ModelProfile(SHARED_MODEL_ID, shared, selected))
+        return profiles
+
+    def _health_store(self, config):
+        shared = self._shared_config()
+        if shared is not None and self.store.ai_fingerprint(shared) == self.store.ai_fingerprint(config):
+            return self.shared_store
+        return self.store
+
     def settings(self):
         models = []
-        for profile in self.store.ai_profiles():
-            config, health = profile.config, self.store.ai_health(profile.config)
+        for profile in self._model_profiles():
+            config, health = profile.config, self._health_store(profile.config).ai_health(profile.config)
+            shared = profile.id == SHARED_MODEL_ID
             models.append({"id": profile.id, "provider": config.provider_name, "model": config.model,
-                           "base_url": config.base_url, "key_hint": key_hint(config.api_key), "active": profile.active,
+                           "base_url": config.base_url, "key_hint": "" if shared else key_hint(config.api_key),
+                           "active": profile.active, "shared": shared,
                            "health": health.get("status") or "", "health_message": health.get("message") or "",
-                           "deletable": profile.id != DEFAULT_PROFILE_ID})
+                           "deletable": profile.id not in (DEFAULT_PROFILE_ID, SHARED_MODEL_ID)})
         return {"models": models, "concurrency": self.store.concurrency()}
 
     def _profile(self, profile_id):
-        for profile in self.store.ai_profiles():
+        for profile in self._model_profiles():
             if profile.id == profile_id:
                 return profile
         raise HttpError(404, "没有找到这个模型")
@@ -1370,7 +1489,7 @@ class Studia:
         try:
             return AIConfig(str(body.get("base_url", "")), str(body.get("model", "")), key,
                             provider_name=str(body.get("provider_name", "")),
-                            api_format=previous.api_format if previous else "chat_completions")
+                            api_format=str(body.get("api_format") or (previous.api_format if previous else "chat_completions")))
         except ValueError as exc:
             raise HttpError(400, str(exc))
 
@@ -1378,13 +1497,15 @@ class Studia:
         try:
             profile_id = self.store.save_ai_profile(self._config(body))
             if body.get("activate", True):
-                self.store.activate_ai_profile(profile_id)
+                self.activate_model({"id": profile_id})
         except SettingsError as exc:
             raise HttpError(400, str(exc))
         return {"id": profile_id}
 
     def update_model(self, profile_id, body):
         profile = self._profile(profile_id)
+        if profile_id == SHARED_MODEL_ID:
+            raise HttpError(400, "共享模型由管理员统一配置")
         try:
             self.store.save_ai_profile(self._config(body, profile.config), profile_id)
         except SettingsError as exc:
@@ -1393,6 +1514,8 @@ class Studia:
 
     def delete_model(self, profile_id):
         self._profile(profile_id)
+        if profile_id == SHARED_MODEL_ID:
+            raise HttpError(400, "共享模型由管理员统一配置")
         try:
             self.store.delete_ai_profile(profile_id)
         except SettingsError as exc:
@@ -1401,20 +1524,29 @@ class Studia:
 
     def test_model(self, profile_id):
         config = self._profile(profile_id).config
+        previous = replace(config)
+        store = self.shared_store if profile_id == SHARED_MODEL_ID else self.store
         client = AIClient(config)
         try:
             client.check_connection()
         except AIError as exc:
-            self.store.save_ai_health(config, "error", str(exc))
+            store.save_ai_health(config, "error", str(exc))
             return {"health": "error", "message": str(exc)}
         finally:
             client.session.close()
-        self.store.save_ai_health(config, "ok")
+        store.save_ai_health(config, "ok", previous_config=previous)
         return {"health": "ok", "message": "连接正常"}
 
     def activate_model(self, body):
+        profile_id = str(body.get("id", ""))
+        self._profile(profile_id)
+        if profile_id == SHARED_MODEL_ID:
+            self.store.set("use_shared_model", True)
+            return {}
         try:
-            self.store.activate_ai_profile(str(body.get("id", "")))
+            self.store.activate_ai_profile(profile_id)
+            if self.shared_store is not None:
+                self.store.set("use_shared_model", None)
         except (KeyError, SettingsError, ValueError):
             raise HttpError(404, "没有找到这个模型")
         return {}
@@ -1619,8 +1751,12 @@ def _track(progress, event):
 def _job_public(job):
     if job is None:
         return None
-    return {key: job.get(key) for key in ("id", "kind", "title", "course", "course_name", "platform", "state",
+    public = {key: job.get(key) for key in ("id", "kind", "title", "course", "course_name", "platform", "state",
                                       "summary", "started", "ended", "running_since", "lines", "progress", "hold")} | {"order": _order(job)}
+    public["night_paused"] = bool(job.get("night_paused")) and job["state"] in ("running", "queued")
+    if public["night_paused"]:
+        public["state"] = "paused"
+    return public
 
 
 def _order(job):
@@ -1654,7 +1790,8 @@ def course_features(pid, row, shares=None):
     return {"study": bool(spec.get("study", True)),
             "answer": bool(spec["answer"]),
             "review": bool(spec["review"]) and offers["review"],
-            "qa": bool(spec.get("qa")) and offers["qa"]}
+            "qa": bool(spec.get("qa")) and offers["qa"],
+            "mastery": offers.get("mastery", False)}
 
 
 def _course(pid, row, shares=None):
@@ -1891,14 +2028,28 @@ def serve(port=0, open_browser=True, store=None):
         webbrowser.open(url)
     threading.Thread(target=app.resume, daemon=True, name="studia-resume").start()
     threading.Thread(target=keep_passports, args=(lambda: [app],), daemon=True, name="studia-keepalive").start()
+    stop = threading.Event()
+    threading.Thread(target=watch_quiet_hours, args=(stop,), daemon=True, name="studia-quiet-hours").start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        stop.set()
         app.shutdown()
         drain()
         server.server_close()
+
+
+def watch_quiet_hours(stop):
+    """One site-wide watcher, including jobs whose browser keeps playing without Python requests."""
+    while not stop.is_set():
+        for app in set(JOBS.copy().values()):
+            try:
+                app.enforce_quiet_hours()
+            except Exception:
+                logger.exception("夜间任务调度失败")
+        stop.wait(1)
 
 
 def keep_passports(apps, interval=KEEPALIVE, first=60, stop=None):
@@ -1908,7 +2059,12 @@ def keep_passports(apps, interval=KEEPALIVE, first=60, stop=None):
     stop = stop or threading.Event()
     wait = first
     while not stop.wait(wait):
+        if quiet_hours()["active"]:
+            wait = min(interval, 60)
+            continue
         for app in apps():
+            if quiet_hours()["active"]:
+                break
             try:
                 app.keep_passport()
             except Exception:

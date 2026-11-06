@@ -10,6 +10,7 @@ import time
 from urllib.parse import quote
 
 import requests
+from base.quiet_hours import checkpoint
 
 from AIMoocMain.export_questions import unwrap_paper
 
@@ -64,6 +65,7 @@ class ExamAPI:
         self.session.headers.update({"Authorization": "Bearer " + (client.access_token or "")})
 
     def request(self, method, endpoint, **kwargs):
+        checkpoint()
         try:
             response = self.session.request(method, self.base_url + endpoint, timeout=(10, 30), allow_redirects=False, **kwargs)
         except requests.RequestException:

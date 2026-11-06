@@ -25,6 +25,7 @@ import time
 from MoocMain.log import Logger
 from ai.client import AIResponseError
 from base.auth import PlatformUnavailable
+from base.quiet_hours import checkpoint
 from ZHSMain.api import AuthenticationExpired, CaptchaRequired, ZHSApiError
 
 logger = Logger(__name__).get_log()
@@ -136,6 +137,7 @@ class QaBridge:
 
         reason = ""
         for _ in range(3):
+            checkpoint()
             try:
                 self._page.goto(self.url, wait_until="domcontentloaded", timeout=self.timeout)
                 self._page.wait_for_load_state("networkidle", timeout=15000)
@@ -162,12 +164,14 @@ class QaBridge:
         raise PlatformUnavailable("问答区页面没有加载完成，请稍后重试")
 
     def _eval(self, script, arg):
+        checkpoint()
         try:
             return self._page.evaluate(script, arg)
         except Exception as exc:  # 运行中页面刷新：重新注入一次再试
             if "Execution context was destroyed" not in str(exc):
                 raise
             self._prepare()
+            checkpoint()
             return self._page.evaluate(script, arg)
 
     def close(self):

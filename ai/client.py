@@ -9,6 +9,7 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
 import requests
+from base.quiet_hours import checkpoint
 
 
 class AIError(RuntimeError):
@@ -160,6 +161,7 @@ class AIClient:
             body = {"model": self.config.model, "instructions": system,
                     "input": user if not images else [{"role": "user", "content": user}],
                     "stream": False, "store": False}
+        checkpoint()
         try:
             response = self.session.post(
                 self.config.endpoint, json=body,

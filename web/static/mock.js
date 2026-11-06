@@ -18,9 +18,9 @@ const courses = {
       features: { study: true, answer: true, review: false } }],
   zhs: [
     { id: "shared-1", platform: "zhs", name: "新一代信息技术导论", type: "共享课", kind: "shared", progress: 100,
-      features: { answer: true, review: true, qa: true }, shares: { progress: 20, habit: 20, interactive: 10, knowledge: 0, test: 10, meet: 0, final: 40 } },
+      features: { answer: true, review: true, qa: true, mastery: true }, shares: { progress: 20, habit: 20, interactive: 10, knowledge: 0, test: 10, meet: 0, final: 40 } },
     { id: "shared-2", platform: "zhs", name: "通信基础与计算机网络", type: "共享课", kind: "shared", progress: 64,
-      features: { answer: true, review: false, qa: false }, shares: { progress: 40, habit: 0, interactive: 0, knowledge: 0, test: 20, meet: 0, final: 40 } },
+      features: { answer: true, review: false, qa: false, mastery: true }, shares: { progress: 40, habit: 0, interactive: 0, knowledge: 0, test: 20, meet: 0, final: 40 } },
     { id: "ai-1", platform: "zhs", name: "通信基础与计算机网络2026年秋冬学期", type: "智慧课程", kind: "ai", progress: 84,
       features: { answer: true, review: false, qa: false }, shares: null },
   ],
@@ -75,7 +75,7 @@ const units = {
     ["复用技术", 5], ["计算机网络的发展历程", 6], ["网络体系结构", 7], ["物理层", 6], ["数据链路层", 8], ["网络层", 9], ["传输层", 7], ["应用层", 6]], 66),
 };
 
-const GROUP = { study: "learn", review: "learn", answer: "answer", qa: "answer", ask: "answer" };
+const GROUP = { study: "learn", review: "learn", answer: "answer", mastery: "answer", qa: "qa", ask: "ask" };
 let qaPeersOn = false;
 const qaPosts = [{ kind: "answer", question: "云计算的三种服务模式有什么区别？", text: "IaaS 提供虚拟机等基础设施，PaaS 提供运行平台，SaaS 直接提供软件。", at: Date.now() / 1000 - 7200 }];
 function fakeJob(body) {
@@ -85,7 +85,7 @@ function fakeJob(body) {
     if (o.course === body.course) throw new Error(`这门课正在${o.title}，请等它结束或先停止`);
     if (body.platform === "zhs" && GROUP[body.type] === "learn") throw new Error(`智慧树同一账号同时只能播放一个视频，请等「${o.course_name}」的${o.title}结束`);
   }
-  const title = { study: "自动学习", review: "每日复习", answer: "AI 答题", qa: "问答区答题", ask: "问答区提问" }[body.type];
+  const title = { study: "自动学习", review: "每日复习", answer: "AI 答题", mastery: "掌握度学习", qa: "问答区答题", ask: "问答区提问" }[body.type];
   const job = { type: "job", kind: body.type, id: "j" + Date.now().toString(16), title, course: body.course, course_name: course.name, platform: body.platform,
     state: "running", summary: "", started: Date.now() / 1000, ended: null, lines: [] };
   jobs[job.id] = job;
@@ -117,6 +117,15 @@ function fakeJob(body) {
       send({ type: "progress", kind: "result", name: q.slice(0, 20), status: "success" });
       if (i === asked.length - 1) setTimeout(() => finish("done", `回答了 ${asked.length} 条提问`), 800);
     }, 1500 * (i + 1)));
+    return job.id;
+  }
+  if (body.type === "mastery") {
+    send({ type: "progress", kind: "begin", name: title, total: 2, unit: "个知识点" });
+    ["基础概念", "应用练习"].forEach((name, i) => setTimeout(() => {
+      send({ type: "progress", kind: "detail", name });
+      send({ type: "progress", kind: "result", name, status: "success" });
+      if (i === 1) finish("done", "掌握度：满分 2 个，免考/无题 0 个，未达标 0 个");
+    }, 1200 * (i + 1)));
     return job.id;
   }
   if (body.type === "answer") {
