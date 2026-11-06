@@ -63,7 +63,7 @@ ICON.paused = ICON.stopped;
 /* ------------------------------------------------------------------ api */
 
 // local: one person, token from the terminal URL; hosted: cookie session + CSRF header.
-const session = { mode: "local", user: null, csrf: "" };
+const session = { mode: "local", user: null, csrf: "", notice: null };
 let mockModule = null;
 async function api(path, { method = "GET", body } = {}) {
   if (MOCK) {
@@ -562,7 +562,7 @@ const VIEWS = {
       setPage(`${head}<div class="empty">正在读取…</div>`);
       quiet = false;
     }
-    const need = { people: ["users", "invites"], site: ["settings", "memory"], logs: [] }[tab];
+    const need = { people: ["users", "invites"], site: ["settings", "memory", "notice"], logs: [] }[tab];
     let data;
     try { data = Object.fromEntries(await Promise.all(need.map(async (x) => [x, await api(`/api/admin/${x}`)]))); }
     catch (error) { if (!refresh) setPage(`${head}<div class="empty">${esc(error.message)}</div>`); return; }
@@ -596,9 +596,22 @@ const VIEWS = {
           || `<div class="model plain"><span class="m1"><small class="sans">还没有邀请码</small></span></div>`}</div>`;
     } else if (tab === "site") {
       const settings = data.settings;
+      const draft = $("[data-site-notice-form]", page);
+      const notice = { ...data.notice, title: draft?.elements.notice_title.value ?? data.notice.title,
+        body: draft?.elements.notice_body.value ?? data.notice.body,
+        enabled: draft ? draft.elements.notice_enabled.value === "true" : data.notice.enabled };
       const kept = (name, fallback) => $(`[name="${name}"]`, page)?.value || fallback;
       state.zhsParallel = settings.zhs_parallel_study;
-      body = `<div class="section"><h3>任务上限</h3></div>
+      body = `<div class="section"><h3>站点公告</h3></div>
+        <form class="model plain shared_form notice_form" data-site-notice-form>
+          <div class="field"><label for="notice-title">公告标题</label><input id="notice-title" name="notice_title" maxlength="100" value="${esc(notice.title)}" placeholder="站点公告"></div>
+          <div class="field"><label for="notice-enabled">公告状态</label><select id="notice-enabled" name="notice_enabled"><option value="false" ${notice.enabled ? "" : "selected"}>停用</option><option value="true" ${notice.enabled ? "selected" : ""}>启用：登录后弹出</option></select></div>
+          <div class="field notice_text"><label for="notice-body">公告正文（Markdown）</label><textarea id="notice-body" name="notice_body" rows="8" maxlength="10000" placeholder="## 欢迎使用 Studia">${esc(notice.body)}</textarea></div>
+          <p class="sub">支持标题、粗体、斜体、列表、引用、链接和代码，正文最多 10000 字。确认后同一登录会话内不重复提示；重新登录或公告更新后会再次显示。</p>
+          <div class="form_btns"><button type="button" class="btn" data-preview-notice>预览</button><span class="grow"></span><button class="btn primary" type="submit">保存公告</button></div>
+          <div class="notice_preview"><b>预览</b><div class="notice_markdown" data-notice-preview aria-live="polite">${data.notice.html || ""}</div></div>
+        </form>
+        <div class="section"><h3>任务上限</h3></div>
         <div class="models"><div class="model plain"><span class="m1"><b>默认每人同时 <input class="inline_num" type="number" min="1" max="20" name="max_jobs" value="${esc(kept("max_jobs", settings.max_jobs))}"> 个任务</b></span>
           <span class="row_btns"><button class="btn small primary" data-save-limit>保存</button></span></div></div>
         <div class="section"><h3>智慧树</h3></div>
@@ -630,6 +643,31 @@ const VIEWS = {
       catch (e) { toast(e.message); }
     });
     on("[data-save-limit]", () => act("/api/admin/settings", { max_jobs: Number($('[name="max_jobs"]', page).value) }, "已保存，马上生效"));
+    const noticeForm = $("[data-site-notice-form]", page);
+    if (noticeForm) {
+      const noticeBody = () => ({ title: noticeForm.elements.notice_title.value,
+        body: noticeForm.elements.notice_body.value, enabled: noticeForm.elements.notice_enabled.value === "true" });
+      const preview = $("[data-preview-notice]", noticeForm);
+      preview.onclick = async () => {
+        preview.disabled = true;
+        try {
+          const result = await api("/api/admin/notice/preview", { method: "POST", body: noticeBody() });
+          $("[data-notice-preview]", noticeForm).innerHTML = result.html;
+        } catch (error) { toast(error.message); }
+        finally { preview.disabled = false; }
+      };
+      noticeForm.onsubmit = async (event) => {
+        event.preventDefault();
+        const submit = $('[type="submit"]', noticeForm);
+        submit.disabled = true;
+        try {
+          const result = await api("/api/admin/notice", { method: "POST", body: noticeBody() });
+          $("[data-notice-preview]", noticeForm).innerHTML = result.html;
+          toast(result.enabled ? "公告已保存，用户下次登录时显示" : "公告已停用");
+        } catch (error) { toast(error.message); }
+        finally { submit.disabled = false; }
+      };
+    }
     on("[data-zhs-parallel]", (el) => {
       const enable = el.dataset.zhsParallel === "on";
       act("/api/admin/settings", { zhs_parallel_study: enable }, enable ? "已开启，新开的智慧树学习任务生效" : "已关闭");
@@ -1791,6 +1829,7 @@ document.addEventListener("click", (event) => {
 });
 
 window.addEventListener("keydown", (event) => {
+  if ($(".site_notice_dialog[open]")) return;
   const mod = event.metaKey || event.ctrlKey;
   if (event.key === "Escape" && !jobMenu.hidden) { closeJobMenu(); return; }
   if (overlay.classList.contains("open")) {
@@ -1875,6 +1914,7 @@ const AUTH = {
   setup: { title: "创建管理员", lead: "设置码在服务器日志里（docker compose logs studia）。", button: "创建并进入" },
 };
 function showAuth(mode = "login") {
+  $(".site_notice_dialog")?.close();
   document.body.classList.add("signed-out");
   let box = $(".auth");
   if (!box) { box = document.createElement("div"); box.className = "auth"; document.body.appendChild(box); }
@@ -1931,6 +1971,7 @@ function showAuth(mode = "login") {
     button.textContent = "请稍候…";
     try {
       await api(`/api/auth/${mode}`, { method: "POST", body });
+      try { sessionStorage.removeItem("studia-notice-seen"); } catch { /* storage may be unavailable */ }
       location.reload();
     } catch (failure) {
       error.textContent = failure.message;
@@ -1948,9 +1989,31 @@ async function signOut() {
 async function loadMe() {
   try {
     const me = await api("/api/auth/me");
-    Object.assign(session, { user: me.user, csrf: me.csrf });
+    Object.assign(session, { user: me.user, csrf: me.csrf, notice: me.notice || null });
     return true;
   } catch { return false; }
+}
+
+function showSiteNotice() {
+  const notice = session.notice;
+  if (session.mode !== "hosted" || !session.user || !notice?.revision || !notice.html) return;
+  const seen = `${session.user.id}:${notice.revision}`;
+  try { if (sessionStorage.getItem("studia-notice-seen") === seen) return; } catch { /* still show the notice */ }
+  if ($(".site_notice_dialog")) return;
+  const dialog = document.createElement("dialog");
+  dialog.className = "site_notice_dialog";
+  dialog.setAttribute("aria-labelledby", "site-notice-title");
+  dialog.innerHTML = `<header><h2 id="site-notice-title">${esc(notice.title)}</h2></header>
+    <div class="notice_markdown notice_content">${notice.html}</div>
+    <footer><button class="btn primary" autofocus>我知道了</button></footer>`;
+  const acknowledge = () => {
+    try { sessionStorage.setItem("studia-notice-seen", seen); } catch { /* storage may be unavailable */ }
+  };
+  $("button", dialog).onclick = () => { acknowledge(); dialog.close(); };
+  dialog.addEventListener("cancel", acknowledge);
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  document.body.appendChild(dialog);
+  dialog.showModal();
 }
 
 (async function boot() {
@@ -1961,6 +2024,7 @@ async function loadMe() {
   if (setup) { showAuth("setup"); return; }
   if (session.mode === "hosted" && !(await loadMe())) { showAuth(); return; }
   await refreshState();
+  showSiteNotice();  // Do not wait for remote course catalogues before showing the announcement.
   connectEvents();
   await Promise.all(state.platforms.filter((p) => p.logged_in).map((p) => loadCourses(p.id)));
   route();
