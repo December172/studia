@@ -4,7 +4,10 @@ const emit = (event) => listeners.forEach((listener) => listener(event));
 const platforms = [
   { id: "mooc", name: "MOOC", short: "MOOC", login: "browser", logged_in: true, features: { study: true, answer: true, review: false } },
   // ?mock&rescan: the sign-in centre's ticket has lapsed, the Q&A board waits for a fresh scan.
+  // ?mock&soon: it runs out in 40 minutes.
   { id: "zhs", name: "智慧树", short: "智慧树", login: "qr", logged_in: true, rescan: new URLSearchParams(location.search).has("rescan"),
+    rescan_at: new URLSearchParams(location.search).has("rescan") ? null
+      : Date.now() / 1000 + (new URLSearchParams(location.search).has("soon") ? 40 * 60 : 6 * 3600),
     features: { study: true, answer: true, review: true, qa: true } },
   { id: "cx", name: "超星", short: "超星", login: "qr", password: true, logged_in: true, features: { study: true, answer: true, review: false } },
 ];
@@ -180,6 +183,7 @@ export async function request(path, method, body) {
     if (polls < 4 && p.login === "qr") return { status: "scanned", message: "已扫码" };
     p.logged_in = true;
     p.rescan = false;
+    if (p.id === "zhs") p.rescan_at = Date.now() / 1000 + 8 * 3600;
     return { status: "done", message: "登录成功" };
   }
   if ((m = path.match(/^\/api\/platforms\/(\w+)\/logout$/))) { platforms.find((x) => x.id === m[1]).logged_in = false; return {}; }
