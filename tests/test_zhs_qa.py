@@ -240,6 +240,47 @@ class WriteQuestionsTest(unittest.TestCase):
         self.assertIn("课程的核心内容", ai.questions[0]["title"])
 
 
+class ReplyVoiceTest(unittest.TestCase):
+    PLAIN = "我觉得缓冲最关键，CPU 太快外设太慢，没有它就得干等着。"
+
+    def test_a_listed_or_stock_answer_is_rewritten_as_one_plain_paragraph(self):
+        from ZHSMain.qa import write_reply
+        ai = Mock(answer=Mock(side_effect=[{"answer": "1. 处理机管理。2. 存储器管理。"},
+                                           {"answer": "主要体现在以下几个方面：效率和安全"},
+                                           {"answer": self.PLAIN}]))
+        self.assertEqual(write_reply(ai, "操作系统有哪些功能？", voice=2), self.PLAIN)
+        contexts = [call.args[0]["context"] for call in ai.answer.call_args_list]
+        self.assertIn("不要分点编号", contexts[1])
+        self.assertIn("套话", contexts[2])
+
+    def test_gives_up_after_three_tries(self):
+        from ZHSMain.qa import write_reply
+        ai = Mock(answer=Mock(return_value={"answer": "首先要看效率，其次看安全。"}))
+        with self.assertRaises(ValueError):
+            write_reply(ai, "操作系统有哪些功能？")
+        self.assertEqual(ai.answer.call_count, 3)
+
+    def test_each_account_keeps_its_voice_and_steers_clear_of_answers_already_there(self):
+        from ZHSMain.qa import REPLY_VOICES, write_reply
+        ai = FakeAi(self.PLAIN)
+        write_reply(ai, "操作系统有哪些功能？", seen=["我觉得是管好 CPU 和内存。"], voice=3)
+        context = ai.questions[0]["context"]
+        self.assertIn(REPLY_VOICES[3][0], context)
+        self.assertIn("我觉得是管好 CPU 和内存。", context)
+
+    def test_answering_uses_the_accounts_voice(self):
+        from ZHSMain.qa import REPLY_VOICES
+        ai = FakeAi(LONG)
+        answer_questions(FakeQa(items(1)), ai, limit=1, interval=0, voice=1)
+        self.assertIn(REPLY_VOICES[1][0], ai.questions[0]["context"])
+
+    def test_our_own_questions_stay_short_and_plain(self):
+        from ZHSMain.qa import own_question_flaw
+        self.assertIsNone(own_question_flaw(ASK))
+        self.assertIsNotNone(own_question_flaw("在端边协同的AI推理场景中，深度学习模型分割通常依据哪些策略划分端侧与边缘侧的计算图以平衡开销？"))
+        self.assertIsNotNone(own_question_flaw("LoRa 和 NB-IoT 哪个更省电？"))
+
+
 class RulesTest(unittest.TestCase):
     def test_flaws_the_board_rules_name(self):
         from ZHSMain.qa import question_flaw

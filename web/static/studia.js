@@ -85,7 +85,7 @@ async function api(path, { method = "GET", body } = {}) {
 
 const state = {
   platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {}, earned: {}, qaDraft: {}, qaPosts: {}, qaRoom: {}, qaPeers: null, qaOpen: new Set(),
-  jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, loginMode: {}, lastDone: null,
+  jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, loginMode: {}, returnTo: "", lastDone: null,
   current: store.get("studia-platform", ""), meOpen: false, adminTab: "people", logFilter: "all", editPassword: false, adminEdit: null, pausedOpen: new Set(),
 };
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
@@ -180,6 +180,17 @@ function toggleTheme() {
 /* ---------------------------------------------------------------- sidebar */
 
 const INITIAL = { mooc: "M", cx: "超", zyk: "资", zhs: "智" };
+// The sign-in centre's ticket lapsed: studying carries on, the Q&A board waits for a fresh scan.
+const rescanLink = (p) => `#/login/${p.id}/again`;
+// It lasts eight hours from the scan (rescan_at); the last stretch is the time to finish today's Q&A or scan early.
+const QA_SOON = 90 * 60;
+const qaLeft = (p) => (p.rescan_at ? p.rescan_at - Date.now() / 1000 : null);
+const qaSoon = (p) => !p.rescan && qaLeft(p) !== null && qaLeft(p) < QA_SOON;
+const rescannable = (p) => p.rescan || Boolean(p.rescan_at);
+function hoursLeft(sec) {
+  const min = Math.max(1, Math.ceil(sec / 60));
+  return min < 60 ? `${min} 分钟` : `${Math.floor(min / 60)} 小时${min % 60 ? ` ${min % 60} 分` : ""}`;
+}
 // 登录页要说清楚扫哪个 App；平台简称不一定就是 App 名。
 const APP_NAME = { mooc: "职教云", cx: "学习通", zyk: "资源库", zhs: "智慧树" };
 function currentPlatform() {
@@ -187,6 +198,8 @@ function currentPlatform() {
 }
 function platformStatus(p) {
   if (!p.logged_in) return "未登录";
+  if (p.rescan) return "问答区要重新扫码";
+  if (qaSoon(p)) return `问答区还能用 ${hoursLeft(qaLeft(p))}`;
   return state.courses[p.id] ? `已登录 · ${state.courses[p.id].length} 门课程` : "已登录";
 }
 const PHONE = matchMedia("(max-width: 860px)");
@@ -719,8 +732,9 @@ const VIEWS = {
     setPage(`<div class="me_card"><span class="avatar big">${esc(me ? me.username.slice(0, 1).toUpperCase() : "本")}</span>
         <span class="who"><b>${esc(me ? me.username : "本机")}</b><small>${me ? (me.role === "admin" ? "管理员" : "成员") : "只有这台电脑能访问"}</small></span></div>
       <div class="section"><h3>平台账号</h3></div>
-      <div class="lrows">${state.platforms.map((p) => row(`data-go="${p.logged_in ? "#/settings/account" : `#/login/${p.id}`}"`,
-        `<span class="plat ${p.id}">${INITIAL[p.id]}</span>`, p.name, platformStatus(p), p.logged_in ? ICON.chev : '<span class="lrow_go">登录</span>')).join("")}</div>
+      <div class="lrows">${state.platforms.map((p) => row(`data-go="${p.rescan || qaSoon(p) ? rescanLink(p) : p.logged_in ? "#/settings/account" : `#/login/${p.id}`}"`,
+        `<span class="plat ${p.id}">${INITIAL[p.id]}</span>`, p.name, platformStatus(p),
+        p.rescan || qaSoon(p) ? '<span class="lrow_go">扫码</span>' : p.logged_in ? ICON.chev : '<span class="lrow_go">登录</span>')).join("")}</div>
       <div class="section"><h3>设置</h3></div>
       <div class="lrows">${row('data-go="#/settings/models"', ICON.spark, "AI 模型")}${row('data-go="#/settings/account"', ICON.key, "账号")}
         ${row('data-go="#/settings/study"', ICON.gear, "偏好")}${me?.role === "admin" ? row('data-go="#/admin"', ICON.shield, "管理后台") : ""}</div>
@@ -728,11 +742,12 @@ const VIEWS = {
       ${me ? '<button class="btn danger me_out" data-signout>退出 Studia</button>' : ""}`);
   },
 
-  login(pid) {
+  login(pid, again) {
     const p = platformOf(pid);
     if (!p) return setPage(`<div class="empty">不支持这个平台</div>`);
-    if (p.logged_in) return go(homeOf(p));
-    const head = `<div class="crumb"><span class="dot ${pid}"></span>${esc(p.name)}</div><h1 class="title">登录${/^[A-Za-z]/.test(p.short) ? " " : ""}${esc(p.short)}</h1>`;
+    again = again && rescannable(p);
+    if (p.logged_in && !again) return go(homeOf(p));
+    const head = `<div class="crumb"><span class="dot ${pid}"></span>${esc(p.name)}</div><h1 class="title">${again ? "重新扫码" : `登录${/^[A-Za-z]/.test(p.short) ? " " : ""}${esc(p.short)}`}</h1>`;
     const app = APP_NAME[p.id] || p.name;
     // 扫码平台可以再提供账号密码作为备用入口（超星：二次验证或扫码不方便时用）。
     const password = p.login === "password" || (p.password && state.loginMode[p.id] === "password");
@@ -740,11 +755,11 @@ const VIEWS = {
       ? `<p class="sub"><button class="link" ${password ? "data-login-qr" : "data-login-password"}>${
           password ? `用${esc(app)} App 扫码登录` : "改用账号密码登录"}</button></p>`
       : "";
-    if (p.login === "qr" && !password) {
-      setPage(`${head}<p class="sub">用${esc(app)} App 扫码</p>
+    if (p.login === "qr" && (!password || again)) {
+      setPage(`${head}<p class="sub">${again ? `${p.rescan ? "问答区要重新认人" : "扫完问答区再用 8 小时"}，学习不受影响` : `用${esc(app)} App 扫码`}</p>
         <div class="login_card"><div class="qr"><div class="qr_empty">正在获取二维码…</div></div>
           <div class="login_status"><div data-status><b>等待扫码</b><p>二维码过期会自动刷新</p></div>
-            <button class="btn" data-start-login>刷新二维码</button></div></div>${toggle}`);
+            <button class="btn" data-start-login>刷新二维码</button></div></div>${again ? "" : toggle}`);
       $("[data-start-login]", page).onclick = () => qrLogin(pid);
       qrLogin(pid);
     } else if (p.login === "password" || password) {
@@ -801,7 +816,7 @@ const VIEWS = {
       setPage(`${head}${studia}<div class="section"><h3>平台账号</h3></div>
         <div class="models">${state.platforms.map((p) => `<div class="model"><span class="plat ${p.id}">${INITIAL[p.id]}</span>
           <span class="m1"><b>${esc(p.name)}</b><small class="sans">${esc(platformStatus(p))} · ${p.login === "qr" ? `${APP_NAME[p.id] || "App"} 扫码登录${p.password ? " / 账号密码" : ""}` : p.login === "password" ? `${p.name}账号密码` : "职教云浏览器授权"}</small></span><span></span>
-          <span class="row_btns">${p.logged_in ? `<button class="btn small danger" data-logout="${p.id}" data-confirm="确认退出">退出</button>` : `<button class="btn small primary" data-go="#/login/${p.id}">登录</button>`}</span></div>`).join("")}</div>`);
+          <span class="row_btns">${p.rescan || qaSoon(p) ? `<button class="btn small primary" data-go="${rescanLink(p)}">重新扫码</button>` : ""}${p.logged_in ? `<button class="btn small danger" data-logout="${p.id}" data-confirm="确认退出">退出</button>` : `<button class="btn small primary" data-go="#/login/${p.id}">登录</button>`}</span></div>`).join("")}</div>`);
       page.querySelectorAll("[data-logout]").forEach((el) => (el.onclick = async () => {
         try { await api(`/api/platforms/${el.dataset.logout}/logout`, { method: "POST" }); } catch (e) { toast(e.message); return; }
         await refreshState();
@@ -880,6 +895,8 @@ function fixButtons(j, i) {
       : `<button class="btn small primary" data-retry="${i}">重试</button>`;
   }
   if (j.state === "waiting") {
+    const p = platformOf(j.platform);
+    if ((type === "qa" || type === "ask") && p?.rescan) return `<button class="btn small primary" data-go="${rescanLink(p)}">重新扫码</button>`;
     if (/登录/.test(j.summary)) return `<button class="btn small primary" data-go="#/login/${j.platform}">重新登录</button>`;
     if (/时长/.test(j.summary)) return "";
     if (type === "qa" || type === "ask") return `<button class="btn small" data-retry="${i}">重试</button>`;
@@ -996,7 +1013,7 @@ function qaCount(kind, room) {
   const lane = QA_LANES[kind], left = room ? room[kind] : lane.daily;
   return Math.max(1, Math.min(Number(store.get(lane.key, lane.size)) || lane.size, left || 1, lane.daily));
 }
-function qaLane(kind, room, { title, valid, today, reason, note, button }) {
+function qaLane(kind, room, { title, valid, today, reason, note, button, off }) {
   const lane = QA_LANES[kind], counted = Math.min(valid || 0, lane.cap), pending = Math.max(0, Math.min(today, lane.cap - counted));
   const cells = Array.from({ length: lane.cap }, (_, i) => `<i class="cell ${i < counted ? "done" : i < counted + pending ? "pending" : ""}"></i>`).join("");
   const n = qaCount(kind, room), most = Math.min(room ? room[kind] : lane.daily, lane.daily);
@@ -1005,7 +1022,7 @@ function qaLane(kind, room, { title, valid, today, reason, note, button }) {
   return `<section class="qa_lane"><header><b>${title}</b><span class="qa_num">${valid ?? "—"}<span class="of">/${lane.cap}</span></span></header>
     <div class="qa_cells" title="实心：已算分 · 斜纹：今天发的，明天上午算 · 空：还能拿分">${cells}</div>
     <small class="sans">${esc(reason || note)}</small>
-    <div class="qa_act">${reason ? "" : stepper}${button(n, !!reason)}</div></section>`;
+    <div class="qa_act">${reason || off ? "" : stepper}${button(n, !!reason || off)}</div></section>`;
 }
 function qaBody(p, c) {
   const k = key(p.id, c.id), earned = state.earned[k], q = earned?.qa;
@@ -1014,20 +1031,21 @@ function qaBody(p, c) {
   const askBlock = blocker(p.id, c.id, "ask") || (room && !room.ask ? room.why.ask : "");
   const answerBlock = blocker(p.id, c.id, "qa") || (room && !room.answer ? room.why.answer : "");
   const head = `<div class="qa_head"><span class="qa_score"><b>${earned ? pts(earned.interactive) : "—"}</b><span class="of">/${c.shares?.interactive || 10}</span> 分</span>
-    <small class="sans">次日上午更新 · 斜纹是今天发的</small></div>`;
+    <small class="sans">次日上午更新 · 斜纹是今天发的${!p.rescan && !qaSoon(p) && qaLeft(p) > 0
+      ? `<br>问答区还能用 <span data-qa-left="${p.id}">${hoursLeft(qaLeft(p))}</span>` : ""}</small></div>`;
   const ask = qaLane("ask", room, { title: "提问", valid: q?.questions, today: today.ask,
     reason: draft?.loading ? `正在出第 ${draft.loading}/${draft.total} 条…` : askBlock,
     note: draft?.error || `今天还能问 ${room ? room.ask : "—"} 条 · 收获回答 ${q?.received ?? "—"}`,
-    button: (n, off) => `<button class="btn" data-qa-draft ${off ? "disabled" : ""}>${texts.length ? "换一批" : `出 ${n} 条题`}</button>` });
+    button: (n, off) => `<button class="btn" data-qa-draft ${off ? "disabled" : ""}>${texts.length ? "换一批" : `出 ${n} 条题`}</button>`, off: p.rescan });
   const answer = qaLane("answer", room, { title: "回答", valid: q?.answers, today: today.answer, reason: answerBlock,
     note: `今天还能答 ${room ? room.answer : "—"} 条`,
-    button: (n, off) => `<button class="btn primary" data-qa-start ${off ? "disabled" : ""}>答 ${n} 条</button>` });
+    button: (n, off) => `<button class="btn primary" data-qa-start ${off ? "disabled" : ""}>答 ${n} 条</button>`, off: p.rescan });
   const tooMany = room && texts.length > room.ask;
   const drafts = texts.map((t, i) => `<div class="model plain qa_draft"><textarea rows="2" data-qa-edit="${i}" maxlength="200">${esc(t)}</textarea>
       <button class="btn small" data-qa-drop="${i}" aria-label="删掉这条">删掉</button></div>`).join("")
     + (texts.length ? `<div class="model plain qa_row"><span class="m1"><small class="sans">${esc(askBlock ||
       (tooMany ? `今天还能发 ${room.ask} 条，删掉几条` : "隔 10–20 分钟发一条，免得像刷帖"))}</small></span>
-      <span class="row_btns"><button class="btn primary" data-qa-ask ${askBlock || tooMany || draft?.loading ? "disabled" : ""}>发布 ${texts.length} 条</button></span></div>` : "");
+      <span class="row_btns"><button class="btn primary" data-qa-ask ${p.rescan || askBlock || tooMany || draft?.loading ? "disabled" : ""}>发布 ${texts.length} 条</button></span></div>` : "");
   // Only a hosted site has classmates to answer; the person opts in, both ways.
   const peers = session.mode === "hosted" ? `<div class="model plain qa_row qa_switch"><span class="m1"><b>站内互答</b><small class="sans">${
       state.qaPeers ? "先答同学的提问，你的提问也给同学答" : "和站里同班的同学互相回答"}</small></span>
@@ -1041,7 +1059,12 @@ function qaBody(p, c) {
         <span class="when"></span></div>
         ${x.kind === "answer" && open ? `<div class="qa_text">${esc(x.text)}</div>` : ""}`;
     }).join("")}</div>`;
-  return `<div class="section"><h3>问答互动</h3></div><div class="models qa_board">${head}<div class="qa_lanes">${ask}${answer}</div>${drafts}${peers}</div>
+  const rescan = p.rescan ? `<div class="model plain qa_row qa_rescan"><span class="m1"><b>问答区进不去了</b><small class="sans">智慧树登录中心过期，扫一次码就好</small></span>
+    <span class="row_btns"><button class="btn small primary" data-go="${rescanLink(p)}">重新扫码</button></span></div>`
+    : qaSoon(p) ? `<div class="model plain qa_row qa_rescan"><span class="m1"><b>问答区还能用 <span data-qa-left="${p.id}">${hoursLeft(qaLeft(p))}</span></b>
+      <small class="sans">到点要重新扫码，现在扫能再用 8 小时</small></span>
+    <span class="row_btns"><button class="btn small" data-go="${rescanLink(p)}">现在扫码</button></span></div>` : "";
+  return `<div class="section"><h3>问答互动</h3></div><div class="models qa_board">${head}${rescan}<div class="qa_lanes">${ask}${answer}</div>${drafts}${peers}</div>
     <div class="section"><h3>已发布</h3></div>${list}`;
 }
 const loadingPosts = new Set();
@@ -1390,6 +1413,7 @@ setInterval(() => {
   const byId = (id) => state.jobs.find((j) => j.id === id);
   document.querySelectorAll("[data-clock]").forEach((el) => { const j = byId(el.dataset.clock); if (j) el.firstChild.textContent = clock(elapsed(j)); });
   document.querySelectorAll("[data-elapsed]").forEach((el) => { const j = byId(el.dataset.elapsed); if (j) el.textContent = duration(elapsed(j)); });
+  document.querySelectorAll("[data-qa-left]").forEach((el) => { const p = platformOf(el.dataset.qaLeft); if (p && qaLeft(p) > 0) el.textContent = hoursLeft(qaLeft(p)); });
 }, 1000);
 
 /* ---------------------------------------------------------------- jobs */
@@ -1504,7 +1528,8 @@ function repaint() {
       if (name === "jobs") VIEWS.jobs(a);
       else if (name === "home") VIEWS.home();
       else if (name === "me") VIEWS.me();
-      else if (name === "login" && platformOf(a)?.logged_in) go(homeOf(platformOf(a)));  // signed in elsewhere
+      // Signed in elsewhere; a fresh scan is done once the ticket is back.
+      else if (name === "login" && platformOf(a)?.logged_in && !(b === "again" && rescannable(platformOf(a)))) go(homeOf(platformOf(a)));
       else if (name === "course") {
         const p = platformOf(a), course = courseOf(a, decodeURIComponent(b || ""));
         if (p && course) renderCourse(p, course, courseTab(course, c));
@@ -1604,11 +1629,14 @@ function forgetPlatform(pid) {
 }
 
 async function afterLogin(pid) {
+  const back = state.returnTo;  // read first: a repaint may route away while this waits
+  state.returnTo = "";
   toast("登录成功");
   forgetPlatform(pid);
   await refreshState();
   if (!state.courses[pid]) await loadCourses(pid);  // the account event's refresh may be the one still reading them
-  switchPlatform(pid);
+  if (back) go(back);
+  else switchPlatform(pid);
 }
 
 // One read per platform at a time: a login seen by this tab and by the server's account event asks twice.
@@ -1673,8 +1701,20 @@ async function refreshState(catchUp = false) {
     for (const p of state.platforms) if (!p.logged_in) { delete state.courses[p.id]; forgetPlatform(p.id); }
     // Signed in from another tab or device: this tab has no course list for it yet.
     if (before) await Promise.all(state.platforms.filter((p) => p.logged_in && !before.has(p.id)).map((p) => loadCourses(p.id)));
+    watchTicket();
   } catch (error) { toast(error.message); }
   renderSidebar();
+}
+// Repaint as the Q&A ticket enters its last stretch, and read the state again once it runs out.
+let ticketTimer = 0;
+function watchTicket() {
+  clearTimeout(ticketTimer);
+  const ends = Math.min(...state.platforms.map((p) => p.rescan_at || Infinity)), now = Date.now() / 1000;
+  if (ends === Infinity) return;
+  const soon = ends - QA_SOON > now;
+  // Past the end by this clock but not yet by the server's: ask again in a while, not in a loop.
+  ticketTimer = setTimeout(() => (soon ? (repaint(), watchTicket()) : refreshState().then(repaint)),
+    (soon ? ends - QA_SOON - now : Math.max(ends - now, 30)) * 1000 + 1000);
 }
 
 /* ---------------------------------------------------------------- palette */
@@ -1778,13 +1818,15 @@ window.addEventListener("keydown", (event) => {
 
 const parseHash = (hash) => (hash || "").match(/^#\/(\w+)(?:\/([^/]+))?(?:\/([^/]+))?(?:\/([^/]+))?/) || [];
 
-function route() {
+function route(event) {
   const [, name, a, b, c] = parseHash(location.hash);
   if (!name || name === "all") { go(homeOf(currentPlatform())); return; }
   if (name === "settings" && a === "admin") { go(`#/admin${b ? `/${b}` : ""}`); return; }  // old links
   if (name === "admin" && a === "jobs") { go("#/jobs/all"); return; }
   if ((name === "course" || name === "login") && platformOf(a) && state.current !== a) { state.current = a; store.set("studia-platform", a); }
   if (name !== "login") state.loginToken.cancelled = true;
+  if (name !== "login") state.returnTo = "";
+  else if (b === "again" && event?.oldURL) state.returnTo = new URL(event.oldURL).hash;
   state.adminEdit = null;
   state.view = name === "course" ? `#/course/${a}/${b}` : name === "login" ? `#/login/${a}` : `#/${name}`;
   page.style.removeProperty("--c");
@@ -1795,7 +1837,7 @@ function route() {
   else if (name === "jobs") { VIEWS.jobs(a); if (a === "all" && session.user?.role === "admin") loadSiteJobs(); }
   else if (name === "settings") { state.editPassword = false; VIEWS.settings(a); }
   else if (name === "course") VIEWS.course(a, decodeURIComponent(b || ""), c);
-  else if (name === "login") VIEWS.login(a);
+  else if (name === "login") VIEWS.login(a, b === "again");
   else if (VIEWS[name]) VIEWS[name]();
   else go(homeOf(currentPlatform()));
 }
