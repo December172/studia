@@ -31,6 +31,7 @@ from ai.client import AIClient, AIConfig, AIError, AIServiceError
 from ai.runner import AnswerRunner
 from base.concurrency import INTERACTIVE_WORKERS
 from base.auth import AuthenticationExpired, PlatformUnavailable
+from base.quiet_hours import CHECKPOINTS, QUIET_MESSAGE, quiet_hours
 from ChaoxingMain.api import ChaoxingApi, ChaoxingError, LoginError, WorkUnavailable
 from ChaoxingMain.exercise import ChaoxingExerciseRunner
 from ChaoxingMain.main import catalog as cx_catalog, course_units as cx_units
@@ -236,7 +237,7 @@ class Studia:
     def state(self):
         return {"platforms": [p.public(self.logged_in(p)) for p in self.platforms.values()],
                 "jobs": self._running(), "history": [_job_public(j) for j in self.history],
-                "job_limit": self.job_limit(), "zhs_parallel": self.zhs_parallel()}
+                "job_limit": self.job_limit(), "zhs_parallel": self.zhs_parallel(), "quiet_hours": quiet_hours()}
 
     def client(self, platform):
         with self.lock:
@@ -647,7 +648,9 @@ class Studia:
 
     # ------------------------------------------------------------ jobs
 
-    def start_job(self, body, *, minutes=None, resumes=0, paused=False):
+    def start_job(self, body, *, minutes=None, resumes=0, paused=False, restoring=False):
+        if not restoring:
+            self._check_daytime()
         platform = self.platform(str(body.get("platform", "")))
         kind = body.get("type")
         course_id = str(body.get("course", ""))
@@ -670,6 +673,8 @@ class Studia:
                 raise HttpError(400, "这门课的考核里没有%s，不用%s" % (
                     ("学习习惯分", "每日复习") if kind == "review" else ("问答互动分", "刷问答区")))
         with self.lock:
+            if not restoring:  # Course/score reads above may have crossed 23:00.
+                self._check_daytime()
             self._check_conflicts(platform.id, course_id, kind)
             job = {"id": secrets.token_hex(4), "kind": kind, "title": LABEL[kind], "course": course_id,
                    "platform": platform.id, "course_name": row.get("courseName") or row.get("title") or "课程",
@@ -699,6 +704,7 @@ class Studia:
                 target = lambda: self._study(platform, row, job["minutes"], job)
             self.jobs[job["id"]] = job
             JOBS[job["id"]] = self
+            CHECKPOINTS["studia-job-%s" % job["id"]] = lambda stop=None: self._checkpoint(job, stop)
             if paused:  # an administrator's pause, carried over a restart
                 job["state"] = "paused"
             self._take_turn(job)
@@ -762,6 +768,7 @@ class Studia:
     def continue_job(self, job_id, who=""):
         """A paused job joins the back of the queue (the arrows move it up from there)."""
         with self.lock:
+            self._check_daytime()
             job = self._job(job_id)
             if job.get("hold") == "pause":   # still stopping: let it come back queued instead
                 job["hold"] = "queue"
@@ -781,6 +788,7 @@ class Studia:
         job_limit() jobs in line run: a learning job pushed out steps aside and later carries on from the
         platform's progress. Answering is never interrupted."""
         with self.lock:
+            self._check_daytime()
             job = self._job(job_id)
             running, queue = self._line()
             if job not in queue:
@@ -843,6 +851,42 @@ class Studia:
         self.publish({"type": "log", "text": text, "level": "", "job": job["id"]})
         self.publish(dict(_job_public(job), type="job"))
 
+    def _check_daytime(self):
+        if quiet_hours()["active"]:
+            raise HttpError(409, QUIET_MESSAGE)
+
+    def enforce_quiet_hours(self):
+        """Stop playback through its existing cancellation path; leave papers/posts in place.
+
+        Browser players must close, since blocking Python alone leaves JavaScript playing.
+        Answers wait at request boundaries instead: restarting them could repeat a submission.
+        """
+        active = quiet_hours()["active"]
+        with self.lock:
+            changed = False
+            for job in list(self.jobs.values()):
+                night = active and job["state"] != "paused" and job.get("hold") != "pause"
+                if bool(job.get("night_paused")) == night:
+                    continue
+                job["night_paused"] = night
+                changed = True
+                if night and job["state"] == "running" and GROUP[job["kind"]] == "learn" and not job["cancel"].is_set():
+                    job["hold"] = "night"
+                    job["cancel"].set()
+                self._announce(job, QUIET_MESSAGE if night else "夜间暂停时段结束，任务按原顺序继续")
+            if changed:
+                self._save()
+
+    def _checkpoint(self, job, stop=None):
+        if stop is not None and stop.is_set():
+            raise KeyboardInterrupt
+        if not quiet_hours()["active"]:
+            return
+        self.enforce_quiet_hours()
+        while quiet_hours()["active"]:
+            if job["cancel"].wait(1) or job["id"] not in self.jobs or (stop is not None and stop.is_set()):
+                raise KeyboardInterrupt
+
     def _set_aside(self, job):
         """The job's work stopped because an administrator paused it or gave its slot away (job["hold"]).
         Keep it in the list, paused or queued, for its thread to take its turn again. Returns False
@@ -878,6 +922,8 @@ class Studia:
         """Start a waiting job when this person has a free place; first come, first served, unless an
         the person or an administrator moved it (move_job). A paused job waits for continue_job.
         Call with self.lock held. Returns whether the job may run."""
+        if quiet_hours()["active"]:
+            return False
         if job["state"] == "running":
             return True
         if job["state"] == "paused":
@@ -906,8 +952,8 @@ class Studia:
         state, summary = "done", ""
         try:
             while True:
-                self._wait_turn(job)
                 try:
+                    self._wait_turn(job)
                     summary = target() or "已完成"
                 except KeyboardInterrupt:
                     if not self._set_aside(job):
@@ -946,6 +992,7 @@ class Studia:
                 self._save()
             self.publish(dict(_job_public(job), type="job"))
             JOBS.pop(job["id"], None)
+            CHECKPOINTS.pop("studia-job-%s" % job["id"], None)
 
     # ------------------------------------------------------------ restarts
 
@@ -971,7 +1018,9 @@ class Studia:
                    "resumes": 0 if now - (j.get("running_since") or now) > STEADY else j.get("resumes", 0),
                    # Review time still owed: its length minus what it has already played.
                    "minutes": max(0, j.get("minutes", 0) - (now - j["running_since"]) / 60 if j.get("running_since") else j.get("minutes", 0)),
-                   "paused": j["state"] == "paused" or j.get("hold") == "pause"}
+                   "paused": j["state"] == "paused" or j.get("hold") == "pause",
+                   "night_paused": bool(j.get("night_paused")) or (quiet_hours()["active"] and
+                                   j["state"] != "paused" and j.get("hold") != "pause")}
                   # In queue order, so a restart starts them again in the order an administrator left them.
                   for j in sorted(self.jobs.values(), key=lambda j: (j["state"] != "running", _order(j)))]
         data = {"stopped_at": stopped_at, "saved_at": now, "active": active,
@@ -1025,14 +1074,15 @@ class Studia:
                 continue
             # A paused job does not run by itself, so it comes back however long the service was down.
             paused = entry.get("paused") is True and GROUP[kind] == "learn"
-            if kind in ("answer", "mastery", "qa", "ask") or (not paused and (not fresh or entry.get("resumes", 0) >= RESUME_LIMIT)):
+            night = entry.get("night_paused") is True
+            if kind in ("answer", "mastery", "qa", "ask") or (not paused and not night and (not fresh or entry.get("resumes", 0) >= RESUME_LIMIT)):
                 self._record(entry, "stopped", INTERRUPTED)
                 continue
             body = {"platform": entry.get("platform"), "type": kind, "course": entry.get("course")}
             for attempt in range(3):
                 try:
                     self.start_job(body, minutes=max(1, round(entry.get("minutes", 0))),
-                                   resumes=0 if paused else entry.get("resumes", 0) + 1, paused=paused)
+                                   resumes=0 if paused or night else entry.get("resumes", 0) + 1, paused=paused, restoring=True)
                     break
                 except HttpError as exc:
                     if exc.status == 401:
@@ -1667,8 +1717,12 @@ def _track(progress, event):
 def _job_public(job):
     if job is None:
         return None
-    return {key: job.get(key) for key in ("id", "kind", "title", "course", "course_name", "platform", "state",
+    public = {key: job.get(key) for key in ("id", "kind", "title", "course", "course_name", "platform", "state",
                                       "summary", "started", "ended", "running_since", "lines", "progress", "hold")} | {"order": _order(job)}
+    public["night_paused"] = bool(job.get("night_paused")) and job["state"] in ("running", "queued")
+    if public["night_paused"]:
+        public["state"] = "paused"
+    return public
 
 
 def _order(job):
@@ -1940,14 +1994,28 @@ def serve(port=0, open_browser=True, store=None):
         webbrowser.open(url)
     threading.Thread(target=app.resume, daemon=True, name="studia-resume").start()
     threading.Thread(target=keep_passports, args=(lambda: [app],), daemon=True, name="studia-keepalive").start()
+    stop = threading.Event()
+    threading.Thread(target=watch_quiet_hours, args=(stop,), daemon=True, name="studia-quiet-hours").start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        stop.set()
         app.shutdown()
         drain()
         server.server_close()
+
+
+def watch_quiet_hours(stop):
+    """One site-wide watcher, including jobs whose browser keeps playing without Python requests."""
+    while not stop.is_set():
+        for app in set(JOBS.copy().values()):
+            try:
+                app.enforce_quiet_hours()
+            except Exception:
+                logger.exception("夜间任务调度失败")
+        stop.wait(1)
 
 
 def keep_passports(apps, interval=KEEPALIVE, first=60, stop=None):
@@ -1957,8 +2025,13 @@ def keep_passports(apps, interval=KEEPALIVE, first=60, stop=None):
     stop = stop or threading.Event()
     wait, rounds = first, 0
     while not stop.wait(wait):
+        if quiet_hours()["active"]:
+            wait = min(interval, 60)
+            continue
         board = rounds % BOARD_EVERY == 0
         for app in apps():
+            if quiet_hours()["active"]:
+                break
             try:
                 app.keep_passport(board=board)
             except Exception:

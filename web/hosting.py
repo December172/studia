@@ -30,7 +30,7 @@ from ai.memory import MoocDatabaseAnswerMemory
 from settings import SettingsError, SettingsStore
 from web.accounts import AccountError, Accounts, Sessions, Throttle
 from web.server import MAX_JOBS, MAX_PENDING, NOT_HANDLED, PEERS_MARKER, HttpError, Reply, Studia, _EventLogHandler, drain, \
-    keep_passports, make_handler
+    keep_passports, make_handler, watch_quiet_hours
 
 COOKIE = "studia_session"
 OAUTH_TTL = 600
@@ -596,11 +596,14 @@ def serve_hosted(hub, host, port):
     # Everyone with an account, not only those who opened the site since the restart: their saved logins count too.
     threading.Thread(target=keep_passports, daemon=True, name="studia-keepalive",
                      args=(lambda: [hub.app(user["id"]) for user in hub.accounts.users() if not user["disabled"]],)).start()
+    stop = threading.Event()
+    threading.Thread(target=watch_quiet_hours, args=(stop,), daemon=True, name="studia-quiet-hours").start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        stop.set()
         for app in list(hub.apps.values()):
             app.shutdown()
         drain()

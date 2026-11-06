@@ -85,7 +85,7 @@ async function api(path, { method = "GET", body } = {}) {
 
 const state = {
   platforms: [], courses: {}, papers: {}, paperErrors: {}, units: {}, selected: {}, earned: {}, qaDraft: {}, qaPosts: {}, qaRoom: {}, qaPeers: null, qaOpen: new Set(),
-  jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, history: [], view: "", loginToken: { cancelled: true }, loginMode: {}, lastDone: null,
+  jobs: [], runs: {}, focus: null, jobLimit: 4, zhsParallel: false, quietHours: null, history: [], view: "", loginToken: { cancelled: true }, loginMode: {}, lastDone: null,
   current: store.get("studia-platform", ""), meOpen: false, adminTab: "people", logFilter: "all", editPassword: false, adminEdit: null, pausedOpen: new Set(),
 };
 function freshRun() { return { detail: "", overall: null, sub: null, lines: [], unit: null }; }
@@ -97,7 +97,9 @@ const jobType = (j) => j.kind || { 自动学习: "study", 每日复习: "review"
 const learns = (j) => GROUP[jobType(j)] === "learn";
 // A job in the list that is not running: waiting for a slot, or paused by an administrator.
 const WAIT_WORD = { queued: "排队中", paused: "已暂停" };
+const quietMessage = () => state.quietHours?.active ? state.quietHours.message : "";
 function blocker(pid, cid, type) {
+  if (quietMessage()) return quietMessage();
   for (const o of state.jobs) {
     if (GROUP[jobType(o)] !== GROUP[type] || o.platform !== pid) continue;
     if (o.course === cid) return o.state === "running" ? `正在${o.title}…` : `${WAIT_WORD[o.state]}（${o.title}）`;
@@ -425,13 +427,14 @@ const queueRow = (j, i) => `<div class="qrow" data-drag="${esc(j.id)}">
     ${j.hold ? '<span class="grip off"></span>' : `<span class="grip" data-grip aria-hidden="true">${ICON.grip}</span>`}<span class="place mono">${i + 1}</span>
     <span class="t1">${esc(j.course_name)}<small>${esc(j.title)}${j.hold ? " · 正在让位" : ""}</small></span>${DOTS(j)}</div>`;
 const pausedRow = (j) => `<div class="qrow"><span class="grip off"></span><span class="place"></span>
-    <span class="t1">${esc(j.course_name)}<small>${esc(j.title)}${j.hold ? " · 正在暂停" : ""}</small></span>
-    ${j.hold ? "" : `<button class="btn small" data-job-act="continue" data-id="${esc(j.id)}">继续</button>`}${DOTS(j)}</div>`;
+    <span class="t1">${esc(j.course_name)}<small>${esc(j.title)}${j.night_paused ? " · 夜间暂停，07:00 后自动继续" : j.hold ? " · 正在暂停" : ""}</small></span>
+    ${j.hold || j.night_paused || quietMessage() ? "" : `<button class="btn small" data-job-act="continue" data-id="${esc(j.id)}">继续</button>`}${DOTS(j)}</div>`;
 function board(jobs, limit, owner = "") {
   const { slots, queue, incoming, paused } = boardParts(jobs, limit), open = state.pausedOpen.has(owner);
   // Empty slots only matter as drop targets for the queue; otherwise 名额 n/limit in the heading says it.
   const empty = queue.length ? Math.max(0, limit - slots.length) : 0;
   return `<div class="board" data-board data-owner="${esc(owner)}" data-incoming="${incoming}">
+    ${quietMessage() ? `<p role="status">${esc(quietMessage())}</p>` : ""}
     <div class="slots">${slots.map((j) => slotCard(j, owner)).join("")}${'<div class="slot vacant" data-slot=""><span>空位</span></div>'.repeat(empty)}</div>
     ${queue.length ? `<div class="board_head">排队<small>拖动排序，拖进格子即替换</small></div><div class="runs queue">${queue.map(queueRow).join("")}</div>` : ""}
     ${paused.length ? `<button class="board_head fold" data-paused-fold="${esc(owner)}" aria-expanded="${open}">已暂停 ${paused.length}<span class="chev_r" aria-hidden="true"></span></button>
@@ -462,7 +465,7 @@ function openJobMenu(button) {
     owner ? "" : `<button class="menu_row" role="menuitem" data-open="${esc(id)}"><span class="grow">查看</span></button>`,
     j.state === "queued" && !j.hold ? row("move", "移到最前", 'data-to="0"') : "",
     !j.hold && (j.state === "queued" || (inSlot(j) && learns(j))) ? row("pause", "暂停") : "",
-    j.state === "paused" ? row("continue", "继续") : "",
+    j.state === "paused" && !j.night_paused && !quietMessage() ? row("continue", "继续") : "",
     row("stop", "停止", 'data-confirm="确认停止"'),
   ].join("");
   jobMenu.hidden = false;
@@ -1424,6 +1427,7 @@ setInterval(() => {
 /* ---------------------------------------------------------------- jobs */
 
 async function startJob(body) {
+  if (quietMessage()) { toast(quietMessage()); return false; }
   try {
     const started = await api("/api/jobs", { method: "POST", body });
     if (started.id) state.focus = started.id;
@@ -1675,6 +1679,7 @@ function pumpBackground() {
 }
 
 // catchUp: events may have been missed, so also reread the grids the live jobs are filling.
+let quietTimer = null;
 async function refreshState(catchUp = false) {
   try {
     const data = await api("/api/state");
@@ -1684,6 +1689,9 @@ async function refreshState(catchUp = false) {
     state.history = data.history || [];
     state.jobLimit = data.job_limit || state.jobLimit;
     state.zhsParallel = Boolean(data.zhs_parallel);
+    state.quietHours = data.quiet_hours || null;
+    clearTimeout(quietTimer);
+    if (data.quiet_hours) quietTimer = setTimeout(() => refreshState().then(repaint), Math.max(1000, data.quiet_hours.changes_in * 1000));
     const live = data.jobs || [];
     for (const job of live) {
       // The server's tally is the truth for a page opened mid-run or one that missed events while away.
