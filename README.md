@@ -4,6 +4,8 @@
 
 [使用指南](docs/USAGE.md) · [开发与目录说明](docs/DEVELOPMENT.md) · [接口说明](docs/EXAM_PROTOCOL.md) · 维护者 [yijunjie07](https://github.com/yijunjie07)
 
+本 fork 的 `main` 跟踪上游，`dev` 集成自有功能并作为生产发布来源；生产使用通过验证的固定提交镜像。分支、镜像和上游同步方法见[自用集成与发布流程](docs/FORK_WORKFLOW.md)。
+
 ## 功能
 
 | 功能 | 说明 |

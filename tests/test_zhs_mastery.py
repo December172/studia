@@ -235,5 +235,12 @@ class MasteryWebTest(unittest.TestCase):
         selected_store.save_ai_health.assert_called_once_with(config, "error", "synthetic AI failure")
 
 
+def setUpModule():
+    # Keep feature tests independent of wall-clock curfew; test_quiet_hours covers its boundaries.
+    daytime = patch("web.server.quiet_hours", return_value={"active": False})
+    daytime.start()
+    unittest.addModuleCleanup(daytime.stop)
+
+
 if __name__ == "__main__":
     unittest.main()
