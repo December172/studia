@@ -29,7 +29,8 @@ from ZHSMain.memory import DatabaseAnswerMemory
 from ai.memory import MoocDatabaseAnswerMemory
 from settings import SettingsError, SettingsStore
 from web.accounts import AccountError, Accounts, Sessions, Throttle
-from web.server import MAX_JOBS, MAX_PENDING, NOT_HANDLED, PEERS_MARKER, HttpError, Reply, Studia, _EventLogHandler, drain, make_handler
+from web.server import MAX_JOBS, MAX_PENDING, NOT_HANDLED, PEERS_MARKER, HttpError, Reply, Studia, _EventLogHandler, drain, \
+    keep_passports, make_handler
 
 COOKIE = "studia_session"
 OAUTH_TTL = 600
@@ -165,7 +166,7 @@ class Hub:
         of us have answered it ("ours"). Read from everyone's post records (Studia._record_post); the questions are
         public on the board anyway. Only records that name the class count: a question from another class is not on
         this person's board."""
-        asked, ours = [], collections.Counter()
+        asked, ours, replies = [], collections.Counter(), collections.defaultdict(list)
         for path in sorted((self.data / "users").glob("*/zhs-qa-posts.json")):
             sharing = (path.parent / PEERS_MARKER).exists()  # only those who turned 站内互答 on offer their questions
             try:
@@ -178,9 +179,10 @@ class Hub:
                     continue
                 if post.get("kind") == "answer" and post.get("qid"):
                     ours[str(post["qid"])] += 1
+                    replies[str(post["qid"])].append(post.get("text") or "")  # so the next one says it differently
                 elif post.get("kind") == "ask" and post.get("id") and path.parent.name != uid and sharing:
                     asked.append({"id": post["id"], "text": post.get("question") or "", "at": post.get("at") or 0})
-        return [dict(q, ours=ours[str(q["id"])]) for q in sorted(asked, key=lambda q: q["at"])]
+        return [dict(q, ours=ours[str(q["id"])], replies=replies[str(q["id"])][-3:]) for q in sorted(asked, key=lambda q: q["at"])]
 
     def resume(self):
         """After a restart, start again each person's jobs it interrupted (see Studia.resume)."""
@@ -565,6 +567,9 @@ def serve_hosted(hub, host, port):
     print("Studia 服务器模式已启动：监听 %s:%d，对外地址 %s" % (host, server.server_address[1], hub.public_url))
     print("数据目录：%s；按 Ctrl+C 退出。" % hub.data)
     threading.Thread(target=hub.resume, daemon=True, name="studia-resume").start()
+    # Everyone with an account, not only those who opened the site since the restart: their saved logins count too.
+    threading.Thread(target=keep_passports, daemon=True, name="studia-keepalive",
+                     args=(lambda: [hub.app(user["id"]) for user in hub.accounts.users() if not user["disabled"]],)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

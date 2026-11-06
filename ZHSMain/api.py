@@ -985,6 +985,19 @@ class ZHSApi:
             raise ZHSApiError(result.get("status"), message)
         return result
 
+    def passport_alive(self):
+        """登录中心（passport）的票据还在不在。问答区每次进站都靠它认人，它过期了问答区就进不去，
+        业务登录却照样能用。顺带「用」了它一次：票据像是没用一阵就过期，隔一会儿碰一下能续上。
+        连不上抛 PlatformUnavailable。"""
+        try:
+            response = self._request(
+                "GET", PASSPORT + "/cas/login",
+                params={"service": HOMEWORK + "/studentExam/gateway/t/v1/student/getStudentHomework"},
+                allow_redirects=False, expect_json=False)
+        except AuthenticationExpired:
+            return False
+        return response.status_code == 302 and "ticket=" in (response.headers.get("Location") or "")
+
     def signed_in(self):
         """这份登录还能不能用：问一个学习时也要用的业务接口，没登录它回 401/403。
 
