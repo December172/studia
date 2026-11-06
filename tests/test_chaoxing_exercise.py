@@ -150,11 +150,11 @@ class UnsupportedTest(unittest.TestCase):
         question = decode_questions_info(work_page(UNKNOWN))["questions"][0]
         self.assertIn("暂不支持题型", unsupported_reason(question))
 
-    def test_media_needs_human(self):
+    def test_audio_still_needs_human(self):
         from ChaoxingMain.decode import decode_questions_info
-        page = work_page(question_block("q1", "0", "看图<img src='https://x/1.png'>", ["A. 甲", "B. 乙"]))
+        page = work_page(question_block("q1", "0", "听音<audio src='https://x/1.mp3'></audio>", ["A. 甲", "B. 乙"]))
         question = decode_questions_info(page)["questions"][0]
-        self.assertIn("图片", unsupported_reason(question))
+        self.assertIn("音视频", unsupported_reason(question))
 
     def test_supported_question(self):
         from ChaoxingMain.decode import decode_questions_info
