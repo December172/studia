@@ -29,6 +29,7 @@ from ZHSMain.memory import DatabaseAnswerMemory
 from ai.memory import MoocDatabaseAnswerMemory
 from settings import SettingsError, SettingsStore
 from web.accounts import AccountError, Accounts, Sessions, Throttle
+from web.notice import notice_fields, render_notice
 from web.server import MAX_JOBS, MAX_PENDING, NOT_HANDLED, PEERS_MARKER, HttpError, Reply, Studia, _EventLogHandler, drain, \
     keep_passports, make_handler, watch_quiet_hours
 
@@ -243,6 +244,23 @@ class Hub:
         return {"max_jobs": self.default_job_limit(),
                 "zhs_parallel_study": bool(self.accounts.setting("zhs_parallel_study", False))}
 
+    def site_notice(self, *, active_only=False):
+        notice = {"enabled": False, "title": "站点公告", "body": "", "revision": "",
+                  **self.accounts.setting("site_notice", {})}
+        if active_only:
+            if not notice["enabled"]:
+                return None
+            return {"title": notice["title"], "html": render_notice(notice["body"]), "revision": notice["revision"]}
+        return dict(notice, html=render_notice(notice["body"]))
+
+    def save_notice(self, body):
+        fields = notice_fields(body)
+        with self.lock:
+            previous = self.site_notice()
+            if any(previous[key] != value for key, value in fields.items()):
+                self.accounts.set_setting("site_notice", dict(fields, revision=secrets.token_hex(12)))
+            return self.site_notice()
+
     def default_job_limit(self):
         return self.accounts.setting("max_jobs", MAX_JOBS)
 
@@ -419,7 +437,7 @@ class HostedAccess:
     def private(self, request, method, path, query, body, ctx):
         hub, user = self.hub, ctx["user"]
         if method == "GET" and path == "/api/auth/me":
-            return {"user": user, "csrf": ctx["session"]["csrf"]}
+            return {"user": user, "csrf": ctx["session"]["csrf"], "notice": hub.site_notice(active_only=True)}
         if method == "POST" and path == "/api/auth/logout":
             hub.sessions.drop(ctx["token"])
             return Reply({}, headers=self._cookie("", 0))
@@ -471,6 +489,15 @@ class HostedAccess:
             return {"people": hub.all_jobs()}
         if method == "GET" and path == "/api/admin/settings":
             return hub.site_settings()
+        if path == "/api/admin/notice" and method == "GET":
+            return hub.site_notice()
+        if method == "POST" and path in ("/api/admin/notice", "/api/admin/notice/preview"):
+            try:
+                if path.endswith("/preview"):
+                    return {"html": render_notice(notice_fields(body)["body"])}
+                return hub.save_notice(body)
+            except ValueError as exc:
+                raise HttpError(400, str(exc)) from None
         if path == "/api/admin/shared-model":
             if method == "GET":
                 return hub.shared_model()

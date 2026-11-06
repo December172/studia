@@ -165,6 +165,29 @@ code { font: 12px var(--mono); padding: 1px 5px; border-radius: 3px; background:
 .sub { margin: 4px 0 0; color: var(--text-3); font-size: 13px; }
 .empty { margin-top: 24px; padding: 28px; border-radius: 6px; text-align: center; color: var(--text-3); border: 1px dashed var(--line-2); }
 .notice { margin-top: 18px; padding: 12px 14px; border-radius: 6px; background: var(--gamboge-soft); color: var(--text-2); line-height: 1.7; }
+.notice_form .notice_text, .notice_form .notice_preview { grid-column: 1 / -1; }
+.notice_form textarea { box-sizing: border-box; width: 100%; min-height: 160px; resize: vertical; padding: 10px; border: 1px solid var(--line-2); border-radius: 4px; background: var(--paper); color: var(--text); font: 13px/1.65 var(--mono); }
+.notice_preview { padding-top: 12px; border-top: 1px solid var(--line); }
+.notice_preview > b { color: var(--text-3); font-size: 12px; }
+.notice_markdown { line-height: 1.75; overflow-wrap: anywhere; }
+.notice_markdown > :first-child { margin-top: 0; }
+.notice_markdown > :last-child { margin-bottom: 0; }
+.notice_markdown :is(h1, h2, h3, h4, h5, h6) { margin: 18px 0 8px; line-height: 1.4; }
+.notice_markdown :is(p, ul, ol, blockquote, pre) { margin: 10px 0; }
+.notice_markdown :is(ul, ol) { padding-left: 24px; }
+.notice_markdown a { color: var(--indigo); text-decoration: underline; text-underline-offset: 2px; }
+.notice_markdown blockquote { margin-left: 0; padding-left: 12px; border-left: 3px solid var(--line-2); color: var(--text-2); }
+.notice_markdown pre { padding: 12px; overflow-x: auto; border-radius: 4px; background: var(--well); }
+.notice_markdown pre code { padding: 0; background: none; white-space: pre; }
+.notice_markdown hr { border: 0; border-top: 1px solid var(--line-2); }
+.site_notice_dialog { width: min(600px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); margin: auto; padding: 0; border: 1px solid var(--line-2); border-radius: 10px; background: var(--card); color: var(--text); box-shadow: var(--shadow-pop); }
+.site_notice_dialog[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+.site_notice_dialog::backdrop { background: rgb(0 0 0 / .4); }
+.site_notice_dialog header, .site_notice_dialog footer { padding: 18px 22px; }
+.site_notice_dialog header { border-bottom: 1px solid var(--line); }
+.site_notice_dialog header h2 { margin: 0; font-size: 20px; overflow-wrap: anywhere; }
+.site_notice_dialog .notice_content { min-height: 0; padding: 18px 22px; overflow-y: auto; }
+.site_notice_dialog footer { display: flex; justify-content: flex-end; border-top: 1px solid var(--line); }
 
 /* Course hero: title, study buttons and progress on one card tinted with the course's ink. */
 .hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 28px; padding: 22px 26px 24px; border-radius: 8px;

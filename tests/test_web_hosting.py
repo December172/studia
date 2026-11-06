@@ -55,6 +55,50 @@ class HostedServerTest(unittest.TestCase):
             payload = raw.decode()
         return response.status, payload, token, set_cookie
 
+    def test_site_notice_admin_drafts_preview_publish_and_revision(self):
+        admin, csrf = self.login("admin", "admin-password")
+        self.hub.accounts.create_user("notice-reader", "reader-password")
+        reader, reader_csrf = self.login("notice-reader", "reader-password")
+        notice = {"title": "学习提醒", "body": "## 说明\n\n请看 **本次公告**。", "enabled": False}
+        self.assertIsNone(self.request("GET", "/api/auth/me", cookie=reader)[1]["notice"])
+        self.assertEqual(self.request("GET", "/api/admin/notice")[0], 401)
+        self.assertEqual(self.request("GET", "/api/admin/notice", cookie=reader)[0], 403)
+        for path in ("/api/admin/notice", "/api/admin/notice/preview"):
+            self.assertEqual(self.request("POST", path, notice, cookie=reader, csrf=reader_csrf)[0], 403)
+            self.assertEqual(self.request("POST", path, notice, cookie=admin)[0], 403)
+        post = lambda path, body: self.request("POST", path, body, cookie=admin, csrf=csrf)
+        self.assertEqual(post("/api/admin/notice", notice)[0], 200)
+        draft = self.request("GET", "/api/admin/notice", cookie=admin)[1]
+        self.assertEqual(draft["body"], notice["body"])
+        self.assertIsNone(self.request("GET", "/api/auth/me", cookie=reader)[1]["notice"])
+        preview = post("/api/admin/notice/preview", dict(notice, body="**未保存的预览**"))[1]
+        self.assertIn("<strong>未保存的预览</strong>", preview["html"])
+        self.assertEqual(self.request("GET", "/api/admin/notice", cookie=admin)[1], draft)
+        notice["enabled"] = True
+        published = post("/api/admin/notice", notice)[1]
+        active = self.request("GET", "/api/auth/me", cookie=reader)[1]["notice"]
+        self.assertEqual(active["revision"], published["revision"])
+        self.assertNotIn("body", active)
+        self.assertIn("<strong>本次公告</strong>", active["html"])
+        self.assertEqual(post("/api/admin/notice", notice)[1]["revision"], published["revision"])
+        updated = post("/api/admin/notice", dict(notice, title="更新后的提醒"))[1]
+        self.assertNotEqual(updated["revision"], published["revision"])
+        restarted = Hub(self.hub.data, self.hub.public_url, key=self.hub.key)
+        self.addCleanup(restarted.accounts.db.close)
+        self.assertEqual(restarted.site_notice(), updated)
+        self.assertEqual(post("/api/admin/notice", dict(notice, enabled=False))[0], 200)
+        self.assertIsNone(self.request("GET", "/api/auth/me", cookie=reader)[1]["notice"])
+
+    def test_invalid_site_notice_keeps_previous_content(self):
+        admin, csrf = self.login("admin", "admin-password")
+        post = lambda body: self.request("POST", "/api/admin/notice", body, cookie=admin, csrf=csrf)
+        original = post({"title": "原公告", "body": "正常正文", "enabled": True})[1]
+        for invalid in ({"body": " ", "enabled": True}, {"title": "x" * 101}, {"body": "x" * 10001},
+                        {"enabled": "false"}, {"body": 42}):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(post(invalid)[0], 400)
+                self.assertEqual(self.request("GET", "/api/admin/notice", cookie=admin)[1], original)
+
     def test_first_visit_sets_up_the_admin_with_the_logged_code(self):
         with tempfile.TemporaryDirectory() as directory:
             hub = Hub(directory, "http://127.0.0.1:%d" % self.port, key=os.urandom(32))
