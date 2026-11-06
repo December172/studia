@@ -33,6 +33,7 @@ class PeerQuestionsTest(unittest.TestCase):
         posts(hub, "bob", [answer(2), ask(4, 15)])
         posts(hub, "cat", [ask(5, 12), answer(4)], sharing=False)  # turned 站内互答 off: keeps its questions, answers still count
         self.assertEqual([(q["id"], q["ours"]) for q in hub.peer_questions("me", 1, 7)], [(4, 1), (2, 2)])
+        self.assertEqual(len(hub.peer_questions("me", 1, 7)[1]["replies"]), 2)  # what classmates already said, to say it differently
 
 
 class BoardOrderTest(unittest.TestCase):
