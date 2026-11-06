@@ -191,10 +191,10 @@ code { font: 12px var(--mono); padding: 1px 5px; border-radius: 3px; background:
 .ruler i:last-child span { transform: translateX(-100%); }
 .score_note b { font: 700 14px var(--mono); color: var(--text); }
 .qa_head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 14px 16px; }
-.qa_score { font-size: 13px; color: var(--text-3); }
+.qa_score { font-size: 13px; color: var(--text-3); white-space: nowrap; }
 .qa_score b { font: 600 24px var(--mono); color: var(--text); }
 .qa_score .of, .qa_num .of { margin: 0 3px 0 1px; font: 600 13px var(--mono); color: var(--text-4); }
-.qa_head small { font-size: 11.5px; color: var(--text-4); }
+.qa_head small { font-size: 11.5px; line-height: 1.6; color: var(--text-4); text-align: right; }
 .qa_lanes { display: grid; grid-template-columns: 1fr 1fr; }
 .qa_lane { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px 16px; }
 .qa_lane + .qa_lane { border-left: 1px solid var(--line); }
