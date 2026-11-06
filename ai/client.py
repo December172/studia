@@ -215,7 +215,8 @@ class AIClient:
             else:
                 choice = payload["choices"][0]
                 if choice.get("finish_reason") != "stop":
-                    raise ValueError("incomplete response")
+                    # 推理模型可能把额度花在思考上，正文被截断；把原因带回给调用方。
+                    raise ValueError("finish_reason=%s" % choice.get("finish_reason"))
                 content = choice["message"]["content"].strip()
             if content.startswith("```"):
                 content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content)
@@ -232,5 +233,8 @@ class AIClient:
                     and 0 <= confidence <= 1 and math.isfinite(confidence)):
                 parsed["confidence"] = confidence
             return parsed
-        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
-            raise AIResponseError("AI 响应不是完整的答案 JSON；本题未作答") from None
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
+            # 原因只描述响应的形状，不含题目或课程内容，可以安全地写进错误和日志。
+            reason = " ".join(str(exc).split())
+            raise AIResponseError("AI 响应不是完整的答案 JSON；本题未作答" +
+                                  ("（%s）" % reason if reason else "")) from None
