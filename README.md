@@ -1,3 +1,5 @@
+# **本项目废弃。请移步[Course Flow](https://github.com/Course-Flow-Lab/courseflow-framework)**
+
 # Studia · 课程学习与 AI 答题助手
 
 智慧职教和智慧树的学习工具：自动学习课程、AI 答题并交卷、导出题目与答案。有终端版和网页版，也可以部署到服务器给多人用。
